@@ -333,12 +333,15 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
+    /// A fresh folder per test. Tests run in parallel and Windows clocks tick in 100 ns steps,
+    /// so a timestamp alone can collide; the counter can't.
     fn temp() -> (Archive, PathBuf) {
-        let root = std::env::temp_dir().join(format!("cluelyrs-archive-{}-{}", std::process::id(), unix_now_nanos()));
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!("cluelyrs-archive-{}-{n}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
         (Archive::at(root.clone()), root)
     }
-
-    fn unix_now_nanos() -> u128 { SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos() }
 
     #[test]
     fn records_transcript_turns_and_screenshots_then_lists_newest_first() {
