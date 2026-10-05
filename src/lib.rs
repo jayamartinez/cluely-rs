@@ -6,5 +6,6 @@
 pub mod archive;
 pub mod assets;
 pub mod hotkeys;
+pub mod settings;
 pub mod theme;
 pub mod win;
