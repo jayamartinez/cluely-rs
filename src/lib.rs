@@ -4,5 +4,6 @@
 //! module is testable on its own.
 
 pub mod assets;
+pub mod hotkeys;
 pub mod theme;
 pub mod win;
