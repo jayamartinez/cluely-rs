@@ -991,6 +991,7 @@ dependencies = [
  "rubato",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "ureq",
  "windows 0.61.3",
  "xcap",
