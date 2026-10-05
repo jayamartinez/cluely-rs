@@ -21,6 +21,7 @@ pub mod secrets;
 pub mod sessions_window;
 pub mod settings;
 pub mod settings_view;
+pub mod stt;
 pub mod theme;
 pub mod ui;
 pub mod win;
