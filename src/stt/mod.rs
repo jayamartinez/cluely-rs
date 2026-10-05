@@ -2,6 +2,7 @@
 //! consumes provider-independent [`TranscriptEvent`]s.
 
 pub mod event;
+pub mod parakeet;
 pub mod provider;
 pub mod scripted;
 pub mod transcriber;
