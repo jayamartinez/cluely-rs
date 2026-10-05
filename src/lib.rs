@@ -8,6 +8,8 @@ pub mod assets;
 pub mod hotkeys;
 pub mod input;
 pub mod markdown;
+pub mod providers;
+pub mod secrets;
 pub mod settings;
 pub mod theme;
 pub mod ui;
