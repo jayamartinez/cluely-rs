@@ -5,6 +5,8 @@
 
 pub mod archive;
 pub mod assets;
+pub mod chat;
+pub mod claude_cli;
 pub mod hotkeys;
 pub mod input;
 pub mod markdown;
