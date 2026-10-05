@@ -9,4 +9,5 @@ pub mod hotkeys;
 pub mod input;
 pub mod settings;
 pub mod theme;
+pub mod ui;
 pub mod win;
