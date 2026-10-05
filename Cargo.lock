@@ -844,6 +844,8 @@ name = "cluely-rs"
 version = "0.1.0"
 dependencies = [
  "gpui",
+ "raw-window-handle",
+ "windows 0.61.3",
 ]
 
 [[package]]
