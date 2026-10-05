@@ -1,0 +1,9 @@
+[package]
+name = "cluely-rs"
+version = "0.1.0"
+edition = "2024"
+description = "A native, keyboard-driven assistant overlay for Windows built on GPUI"
+publish = false
+
+[dependencies]
+gpui = "0.2.2"
