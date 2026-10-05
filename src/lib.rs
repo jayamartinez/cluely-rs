@@ -24,5 +24,6 @@ pub mod settings;
 pub mod settings_view;
 pub mod stt;
 pub mod theme;
+pub mod transcript;
 pub mod ui;
 pub mod win;
