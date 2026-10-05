@@ -3,6 +3,7 @@
 //! The binary (`main.rs`) only opens the overlay window; everything else lives here so each
 //! module is testable on its own.
 
+pub mod archive;
 pub mod assets;
 pub mod hotkeys;
 pub mod theme;
