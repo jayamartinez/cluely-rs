@@ -47,3 +47,50 @@ These are CMake options and compiler flags, not source changes. To undo one, del
 - **Git's bash:** `BASH_EXECUTABLE` is pointed at Git for Windows' bash. Upstream applies its own in-tree ggml patches
   with bash at configure time, and one of them speeds up CPU matrix multiplication. Applying them modifies files inside
   `third_party/parakeet.cpp/third_party/ggml`, so `.gitmodules` sets `ignore = dirty` for the submodule.
+
+### 3. Stream reset after each utterance (provider behaviour)
+
+- **What:** `stt::parakeet::session` replaces the parakeet.cpp stream after every end-of-utterance. It also replaces a
+  stream that has run 20 s and then gone quiet for 1 s. On each reset, the last few seconds of audio after the cut are
+  replayed into the new stream from a rolling buffer, so nothing that was still being decoded is lost. This logic lives
+  only in the Parakeet provider; nothing else knows streams are replaced.
+- **Why:** with v0.6.0, a stream kept running across utterances misses many end-of-utterance signals and drifts in its
+  output. In the run below, the single stream got 5 of the 8 EOUs per pass, from the first pass on, and its text varied
+  between identical passes.
+- **To remove:** when a parakeet.cpp release keeps EOU detection on long streams, set `MAX_STREAM_MS` to infinity and
+  stop resetting on events in `Session::feed_decoder`. Then rerun `parakeet_bench long` to confirm.
+
+### Measurements
+
+All measurements were taken on 2026-10-05, on a 16-thread desktop running Windows 11, with a Rust debug build (the
+native code is always optimized). The input was `dev/make-bench-audio.ps1` output: 33.6 s, 8 utterance ends per pass.
+
+**Thread sweep.** `cargo run --example parakeet_bench -- <wav> sweep`. RTF is decode time divided by audio time; lower
+is faster.
+
+| Threads | RTF, 1 stream | RTF, 2 streams | p95 per-block decode, 2 streams |
+|---|---|---|---|
+| 2 | 0.201 | 0.401 | 63.6 ms |
+| 4 | 0.129 | 0.247 | 38.9 ms |
+| 8 | 0.107 | 0.216 | 35.0 ms |
+
+**Real time, Me and Them together.** `parakeet_bench <wav> realtime`. Latency runs from the EOU point in the audio to
+its event.
+
+| Threads | CPU (cores) | EOU latency p50 / p95 | Peak working set |
+|---|---|---|---|
+| 2 | 0.84 | ~157 / ~200 ms | 216 MB |
+| 4 | 1.03 | ~145 / ~165 ms | 225 MB |
+| 8 | 1.71 | ~142 / ~166 ms | 216 MB |
+
+With OpenMP on, the same 4-thread run used 5.31 cores, at a p95 of ~171 ms.
+
+**Long run.** `parakeet_bench <wav> long --reps 20`: 11.5 minutes of the same audio repeated.
+
+| | EOUs (160 expected) | Words per quarter |
+|---|---|---|
+| One raw stream | 93 (58%) | 326 / 311 / 333 / 314 |
+| Provider (with resets) | 158 (98.8%) | 315 / 315 / 315 / 315 |
+
+The provider's two missed EOUs fell in different passes, and its words were identical in every quarter, so no text was
+lost. Endpointing commits on silence when an EOU doesn't arrive.
