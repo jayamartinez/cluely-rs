@@ -5,6 +5,7 @@
 
 pub mod archive;
 pub mod assets;
+pub mod capture;
 pub mod chat;
 pub mod claude_cli;
 pub mod codex;
