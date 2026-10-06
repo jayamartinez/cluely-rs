@@ -14,6 +14,10 @@ use crate::stt::{EventKind, Generation, TranscriptEvent};
 /// The question score at which an utterance counts as a question for metrics and listeners.
 pub const QUESTION_THRESHOLD: f32 = 0.5;
 
+/// Recognizers emit words this far behind the audio at most while someone is still talking
+/// (Parakeet measured 160–640 ms between partials), so only quiet beyond it counts as silence.
+const TEXT_LAG_MS: f64 = 400.0;
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Update {
     Provisional { source: Source, id: UtteranceId, stable: String, unstable: String },
@@ -100,9 +104,7 @@ impl LiveTranscript {
         let signals = Signals {
             has_text: !provisional.text().trim().is_empty(),
             end_of_utterance: provisional.end_of_utterance_ms.is_some(),
-            // Measured from the later of the last voice and the last text, so words the
-            // recognizer is still emitting for this utterance aren't cut off into the next one.
-            silence_ms: self.silence[slot(source)].silence_since(provisional.end_ms),
+            silence_ms: self.silence_for(source, provisional.end_ms),
             assessment: assess(provisional.text()),
         };
         let Decision::Commit(reason) = decide(&signals, &self.config) else { return None };
@@ -110,6 +112,17 @@ impl LiveTranscript {
         self.mark(Stage::UtteranceCommitted, source, utterance.id, Some(utterance.end_ms));
         self.questions.remove(&utterance.id);
         Some(Update::Committed { utterance, reason })
+    }
+
+    /// How long the speaker has been quiet, from two independent signals: audio energy since
+    /// the later of the last voice and the last text (so words still arriving aren't cut off),
+    /// and the recognizer producing nothing new. The second one allows for its normal lag,
+    /// and covers microphones whose noise bed hides the energy gaps.
+    fn silence_for(&self, source: Source, text_end_ms: f64) -> f64 {
+        let tracker = &self.silence[slot(source)];
+        let energy = tracker.silence_since(text_end_ms);
+        let no_new_text = (tracker.latest_end_ms() - text_end_ms - TEXT_LAG_MS).max(0.0);
+        energy.max(no_new_text)
     }
 
     fn mark(&self, stage: Stage, source: Source, id: UtteranceId, audio_ms: Option<f64>) {
@@ -136,7 +149,21 @@ mod tests {
     fn partial(source: Source, end_ms: f64, text: &str) -> TranscriptEvent {
         event(source, end_ms, EventKind::Partial { text: text.into(), stable_hint: Some(usize::MAX) })
     }
+    /// 10 ms chunks at `level`. Speech-like levels get the short dips between syllables that
+    /// real speech has (the noise floor is learned from them), so 20 ms of every 100 ms is quiet.
     fn audio(live: &mut LiveTranscript, source: Source, from_ms: f64, to_ms: f64, level: f32) -> Vec<Update> {
+        let mut updates = Vec::new();
+        let mut t = from_ms;
+        while t < to_ms {
+            let dip = level >= 0.01 && (t / 10.0).round() as i64 % 10 >= 8;
+            let chunk_level = if dip { level * 0.1 } else { level };
+            updates.extend(live.on_audio(&AudioChunk { source, start_ms: t, samples: vec![chunk_level; 160] }));
+            t += 10.0;
+        }
+        updates
+    }
+    /// A constant level with no dips: a microphone's noise bed.
+    fn noise(live: &mut LiveTranscript, source: Source, from_ms: f64, to_ms: f64, level: f32) -> Vec<Update> {
         let mut updates = Vec::new();
         let mut t = from_ms;
         while t < to_ms { updates.extend(live.on_audio(&AudioChunk { source, start_ms: t, samples: vec![level; 160] })); t += 10.0; }
@@ -170,7 +197,9 @@ mod tests {
         live.on_event(&partial(Source::Them, 1000.0, "would you use redis here or"));
         live.on_event(&event(Source::Them, 1000.0, EventKind::EndOfUtterance { text: "would you use redis here or".into() }));
         assert!(committed(&audio(&mut live, Source::Them, 1000.0, 1600.0, 0.001)).is_empty());
-        audio(&mut live, Source::Them, 1600.0, 2400.0, 0.2);
+        audio(&mut live, Source::Them, 1600.0, 1900.0, 0.2);
+        live.on_event(&partial(Source::Them, 1900.0, "would you use redis here or avoid"));
+        audio(&mut live, Source::Them, 1900.0, 2400.0, 0.2);
         live.on_event(&partial(Source::Them, 2400.0, "would you use redis here or avoid caching entirely"));
         let updates = audio(&mut live, Source::Them, 2400.0, 3200.0, 0.001);
         assert_eq!(committed(&updates), [("would you use redis here or avoid caching entirely", Reason::Silence)]);
@@ -207,6 +236,27 @@ mod tests {
         assert!(late.is_empty(), "{late:?}");
         assert!(committed(&audio(&mut live, Source::Them, 3400.0, 5400.0, 0.001)).is_empty());
         assert_eq!(live.state().committed(Source::Them).len(), 1);
+    }
+
+    /// Seen on a USB microphone: a constant noise bed kept every chunk "voiced", so Me never
+    /// endpointed and one line grew forever. Quiet is also inferred from the recognizer.
+    #[test]
+    fn a_microphone_that_never_reads_as_silent_still_endpoints_when_words_stop() {
+        let mut live = LiveTranscript::new(EndpointConfig::default(), None);
+        live.set_generation(GEN, "parakeet-realtime");
+        // Speech at 0.05 over a 0.03 noise bed never clears the voice threshold (3× the floor).
+        noise(&mut live, Source::Me, 0.0, 3000.0, 0.03);
+        noise(&mut live, Source::Me, 3000.0, 4500.0, 0.05);
+        live.on_event(&partial(Source::Me, 4400.0, "i would start with a write through cache"));
+        assert!(live.silence_for(Source::Me, 4400.0) < 1.0);
+        let updates = noise(&mut live, Source::Me, 4500.0, 5600.0, 0.03);
+        assert_eq!(committed(&updates), [("i would start with a write through cache", Reason::Silence)]);
+        // With an EOU the commit follows the recognizer going quiet too.
+        noise(&mut live, Source::Me, 5600.0, 6600.0, 0.05);
+        live.on_event(&partial(Source::Me, 6500.0, "then i would add invalidation on every write"));
+        live.on_event(&event(Source::Me, 6600.0, EventKind::EndOfUtterance { text: "then i would add invalidation on every write".into() }));
+        let updates = noise(&mut live, Source::Me, 6600.0, 7400.0, 0.03);
+        assert_eq!(committed(&updates), [("then i would add invalidation on every write", Reason::EndOfUtterance)]);
     }
 
     #[test]

@@ -134,7 +134,9 @@ impl Overlay {
                     && let Err(error) = recorder.add_line(Line { at_ms, speaker: speaker(line.source), text: line.text.clone() }) {
                     eprintln!("transcript line could not be saved: {error}");
                 }
-                self.transcript.push(line);
+                // Sources commit independently, so keep the transcript in the order it was spoken.
+                let at = self.transcript.iter().rposition(|earlier| earlier.start_ms <= line.start_ms).map_or(0, |i| i + 1);
+                self.transcript.insert(at, line);
             }
             Update::Error { source, message, fatal } => {
                 if fatal {
