@@ -1,0 +1,5 @@
+[submodule "third_party/parakeet.cpp"]
+	path = third_party/parakeet.cpp
+	url = https://github.com/mudler/parakeet.cpp
+	# Upstream's configure step patches its ggml checkout in place (see PATCHES.md).
+	ignore = dirty

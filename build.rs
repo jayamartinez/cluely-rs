@@ -1,0 +1,101 @@
+//! Builds parakeet.cpp (pinned submodule) as static libraries and links them, plus the small
+//! thread-count shim in `native/`. See PATCHES.md for what is changed relative to upstream.
+
+use std::env;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+fn main() {
+    println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=native/parakeet_threads.cpp");
+    println!("cargo:rerun-if-env-changed=CLUELYRS_NINJA");
+
+    let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+    let source = manifest.join("third_party/parakeet.cpp");
+    if !source.join("CMakeLists.txt").exists() || !source.join("third_party/ggml/CMakeLists.txt").exists() {
+        panic!(
+            "parakeet.cpp sources are missing. Run:\n  git submodule update --init third_party/parakeet.cpp\n  \
+             git -C third_party/parakeet.cpp submodule update --init third_party/ggml"
+        );
+    }
+
+    let mut config = cmake::Config::new(&source);
+    // Always optimize: a debug ggml is far too slow for real-time inference, even in dev builds.
+    config.profile("Release")
+        .define("BUILD_SHARED_LIBS", "OFF")
+        .define("PARAKEET_SHARED", "OFF")
+        .define("PARAKEET_BUILD_CLI", "OFF")
+        .define("PARAKEET_BUILD_SERVER", "OFF")
+        .define("PARAKEET_WITH_CED", "OFF")
+        .define("PARAKEET_WITH_VOICEDETECT", "OFF")
+        // Portable x86-64 (AVX2/FMA/F16C) rather than tuned to the build machine.
+        .define("GGML_NATIVE", "OFF")
+        // MSVC's OpenMP runtime spins idle threads between decodes: ~5x the CPU of ggml's own
+        // thread pool for two live streams, with no latency benefit (PATCHES.md).
+        .define("GGML_OPENMP", "OFF")
+        // Setting flags replaces CMake's MSVC defaults, so restore them (exceptions and RTTI matter:
+        // parakeet.cpp reports load errors with C++ exceptions).
+        .cflag("/DWIN32 /D_WINDOWS")
+        .cxxflag("/DWIN32 /D_WINDOWS /GR /EHsc")
+        // Upstream v0.6.0 uses POSIX fseeko/ftello, which MSVC spells _fseeki64/_ftelli64.
+        .cxxflag("/Dfseeko=_fseeki64")
+        .cxxflag("/Dftello=_ftelli64")
+        .build_target("parakeet");
+    // Upstream applies its in-tree ggml patches (one is a CPU matmul speedup) with bash at
+    // configure time. Point it at Git's bash: a `bash` on PATH may be WSL's, which can't run
+    // against Windows paths. Without bash the build still works, just without that speedup.
+    match git_bash() {
+        Some(bash) => { config.define("BASH_EXECUTABLE", bash); }
+        None => println!("cargo:warning=Git bash not found; building parakeet.cpp without its ggml CPU patches (slower)"),
+    }
+    if let Some(ninja) = find_ninja() {
+        // Ninja avoids MSBuild's MAX_PATH failures on deep target directories.
+        config.generator("Ninja").define("CMAKE_MAKE_PROGRAM", ninja);
+    }
+    let out = config.build();
+
+    let mut dirs: Vec<PathBuf> = ["parakeet.lib", "ggml.lib", "ggml-base.lib", "ggml-cpu.lib"].iter()
+        .map(|lib| find_file(&out.join("build"), lib).unwrap_or_else(|| panic!("{lib} was not produced by the parakeet.cpp build")))
+        .filter_map(|path| path.parent().map(Path::to_path_buf))
+        .collect();
+    dirs.sort();
+    dirs.dedup();
+    for dir in dirs { println!("cargo:rustc-link-search=native={}", dir.display()); }
+    for lib in ["parakeet", "ggml", "ggml-cpu", "ggml-base"] { println!("cargo:rustc-link-lib=static={lib}"); }
+    println!("cargo:rustc-link-lib=advapi32");
+
+    cc::Build::new()
+        .cpp(true)
+        .file("native/parakeet_threads.cpp")
+        .flag_if_supported("/std:c++17")
+        .compile("cluelyrs_parakeet_shim");
+}
+
+fn find_file(dir: &Path, name: &str) -> Option<PathBuf> {
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(found) = find_file(&path, name) { return Some(found); }
+        } else if path.file_name().is_some_and(|n| n.eq_ignore_ascii_case(name)) {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn git_bash() -> Option<PathBuf> {
+    let git = Command::new("where").arg("git").output().ok()?;
+    let git = String::from_utf8_lossy(&git.stdout).lines().next()?.trim().to_string();
+    // git.exe lives in Git\cmd, Git\bin or Git\mingw64\bin; bash is Git\bin\bash.exe.
+    Path::new(&git).ancestors().map(|dir| dir.join("bin").join("bash.exe")).find(|bash| bash.exists())
+}
+
+fn find_ninja() -> Option<PathBuf> {
+    if let Some(path) = env::var_os("CLUELYRS_NINJA") { return Some(PathBuf::from(path)); }
+    if Command::new("ninja").arg("--version").output().is_ok_and(|o| o.status.success()) { return Some(PathBuf::from("ninja")); }
+    let vswhere = Path::new(r"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe");
+    let install = Command::new(vswhere).args(["-latest", "-products", "*", "-property", "installationPath"]).output().ok()?;
+    let install = String::from_utf8_lossy(&install.stdout).trim().to_string();
+    let ninja = Path::new(&install).join(r"Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja\ninja.exe");
+    ninja.exists().then_some(ninja)
+}

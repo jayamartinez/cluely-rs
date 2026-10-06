@@ -7,7 +7,9 @@ subscription, your Claude subscription, or your own API key.
 ## Requirements
 
 - Windows 10 2004 or later (hiding from screen capture needs `WDA_EXCLUDEFROMCAPTURE`)
-- Rust stable with the MSVC toolchain (Visual Studio 2022 Build Tools)
+- Rust stable with the MSVC toolchain (Visual Studio 2022 Build Tools, including its CMake and Ninja components)
+- CMake 3.18 or later and [Git for Windows](https://git-scm.com/download/win) (its bash applies parakeet.cpp's ggml
+  patches during the build)
 - Optional, for subscription answers:
   - [Codex CLI](https://github.com/openai/codex) signed in with ChatGPT, for **ChatGPT subscription**
   - [Claude Code](https://claude.com/claude-code) signed in with a Claude plan, for **Claude subscription**
@@ -15,9 +17,17 @@ subscription, your Claude subscription, or your own API key.
 ## Run
 
 ```powershell
+git clone git@github.com:jayamartinez/cluely-rs.git
+cd cluely-rs
+git submodule update --init third_party/parakeet.cpp
+git -C third_party/parakeet.cpp submodule update --init third_party/ggml
+
 cargo run            # debug build with a console for logs
 cargo run --release  # windowless release build
 ```
+
+Only those two submodules are needed; parakeet.cpp's optional CED and voice-detect submodules aren't built. ggml's
+paths are deep, so in a long folder path run `git config --global core.longpaths true` first.
 
 ## Using it
 
@@ -53,6 +63,7 @@ lengths, timeline, transcript, answers and the screenshots they used, plus searc
 | Settings | `%APPDATA%\CluelyRS\settings.json` |
 | Sessions and screenshots | `%APPDATA%\CluelyRS\sessions\` (kept 7 days, 30 days or forever) |
 | API keys | Windows Credential Manager, service `CluelyRS` |
+| Speech models | `%LOCALAPPDATA%\CluelyRS\models\` (downloaded when first needed, ~176 MB for Parakeet) |
 
 Nothing is uploaded except the requests sent to the provider you choose.
 
@@ -70,11 +81,23 @@ $env:CLUELYRS_DATA_DIR = "$env:TEMP\cluelyrs-demo"; cargo run
 Latency: set `CLUELYRS_METRICS=1` to export pipeline timings as JSON Lines to `%LOCALAPPDATA%\CluelyRS\metrics\`,
 then compare runs with `cargo run --example latency_report -- <file.jsonl>...` (grouped per provider).
 
+Transcription: `cargo run --example parakeet_bench -- download` installs the Parakeet model, and the same example
+benchmarks speed, latency, CPU, memory and long-run reliability (usage at the top of `examples/parakeet_bench.rs`; test
+speech from `dev/make-bench-audio.ps1`). Changes to third-party code and builds are documented in
+[PATCHES.md](PATCHES.md).
+
 `CLUELYRS_ALLOW_CAPTURE=1` lets the overlay appear in screenshots while developing. Live provider tests are ignored by
 default (`cargo test -- --ignored` with the variables documented in `claude_cli.rs` and `codex.rs`).
 
 ## Status
 
 Working: overlay, keybinds, click-through, capture hiding, providers, screenshot on send, sessions and AI notes.
-Not built yet: live transcription (Parakeet v3 with Whisper fallback), so answers rely on the screenshot and your
-typed question for now.
+In progress: live transcription. The on-device Parakeet Realtime provider, transcript state and endpointing exist but
+aren't shown in the overlay yet, so answers rely on the screenshot and your typed question for now.
+
+## Third-party
+
+- [parakeet.cpp](https://github.com/mudler/parakeet.cpp) (MIT) and [ggml](https://github.com/ggml-org/ggml) (MIT),
+  built from the pinned submodule; see [PATCHES.md](PATCHES.md).
+- [NVIDIA Parakeet Realtime EOU 120M](https://huggingface.co/nvidia/parakeet_realtime_eou_120m-v1), NVIDIA Open Model
+  License. Downloaded at runtime, not distributed with CluelyRS.
