@@ -14,6 +14,7 @@ pub mod codex;
 pub mod hotkeys;
 pub mod input;
 pub mod markdown;
+pub mod metrics;
 pub mod notes;
 pub mod overlay;
 pub mod providers;

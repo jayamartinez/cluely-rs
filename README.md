@@ -67,6 +67,9 @@ cargo clippy --all-targets
 $env:CLUELYRS_DATA_DIR = "$env:TEMP\cluelyrs-demo"; cargo run
 ```
 
+Latency: set `CLUELYRS_METRICS=1` to export pipeline timings as JSON Lines to `%LOCALAPPDATA%\CluelyRS\metrics\`,
+then compare runs with `cargo run --example latency_report -- <file.jsonl>...` (grouped per provider).
+
 `CLUELYRS_ALLOW_CAPTURE=1` lets the overlay appear in screenshots while developing. Live provider tests are ignored by
 default (`cargo test -- --ignored` with the variables documented in `claude_cli.rs` and `codex.rs`).
 
