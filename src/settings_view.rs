@@ -6,10 +6,10 @@ use gpui::{Context, Div, Focusable, FontWeight, IntoElement, MouseButton, Parent
 use crate::archive::Retention;
 use crate::hotkeys::{Action, DEFAULTS};
 use crate::overlay::Overlay;
-use crate::settings::{
-    AnswerStyle, AudioSource, ClaudeModel, Language, Provider, Settings, SpeechEngine, WhisperModel,
-};
+use crate::settings::{AnswerStyle, AudioSource, ClaudeModel, Provider, Settings};
+use crate::stt::parakeet::MODEL;
 use crate::theme;
+use crate::transcript_view::model_size_label;
 use crate::ui;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -220,31 +220,52 @@ impl Overlay {
 
     fn listening_tab(&self, cx: &mut Context<Self>) -> Div {
         let s = &self.store.value;
-        let mut languages = ui::segmented();
-        for (index, language) in Language::ALL.into_iter().enumerate() {
-            languages = languages.child(ui::segment(("language", index), language.label(), s.language == language)
-                .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, window, cx| this.update_settings(|s| s.language = language, window, cx))));
-        }
-        let engine_note: SharedString = match (s.speech_engine, s.effective_engine()) {
-            (SpeechEngine::Parakeet, SpeechEngine::Whisper) => format!("Parakeet v3 doesn't support {}, so Whisper transcribes it.", s.language.label()).into(),
-            (SpeechEngine::Parakeet, _) => "Parakeet TDT 0.6B v3 · fastest, 25 European languages, runs locally.".into(),
-            _ => "Whisper · 99 languages, runs locally. A GPU makes larger models fast.".into(),
-        };
-        let mut tab = div().flex().flex_col().gap(px(16.0))
-            .child(field("Speech engine", div().flex().flex_col().gap(px(6.0))
-                .child(choice("engine", &[(SpeechEngine::Parakeet, "Parakeet v3"), (SpeechEngine::Whisper, "Whisper")], s.speech_engine, |s, v| s.speech_engine = v, cx))
-                .child(div().text_size(px(12.0)).text_color(theme::muted()).child(engine_note))))
-            .child(field("Language", languages));
-        if s.effective_engine() == SpeechEngine::Whisper {
-            tab = tab.child(field("Whisper model", choice("whisper",
-                &[(WhisperModel::Small, "Small · fast"), (WhisperModel::Turbo, "Turbo · balanced"), (WhisperModel::Large, "Large · most accurate")],
-                s.whisper_model, |s, v| s.whisper_model = v, cx)));
-        }
-        tab.child(field("Listen to", choice("source",
-            &[(AudioSource::Both, "Desktop + mic"), (AudioSource::Desktop, "Desktop only"), (AudioSource::Microphone, "Mic only")],
-            s.audio_source, |s, v| s.audio_source = v, cx)))
+        div().flex().flex_col().gap(px(16.0))
+            .child(toggle("transcribe", "Transcribe conversations", "Runs NVIDIA Parakeet on this PC while Live is on. Nothing is sent anywhere.",
+                s.transcribe, |s, v| s.transcribe = v, cx))
+            .child(field("Local model", self.model_row(cx)))
+            .child(field("Listen to", choice("source",
+                &[(AudioSource::Both, "Desktop + mic"), (AudioSource::Desktop, "Desktop only"), (AudioSource::Microphone, "Mic only")],
+                s.audio_source, |s, v| s.audio_source = v, cx)))
             .child(div().text_size(px(12.0)).text_color(theme::muted())
-                .child("Desktop and mic are transcribed separately, so the transcript can tell You from Them."))
+                .child("Desktop and mic are transcribed separately, so the transcript can tell Me from Them. English only for now."))
+    }
+
+    /// The Parakeet model: installed, downloading (with progress and Cancel), or a Download button.
+    fn model_row(&self, cx: &mut Context<Self>) -> Div {
+        let button = |id: &'static str, label: SharedString, primary: bool| {
+            let base = div().id(id).flex_none().px(px(12.0)).py(px(6.0)).rounded(px(9.0)).cursor_pointer().text_size(px(12.0)).font_weight(FontWeight::SEMIBOLD).child(label);
+            if primary { base.bg(theme::accent()).text_color(theme::accent_ink()) } else { base.border_1().border_color(theme::hairline()).text_color(theme::body()) }
+        };
+        let trailing: gpui::AnyElement = if let Some(progress) = self.download_progress() {
+            div().flex().items_center().gap(px(10.0))
+                .child(div().w(px(120.0)).h(px(6.0)).rounded_full().bg(theme::hairline())
+                    .child(div().h_full().rounded_full().bg(theme::accent()).w(px(120.0 * progress.clamp(0.0, 1.0) as f32))))
+                .child(div().w(px(36.0)).font_family(theme::MONO).text_size(px(11.0)).text_color(theme::muted()).child(format!("{:.0}%", progress * 100.0)))
+                .child(button("cancel-download", "Cancel".into(), false)
+                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| { this.cancel_download(); cx.notify(); })))
+                .into_any_element()
+        } else if self.model_installed {
+            div().text_size(px(12.0)).text_color(theme::ok()).child("Installed").into_any_element()
+        } else {
+            button("download-model", format!("Download {}", model_size_label(&MODEL)).into(), true)
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| this.download_model(window, cx)))
+                .into_any_element()
+        };
+        let mut row = div().flex().flex_col().gap(px(8.0))
+            .child(div().flex().items_center().gap(px(12.0)).px(px(12.0)).py(px(10.0)).rounded(px(12.0)).border_1().border_color(theme::hairline())
+                .child(div().flex().flex_col().gap(px(1.0)).flex_1().min_w_0()
+                    .child(div().text_size(px(13.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child("Parakeet Realtime EOU 120M"))
+                    .child(div().text_size(px(12.0)).text_color(theme::muted()).child("NVIDIA · on-device · English · detects when a sentence ends")))
+                .child(trailing));
+        if let Some(notice) = self.model_notice.clone() {
+            row = row.child(div().text_size(px(12.0)).text_color(theme::accent_soft()).child(notice));
+        }
+        row.child(div().flex().flex_wrap().items_center().gap(px(6.0)).text_size(px(12.0)).text_color(theme::muted())
+            .child("Downloaded from Hugging Face and verified against a pinned checksum ·")
+            .child(div().id("model-license").cursor_pointer().text_color(theme::accent_soft())
+                .on_mouse_down(MouseButton::Left, cx.listener(|_, _, _, cx| cx.open_url(MODEL.license_url)))
+                .child("NVIDIA Open Model License ↗")))
     }
 
     fn keys_tab(&self) -> Div {

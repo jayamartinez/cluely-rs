@@ -1,6 +1,6 @@
-//! The overlay: a draggable pill (mark · Start/live timer · Hide · Stop) above one
-//! glass panel. Spike scope: layout, live state, keybind movement and scrolling.
-//! Answers are placeholder text until the provider slice lands.
+//! The overlay: a draggable pill (mark · Start/live timer · Hide · Stop) above one glass
+//! panel with the live transcript, the answer thread, quick actions and the composer.
+//! Listening (capture, transcription, endpointing) runs off this thread; see `transcript_view`.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -19,7 +19,9 @@ use windows::Win32::Foundation::HWND;
 use crate::answer::{self, Exchange};
 use crate::archive::{self, Archive, Recorder};
 use crate::input::{InputEvent, TextInput};
+use crate::listening::{self, Listening};
 use crate::settings::Provider;
+use crate::transcript_view::{Download, ProvisionalLine, TranscriptLine};
 use crate::sessions_window::{self, SessionsWindow};
 use crate::hotkeys::{Action, Hotkeys};
 use crate::settings::{Settings, Store};
@@ -92,12 +94,25 @@ pub struct Overlay {
     pub(crate) claude_status: Option<crate::chat::SubscriptionStatus>,
     pub(crate) signing_in: bool,
     /// The Live session being saved to History, when saving is on.
-    recorder: Option<Recorder>,
+    pub(crate) recorder: Option<Recorder>,
     /// The held-key loop that is currently running, if any.
     motion: Option<Motion>,
-    live_since: Option<Instant>,
+    pub(crate) live_since: Option<Instant>,
     turns: Vec<Turn>,
     scroll: ScrollHandle,
+    /// The capture + transcription pipeline while Live is transcribing.
+    pub(crate) listening: Option<Listening>,
+    pub(crate) listening_status: Option<listening::Status>,
+    /// Bumped on every pipeline start, so a replaced pipeline's messages are ignored.
+    pub(crate) listening_epoch: u64,
+    /// Committed transcript of the current Live session, with source and timestamps.
+    pub(crate) transcript: Vec<TranscriptLine>,
+    /// What each source is still saying: Me, then Them.
+    pub(crate) provisional: [Option<ProvisionalLine>; 2],
+    pub(crate) model_installed: bool,
+    pub(crate) model_download: Option<Download>,
+    /// Feedback under the model row in Settings → Listening.
+    pub(crate) model_notice: Option<SharedString>,
 }
 
 impl Overlay {
@@ -165,12 +180,15 @@ impl Overlay {
             recorder: None, shape: Rc::default(), hits: Hits::default(), composer, key_input, model_input, base_url_input,
             key_notice: None, loaded_models: Vec::new(), models_loading: false, job_cancel: None, next_turn: 0, catching_mouse: true, return_focus: None,
             codex: crate::codex::CodexClient::new(), codex_status: None, claude_status: None, signing_in: false,
-            motion: None, live_since: None, turns: Vec::new(), scroll: ScrollHandle::new() };
+            motion: None, live_since: None, turns: Vec::new(), scroll: ScrollHandle::new(),
+            listening: None, listening_status: None, listening_epoch: 0, transcript: Vec::new(), provisional: Default::default(),
+            model_installed: false, model_download: None, model_notice: None };
+        overlay.refresh_model_status();
         if start_live { overlay.set_live(true, window, cx); }
         overlay
     }
 
-    pub fn update_settings(&mut self, change: impl FnOnce(&mut Settings), _window: &mut Window, cx: &mut Context<Self>) {
+    pub fn update_settings(&mut self, change: impl FnOnce(&mut Settings), window: &mut Window, cx: &mut Context<Self>) {
         let previous = self.store.value.clone();
         change(&mut self.store.value);
         if self.store.value == previous { return; }
@@ -185,11 +203,15 @@ impl Overlay {
             self.loaded_models.clear();
             self.key_notice = None;
         }
+        if previous.transcribe != self.store.value.transcribe || previous.audio_source != self.store.value.audio_source {
+            self.restart_listening_if_live(window, cx);
+        }
         cx.notify();
     }
 
     pub fn open_settings(&mut self, tab: Tab, window: &mut Window, cx: &mut Context<Self>) {
         if tab == Tab::Model { self.refresh_subscriptions(window, cx); }
+        if tab == Tab::Listening { self.refresh_model_status(); }
         self.settings_tab = Some(tab);
         self.open_panel(window, cx);
     }
@@ -247,9 +269,14 @@ impl Overlay {
         if !live {
             if let Some(cancel) = self.job_cancel.take() { cancel.store(true, Ordering::Relaxed); }
             self.turns.clear();
+            // The pipeline's own final commits arrive after it's gone and are dropped, so save
+            // what each source was still saying from the last provisional text first.
+            self.archive_provisional();
+            self.stop_listening();
+            self.clear_transcript();
         }
         self.record(live);
-        if live { self.settings_tab = None; self.hotkeys.set_panel_open(false); }
+        if live { self.settings_tab = None; self.hotkeys.set_panel_open(false); self.start_listening(window, cx); }
         self.fit(window);
         cx.notify();
     }
@@ -590,11 +617,7 @@ impl Overlay {
     }
 
     fn panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let ticker = div().flex().items_center().gap(px(10.0)).px(px(16.0)).py(px(10.0))
-            .border_b_1().border_color(theme::divider())
-            .child(div().text_size(px(11.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::accent_soft()).child("HEARD"))
-            .child(div().text_size(px(12.0)).text_color(theme::muted()).truncate()
-                .child("Listening for the conversation…"));
+        let ticker = self.transcript_block();
         let mut thread = div().id("thread").flex().flex_col().gap(px(14.0)).px(px(18.0)).py(px(14.0))
             .flex_1().overflow_y_scroll().track_scroll(&self.scroll);
         if self.turns.is_empty() {

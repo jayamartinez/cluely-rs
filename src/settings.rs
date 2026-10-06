@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::archive::Retention;
+use crate::audio::Source;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -30,36 +31,12 @@ pub enum AnswerStyle { #[default] Spoken, Standard }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub enum SpeechEngine { #[default] Parakeet, Whisper }
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum WhisperModel { Small, #[default] Turbo, Large }
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub enum AudioSource { #[default] Both, Desktop, Microphone }
 
-/// Spoken language. `Auto` lets the engine detect it.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum Language { #[default] Auto, English, Spanish, French, German, Portuguese, Italian, Japanese, Chinese, Korean, Hindi }
-
-impl Language {
-    pub const ALL: [Language; 11] = [Self::Auto, Self::English, Self::Spanish, Self::French, Self::German, Self::Portuguese,
-        Self::Italian, Self::Japanese, Self::Chinese, Self::Korean, Self::Hindi];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Auto => "Auto", Self::English => "English", Self::Spanish => "Spanish", Self::French => "French",
-            Self::German => "German", Self::Portuguese => "Portuguese", Self::Italian => "Italian", Self::Japanese => "Japanese",
-            Self::Chinese => "Chinese", Self::Korean => "Korean", Self::Hindi => "Hindi",
-        }
-    }
-
-    /// Parakeet TDT 0.6B v3 covers 25 European languages; the rest need Whisper.
-    pub fn parakeet_supported(self) -> bool {
-        !matches!(self, Self::Japanese | Self::Chinese | Self::Korean | Self::Hindi)
+impl AudioSource {
+    /// The capture sources this choice listens to.
+    pub fn sources(self) -> &'static [Source] {
+        match self { Self::Both => &Source::ALL, Self::Desktop => &[Source::Them], Self::Microphone => &[Source::Me] }
     }
 }
 
@@ -77,9 +54,8 @@ pub struct Settings {
     /// Base URL for the "custom" OpenAI-compatible provider.
     pub custom_base_url: String,
     pub answer_style: AnswerStyle,
-    pub speech_engine: SpeechEngine,
-    pub whisper_model: WhisperModel,
-    pub language: Language,
+    /// Transcribe the Live session's audio on this PC. Off keeps Live to the screen and typed questions.
+    pub transcribe: bool,
     pub audio_source: AudioSource,
     pub hide_from_capture: bool,
     pub screen_on_send: bool,
@@ -96,8 +72,7 @@ impl Default for Settings {
         Self {
             provider: Provider::default(), claude_model: ClaudeModel::default(), codex_model: String::new(),
             api_provider: "anthropic".into(), api_models: BTreeMap::new(), custom_base_url: String::new(),
-            answer_style: AnswerStyle::default(), speech_engine: SpeechEngine::default(), whisper_model: WhisperModel::default(),
-            language: Language::default(), audio_source: AudioSource::default(),
+            answer_style: AnswerStyle::default(), transcribe: true, audio_source: AudioSource::default(),
             hide_from_capture: true, screen_on_send: true, start_live_on_launch: false,
             save_sessions: true, save_screenshots: true, keep_sessions: Retention::default(),
         }
@@ -107,11 +82,6 @@ impl Default for Settings {
 impl Settings {
     /// Model for the selected API provider; empty until the user picks one.
     pub fn api_model(&self) -> &str { self.api_models.get(&self.api_provider).map(String::as_str).unwrap_or("") }
-
-    /// The engine that will actually transcribe: Parakeet falls back to Whisper for languages it lacks.
-    pub fn effective_engine(&self) -> SpeechEngine {
-        if self.speech_engine == SpeechEngine::Parakeet && !self.language.parakeet_supported() { SpeechEngine::Whisper } else { self.speech_engine }
-    }
 }
 
 pub struct Store {
@@ -153,13 +123,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn missing_fields_take_defaults_and_unknown_languages_fall_back_to_whisper() {
-        let partial: Settings = serde_json::from_str(r#"{"provider":"claude","language":"japanese"}"#).unwrap();
+    fn missing_fields_take_defaults_and_retired_fields_are_ignored() {
+        // "language" and "speechEngine" were written by earlier builds and no longer exist.
+        let partial: Settings = serde_json::from_str(r#"{"provider":"claude","language":"japanese","speechEngine":"whisper"}"#).unwrap();
         assert_eq!(partial.provider, Provider::Claude);
         assert!(partial.hide_from_capture);
-        assert_eq!(partial.effective_engine(), SpeechEngine::Whisper);
-        let spanish = Settings { language: Language::Spanish, ..Settings::default() };
-        assert_eq!(spanish.effective_engine(), SpeechEngine::Parakeet);
+        assert!(partial.transcribe);
+        assert_eq!(partial.audio_source.sources(), &Source::ALL);
+        assert_eq!(AudioSource::Desktop.sources(), &[Source::Them]);
     }
 
     #[test]
