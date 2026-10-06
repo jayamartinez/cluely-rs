@@ -53,6 +53,12 @@ session, so other apps keep their shortcuts.
 - **Your API key**: Anthropic, OpenAI, OpenRouter, Google Gemini, xAI, Groq, DeepSeek, Mistral, Together, local Ollama or
   LM Studio, or any OpenAI-compatible URL. Keys are stored in Windows Credential Manager.
 
+**Listening** (Settings → Listening): a Live session transcribes desktop audio as **Them** and the microphone as **Me**
+on this PC with NVIDIA Parakeet Realtime (English). The Live panel shows the last two lines and what each side is
+saying right now; words the recognizer may still change are muted and italic, and a blue **?** marks a likely question.
+The model (176 MB) downloads from Settings the first time, verified against a pinned checksum. Turn **Transcribe
+conversations** off to keep Live to the screen and typed questions.
+
 **Sessions** (clock button in the pill) is a normal window for reviewing past Live sessions: an AI summary at three
 lengths, timeline, transcript, answers and the screenshots they used, plus search and "Ask about this session".
 
@@ -78,22 +84,26 @@ cargo clippy --all-targets
 $env:CLUELYRS_DATA_DIR = "$env:TEMP\cluelyrs-demo"; cargo run
 ```
 
-Latency: set `CLUELYRS_METRICS=1` to export pipeline timings as JSON Lines to `%LOCALAPPDATA%\CluelyRS\metrics\`,
-then compare runs with `cargo run --example latency_report -- <file.jsonl>...` (grouped per provider).
+Latency: set `CLUELYRS_METRICS=1` to export each Live session's pipeline timings as JSON Lines to
+`%LOCALAPPDATA%\CluelyRS\metrics\`, together with what each source captured (`live-<time>-me.wav` and `-them.wav`,
+16 kHz mono). Compare runs with `cargo run --example latency_report -- <file.jsonl>...` (grouped per provider).
 
 Transcription: `cargo run --example parakeet_bench -- download` installs the Parakeet model, and the same example
 benchmarks speed, latency, CPU, memory and long-run reliability (usage at the top of `examples/parakeet_bench.rs`; test
-speech from `dev/make-bench-audio.ps1`). Changes to third-party code and builds are documented in
-[PATCHES.md](PATCHES.md).
+speech from `dev/make-bench-audio.ps1`). `cargo run --example transcript_replay -- <wav>` replays a recording (the
+bench clip, or a session's exported capture) through the whole pipeline at real-time pace and prints where speech
+starts and stops against every partial, end-of-utterance and commit, which is how endpointing problems from real
+sessions are reproduced and tuned. Changes to third-party code and builds are documented in [PATCHES.md](PATCHES.md).
 
 `CLUELYRS_ALLOW_CAPTURE=1` lets the overlay appear in screenshots while developing. Live provider tests are ignored by
 default (`cargo test -- --ignored` with the variables documented in `claude_cli.rs` and `codex.rs`).
 
 ## Status
 
-Working: overlay, keybinds, click-through, capture hiding, providers, screenshot on send, sessions and AI notes.
-In progress: live transcription. The on-device Parakeet Realtime provider, transcript state and endpointing exist but
-aren't shown in the overlay yet, so answers rely on the screenshot and your typed question for now.
+Working: overlay, keybinds, click-through, capture hiding, providers, screenshot on send, sessions and AI notes, and
+live on-device transcription of Me and Them with the transcript saved per session.
+Not yet: answers don't read the live transcript (they rely on the screenshot and your typed question), Deepgram as an
+optional cloud provider, and endpointing tuned on real conversations.
 
 ## Third-party
 
