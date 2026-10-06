@@ -594,7 +594,6 @@ impl Overlay {
             .bg(theme::glass()).border_1().border_color(theme::hairline())
             // Dragging the pill background moves the whole overlay.
             .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())
-            .child(self.hits.mark())
             .child(mark).child(status).child(hide);
         let active = |button: gpui::Stateful<gpui::Div>, on: bool| button.when(on, |button| button.bg(theme::bubble()).border_1().border_color(theme::bubble_border()));
         if !live {
@@ -613,7 +612,7 @@ impl Overlay {
                 .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| this.set_live(false, window, cx)))
                 .child(div().size(px(10.0)).rounded(px(2.0)).bg(theme::text())));
         }
-        pill
+        pill.child(self.hits.mark())
     }
 
     fn panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -642,11 +641,10 @@ impl Overlay {
             actions = actions.child(div().id(("action", index)).relative().px(px(10.0)).py(px(6.0)).rounded(px(8.0)).cursor_pointer()
                 .text_size(px(13.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).hover(|b| b.bg(theme::raised()))
                 .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, window, cx| this.send(label, String::new(), window, cx)))
-                .child(self.hits.mark()).child(label));
+                .child(label).child(self.hits.mark()));
         }
         let composer = div().relative().mx(px(12.0)).mb(px(12.0)).flex().flex_col().gap(px(12.0)).p(px(12.0)).rounded(px(13.0))
             .bg(theme::field()).border_1().border_color(theme::hairline())
-            .child(self.hits.mark())
             .child(div().id("composer-input").cursor_text()
                 .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| window.focus(&this.composer.focus_handle(cx))))
                 .child(self.composer.clone()))
@@ -661,7 +659,8 @@ impl Overlay {
                     .child(keycap(self.hotkeys.label(Action::Assist))).child(div().text_size(px(12.0)).text_color(theme::muted()).child("Assist")))
                 .child(div().id("send").size(px(30.0)).rounded_full().bg(theme::accent()).flex().items_center().justify_center().cursor_pointer()
                     .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| { let input = this.composer.clone(); this.send_composer(input, window, cx); }))
-                    .text_color(theme::accent_ink()).font_weight(FontWeight::BOLD).child("↑")));
+                    .text_color(theme::accent_ink()).font_weight(FontWeight::BOLD).child("↑")))
+            .child(self.hits.mark());
         div().w(px(560.0)).flex_1().min_h_0().flex().flex_col().rounded(px(18.0)).bg(theme::glass())
             .border_1().border_color(theme::hairline()).overflow_hidden()
             .child(ticker).child(thread).child(actions).child(composer)
@@ -711,7 +710,10 @@ impl Hits {
         self.0.borrow().iter().any(|bounds| bounds.contains(&point))
     }
 
-    /// An invisible child that records its parent's bounds. The parent must be `relative()`.
+    /// An invisible child that records its parent's bounds. The parent must be `relative()`, and
+    /// the mark must be its *last* child: the layout engine still applies the parent's `gap`
+    /// after an absolutely positioned first child, which pushed the real children past the
+    /// window region (the pill's right end was cut off).
     pub fn mark(&self) -> impl IntoElement {
         let hits = self.clone();
         gpui::canvas(move |bounds, _, _| hits.0.borrow_mut().push(bounds), |_, _, _, _| {}).absolute().top_0().left_0().size_full()
