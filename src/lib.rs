@@ -13,6 +13,7 @@ pub mod claude_cli;
 pub mod codex;
 pub mod hotkeys;
 pub mod input;
+pub mod listening;
 pub mod markdown;
 pub mod metrics;
 pub mod models;
