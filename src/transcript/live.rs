@@ -85,12 +85,24 @@ impl LiveTranscript {
         updates
     }
 
+    /// Listening ended: whatever is still in progress is committed as it stands.
+    pub fn finish(&mut self) -> Vec<Update> {
+        Source::ALL.into_iter().filter_map(|source| {
+            let utterance = self.state.commit(source)?;
+            self.mark(Stage::UtteranceCommitted, source, utterance.id, Some(utterance.end_ms));
+            self.questions.remove(&utterance.id);
+            Some(Update::Committed { utterance, reason: Reason::Stopped })
+        }).collect()
+    }
+
     fn evaluate(&mut self, source: Source) -> Option<Update> {
         let provisional = self.state.provisional(source)?;
         let signals = Signals {
             has_text: !provisional.text().trim().is_empty(),
             end_of_utterance: provisional.end_of_utterance_ms.is_some(),
-            silence_ms: self.silence[slot(source)].silence_ms(),
+            // Measured from the later of the last voice and the last text, so words the
+            // recognizer is still emitting for this utterance aren't cut off into the next one.
+            silence_ms: self.silence[slot(source)].silence_since(provisional.end_ms),
             assessment: assess(provisional.text()),
         };
         let Decision::Commit(reason) = decide(&signals, &self.config) else { return None };
@@ -175,6 +187,38 @@ mod tests {
         let them = audio(&mut live, Source::Them, 500.0, 1100.0, 0.001);
         assert_eq!(committed(&them), [("what is a mutex", Reason::Silence)]);
         assert!(live.state().provisional(Source::Me).is_some());
+    }
+
+    /// Seen with Parakeet: speech ends, the endpointer sees silence, but the recognizer is
+    /// still emitting the last words. They must land in the same utterance, and the late
+    /// end-of-utterance that repeats the whole sentence must not commit it again.
+    #[test]
+    fn words_that_arrive_after_the_speech_stopped_stay_in_the_same_utterance() {
+        let mut live = LiveTranscript::new(EndpointConfig::default(), None);
+        live.set_generation(GEN, "parakeet-realtime");
+        audio(&mut live, Source::Them, 0.0, 2000.0, 0.2);
+        live.on_event(&partial(Source::Them, 1600.0, "walk me through what happens when two writers"));
+        // Words keep arriving ~400 ms behind the audio; the request reads finished each time.
+        assert!(committed(&audio(&mut live, Source::Them, 2000.0, 2400.0, 0.001)).is_empty());
+        live.on_event(&partial(Source::Them, 2400.0, "walk me through what happens when two writers update the same key"));
+        let updates = audio(&mut live, Source::Them, 2400.0, 3200.0, 0.001);
+        assert_eq!(committed(&updates), [("walk me through what happens when two writers update the same key", Reason::Silence)]);
+        let late = live.on_event(&event(Source::Them, 3400.0, EventKind::EndOfUtterance { text: "walk me through what happens when two writers update the same key".into() }));
+        assert!(late.is_empty(), "{late:?}");
+        assert!(committed(&audio(&mut live, Source::Them, 3400.0, 5400.0, 0.001)).is_empty());
+        assert_eq!(live.state().committed(Source::Them).len(), 1);
+    }
+
+    #[test]
+    fn finishing_commits_whatever_is_in_progress_on_both_sources() {
+        let mut live = LiveTranscript::new(EndpointConfig::default(), None);
+        live.set_generation(GEN, "test");
+        live.on_event(&partial(Source::Me, 300.0, "i was about to"));
+        live.on_event(&partial(Source::Them, 400.0, "and"));
+        let updates = live.finish();
+        assert_eq!(committed(&updates), [("i was about to", Reason::Stopped), ("and", Reason::Stopped)]);
+        assert!(live.finish().is_empty());
+        assert_eq!(live.state().conversation().len(), 2);
     }
 
     #[test]

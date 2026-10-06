@@ -44,6 +44,8 @@ pub enum Reason {
     Silence,
     /// Long silence; committed regardless of how the text reads.
     MaxSilence,
+    /// Listening ended with text still in progress.
+    Stopped,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -85,9 +87,11 @@ impl SilenceTracker {
     pub fn observe(&mut self, chunk: &AudioChunk) -> bool {
         let rms = chunk.rms();
         let voiced = rms >= self.min_speech_rms.max(self.noise_floor * 3.0);
-        // Learn the floor from quiet audio. Speech may nudge it up only very slowly, so a long
-        // sentence never raises the floor until speech itself stops counting as voice.
-        let rate = if voiced { 0.0001 } else { 0.2 };
+        // The floor follows the quietest recent audio: it drops quickly in a gap and rises only
+        // slowly, so neither a long sentence nor soft consonants in quiet speech can lift it
+        // until the speech itself stops counting as voice. Steady noise below the voice
+        // threshold is still learned within a few seconds.
+        let rate = if voiced { 0.0001 } else if rms < self.noise_floor { 0.2 } else { 0.01 };
         self.noise_floor += (rms - self.noise_floor) * rate;
         if voiced { self.last_voice_end_ms = Some(chunk.end_ms()); }
         self.latest_end_ms = self.latest_end_ms.max(chunk.end_ms());
@@ -95,8 +99,13 @@ impl SilenceTracker {
     }
 
     /// Silence since the last voiced audio (0 while speaking or before any voice).
-    pub fn silence_ms(&self) -> f64 {
-        self.last_voice_end_ms.map(|end| (self.latest_end_ms - end).max(0.0)).unwrap_or(0.0)
+    pub fn silence_ms(&self) -> f64 { self.silence_since(0.0) }
+
+    /// Silence since the later of the last voiced audio and `text_end_ms`, the audio time the
+    /// recognizer last produced text for. Recognizers emit words some way behind the audio,
+    /// so an utterance isn't over while its text is still arriving.
+    pub fn silence_since(&self, text_end_ms: f64) -> f64 {
+        self.last_voice_end_ms.map(|end| (self.latest_end_ms - end.max(text_end_ms)).max(0.0)).unwrap_or(0.0)
     }
 }
 
@@ -146,6 +155,24 @@ mod tests {
         assert_eq!(tracker.silence_ms(), 0.0);
     }
 
+    /// Quiet captured speech (e.g. a call at low volume) has soft consonants below the voice
+    /// threshold; those must not pull the floor up until the speech counts as silence.
+    #[test]
+    fn soft_consonants_in_quiet_speech_do_not_raise_the_floor_past_the_speech() {
+        let mut tracker = SilenceTracker::default();
+        for i in 0..50 { tracker.observe(&chunk(i as f64 * 10.0, 0.001)); }
+        let mut voiced_chunks = 0;
+        for i in 0..1000 {
+            let level = if i % 3 == 0 { 0.006 } else { 0.02 };
+            if tracker.observe(&chunk(500.0 + i as f64 * 10.0, level)) { voiced_chunks += 1; }
+        }
+        assert!(voiced_chunks >= 660, "{voiced_chunks} of 1000 chunks counted as voice");
+        assert!(tracker.silence_ms() <= 10.0, "{}", tracker.silence_ms());
+        // A steady low hum (below the voice threshold) is still learned as the floor.
+        for i in 0..300 { tracker.observe(&chunk(11_000.0 + i as f64 * 10.0, 0.004)); }
+        assert!(tracker.noise_floor > 0.0035, "{}", tracker.noise_floor);
+    }
+
     #[test]
     fn silence_is_measured_from_the_last_voiced_audio_against_a_noise_floor() {
         let mut tracker = SilenceTracker::default();
@@ -154,5 +181,9 @@ mod tests {
         assert!(tracker.observe(&chunk(200.0, 0.2)));
         for i in 21..51 { tracker.observe(&chunk(i as f64 * 10.0, 0.002)); }
         assert!((tracker.silence_ms() - 300.0).abs() < 1e-6, "{}", tracker.silence_ms());
+        // Text that arrived 100 ms after the voice stopped shortens the silence to 200 ms.
+        assert!((tracker.silence_since(310.0) - 200.0).abs() < 1e-6, "{}", tracker.silence_since(310.0));
+        assert_eq!(tracker.silence_since(0.0), tracker.silence_ms());
+        assert_eq!(tracker.silence_since(10_000.0), 0.0);
     }
 }

@@ -55,7 +55,10 @@ struct Track {
     provisional: Option<Provisional>,
     tracker: StabilityTracker,
     /// Text the provider may still be repeating at the start of its next hypothesis.
-    carryover: Option<String>,
+    carryover: Option<Carryover>,
+    /// Earlier hypotheses of the current utterance that the provider closed (an EOU or a
+    /// final) before endpointing committed, kept so its next hypothesis adds to them.
+    closed: String,
 }
 
 #[derive(Default)]
@@ -89,10 +92,20 @@ impl TranscriptState {
         if first {
             self.next_id += 1;
             track.tracker.reset();
+            track.closed.clear();
         }
         let id = track.provisional.as_ref().map(|p| p.id).unwrap_or(self.next_id);
+        // The provider closed its hypothesis (EOU/final) and this text doesn't extend it: the
+        // speaker went on before endpointing committed, so keep what was closed and add to it.
+        if let Some(previous) = &track.provisional
+            && (previous.end_of_utterance_ms.is_some() || previous.provider_final)
+            && !text.trim().is_empty()
+            && !extends(segment(previous, &track.closed), &text) {
+            track.closed = previous.text().trim().to_string();
+            track.tracker.reset();
+        }
         let split = if text.trim().is_empty() { track.provisional.as_ref().map(|p| p.split.clone()).unwrap_or_else(|| track.tracker.update("", None)) }
-            else { track.tracker.update(&text, stable_hint) };
+            else { joined(&track.closed, track.tracker.update(&text, stable_hint)) };
         let previous = track.provisional.take();
         let mut provisional = Provisional {
             id, source, split,
@@ -105,7 +118,7 @@ impl TranscriptState {
             Signal::EndOfUtterance => { provisional.end_of_utterance_ms = Some(event.end_ms); Change::EndOfUtterance { source, id } }
             Signal::Final => { provisional.provider_final = true; Change::ProviderFinal { source, id } }
             // New speech after an EOU means the speaker kept going.
-            Signal::Partial => { provisional.end_of_utterance_ms = None; Change::Provisional { source, id, first } }
+            Signal::Partial => { provisional.end_of_utterance_ms = None; provisional.provider_final = false; Change::Provisional { source, id, first } }
         };
         track.provisional = Some(provisional);
         Some(change)
@@ -116,9 +129,16 @@ impl TranscriptState {
         let track = &mut self.tracks[slot(source)];
         let provisional = track.provisional.take()?;
         track.tracker.reset();
+        let segment = segment(&provisional, &track.closed).trim().to_string();
+        track.closed.clear();
         let text = provisional.text().trim().to_string();
         if text.is_empty() { return None; }
-        track.carryover = Some(text.clone());
+        // The provider may still be extending the hypothesis this came from: either the whole
+        // of it (everything committed from it so far) or just its latest segment.
+        track.carryover = Some(Carryover {
+            whole: match track.carryover.take() { Some(previous) => format!("{} {text}", previous.whole), None => text.clone() },
+            segment: if segment.is_empty() { text.clone() } else { segment },
+        });
         let committed = Committed { id: provisional.id, source, text, start_ms: provisional.start_ms, end_ms: provisional.end_ms, corrected: false };
         track.committed.push(committed.clone());
         Some(committed)
@@ -136,6 +156,7 @@ impl TranscriptState {
         let track = &mut self.tracks[slot(source)];
         track.provisional = None;
         track.carryover = None;
+        track.closed.clear();
         track.tracker.reset();
     }
 
@@ -151,17 +172,42 @@ impl TranscriptState {
     }
 }
 
-/// Providers that keep one hypothesis across our commit repeat the committed words; drop them.
-fn strip_carryover(carryover: &mut Option<String>, text: &str) -> String {
-    let Some(previous) = carryover.as_deref() else { return text.to_string() };
+/// Whether `text` is `previous` with more words after it (the provider extended its hypothesis).
+fn extends(previous: &str, text: &str) -> bool {
     let shared = common_word_prefix(previous, text);
-    if shared > 0 && shared >= previous.trim_end().len() {
-        return text[shared..].trim_start().to_string();
+    previous.trim().is_empty() || (shared > 0 && shared >= previous.trim_end().len())
+}
+
+/// The provider's current hypothesis: the provisional text without the closed segments.
+fn segment<'a>(provisional: &'a Provisional, closed: &str) -> &'a str {
+    provisional.text().get(closed.len()..).unwrap_or("").trim_start()
+}
+
+/// Closed segments followed by the current hypothesis; closed text is all stable.
+fn joined(closed: &str, split: Split) -> Split {
+    if closed.is_empty() { return split; }
+    if split.text.trim().is_empty() { return Split { text: closed.to_string(), stable_len: closed.len() }; }
+    Split { text: format!("{closed} {}", split.text), stable_len: closed.len() + 1 + split.stable_len }
+}
+
+/// Providers that keep one hypothesis across our commit repeat the committed words; drop them.
+fn strip_carryover(carryover: &mut Option<Carryover>, text: &str) -> String {
+    let Some(previous) = carryover.as_ref() else { return text.to_string() };
+    for known in [&previous.whole, &previous.segment] {
+        let shared = common_word_prefix(known, text);
+        if shared > 0 && shared >= known.trim_end().len() {
+            return text[shared..].trim_start().to_string();
+        }
     }
     // The provider has moved on to a new hypothesis; stop checking.
     *carryover = None;
     text.to_string()
 }
+
+/// Committed text a provider may repeat: all of the hypothesis it came from, and the last
+/// segment of it (a provider that starts over after each EOU repeats only that).
+#[derive(Clone, Debug)]
+struct Carryover { whole: String, segment: String }
 
 #[cfg(test)]
 mod tests {
@@ -208,6 +254,52 @@ mod tests {
         state.commit(Source::Them);
         state.apply(&partial(Source::Them, 900.0, "next question"));
         assert_eq!(state.provisional(Source::Them).unwrap().text(), "next question");
+    }
+
+    /// Seen with Parakeet: it signals an end-of-utterance at a comma, the speaker goes straight
+    /// on, and the next hypothesis starts from scratch. The first clause must survive.
+    #[test]
+    fn a_new_hypothesis_after_an_end_of_utterance_adds_to_the_closed_text() {
+        let mut state = TranscriptState::new();
+        state.apply(&partial(Source::Them, 400.0, "would you use reedy's here"));
+        state.apply(&event(Source::Them, 600.0, EventKind::EndOfUtterance { text: "would you use reedy's here".into() }));
+        assert!(matches!(state.apply(&partial(Source::Them, 800.0, "or")), Some(Change::Provisional { first: false, .. })));
+        let provisional = state.provisional(Source::Them).unwrap();
+        assert_eq!((provisional.split.stable(), provisional.split.unstable()), ("would you use reedy's here", "or"));
+        assert_eq!(provisional.end_of_utterance_ms, None);
+        state.apply(&partial(Source::Them, 1000.0, "or avoid"));
+        state.apply(&event(Source::Them, 1400.0, EventKind::EndOfUtterance { text: "or avoid cashing entirely".into() }));
+        let provisional = state.provisional(Source::Them).unwrap();
+        assert_eq!(provisional.text(), "would you use reedy's here or avoid cashing entirely");
+        assert_eq!(provisional.split.stable(), provisional.text());
+        assert_eq!(provisional.end_of_utterance_ms, Some(1400.0));
+        let committed = state.commit(Source::Them).unwrap();
+        assert_eq!((committed.text.as_str(), committed.start_ms, committed.end_ms), ("would you use reedy's here or avoid cashing entirely", 0.0, 1400.0));
+        // A late repeat of just the last segment (or of the whole) adds nothing.
+        assert_eq!(state.apply(&event(Source::Them, 1600.0, EventKind::EndOfUtterance { text: "or avoid cashing entirely".into() })), None);
+        assert_eq!(state.apply(&event(Source::Them, 1700.0, EventKind::Final { text: "would you use reedy's here or avoid cashing entirely".into() })), None);
+        assert!(state.provisional(Source::Them).is_none());
+        // The next utterance starts clean, and a provider that extends across its EOU is unchanged.
+        state.apply(&partial(Source::Them, 2000.0, "what is a mutex"));
+        state.apply(&event(Source::Them, 2200.0, EventKind::EndOfUtterance { text: "what is a mutex".into() }));
+        state.apply(&partial(Source::Them, 2400.0, "what is a mutex and a semaphore"));
+        assert_eq!(state.provisional(Source::Them).unwrap().text(), "what is a mutex and a semaphore");
+    }
+
+    #[test]
+    fn a_hypothesis_committed_in_pieces_is_not_repeated_by_its_final_event() {
+        let mut state = TranscriptState::new();
+        state.apply(&partial(Source::Them, 400.0, "walk me through what happens when two writers"));
+        state.commit(Source::Them);
+        state.apply(&partial(Source::Them, 900.0, "walk me through what happens when two writers update the same key"));
+        assert_eq!(state.provisional(Source::Them).unwrap().text(), "update the same key");
+        state.commit(Source::Them);
+        // The provider's end-of-utterance repeats the whole sentence: nothing new to show.
+        assert_eq!(state.apply(&event(Source::Them, 1500.0, EventKind::EndOfUtterance { text: "walk me through what happens when two writers update the same key".into() })), None);
+        assert!(state.provisional(Source::Them).is_none());
+        assert_eq!(state.committed(Source::Them).len(), 2);
+        state.apply(&partial(Source::Them, 2000.0, "what is a mutex"));
+        assert_eq!(state.provisional(Source::Them).unwrap().text(), "what is a mutex");
     }
 
     #[test]
