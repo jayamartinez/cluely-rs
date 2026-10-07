@@ -29,6 +29,9 @@ impl Tab {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Picker { CodexModel, ClaudeModel, AnswerStyle, ApiProvider, ApiModel, Mic, Desktop }
 
+/// Taller lists scroll.
+const MENU_MAX_HEIGHT: f32 = 300.0;
+
 /// A segmented control over `options`; clicking applies `set` and saves.
 fn choice<T: Copy + PartialEq + 'static>(
     name: &'static str, options: &[(T, &'static str)], current: T, set: fn(&mut Settings, T), cx: &mut Context<Overlay>,
@@ -129,10 +132,17 @@ impl Overlay {
         if open {
             // The face records where it is, so the list's "click outside" ignores clicks on it
             // (the face's own handler closes the list).
+            // The list hangs 40 px below the face, the same width, up to its scroll limit. Its
+            // area is reserved now so the window region shows it in the first frame.
             let face_bounds = self.picker_face.clone();
-            face = face.child(gpui::canvas(move |bounds, _, _| face_bounds.set(Some(bounds)), |_, _, _, _| {}).absolute().top_0().left_0().size_full());
+            let hits = self.hits.clone();
+            let list_height = px((options.len() as f32 * 34.0 + 12.0).min(MENU_MAX_HEIGHT + 12.0));
+            face = face.child(gpui::canvas(move |bounds, _, _| {
+                face_bounds.set(Some(bounds));
+                hits.reserve(gpui::Bounds::new(gpui::point(bounds.left(), bounds.bottom() + px(4.0)), gpui::size(bounds.size.width, list_height)));
+            }, |_, _, _, _| {}).absolute().top_0().left_0().size_full());
             let face_bounds = self.picker_face.clone();
-            let mut list = ui::menu().id("menu").relative().w_full().max_h(px(300.0)).overflow_y_scroll()
+            let mut list = ui::menu().id("menu").relative().w_full().max_h(px(MENU_MAX_HEIGHT)).overflow_y_scroll()
                 .on_mouse_down_out(cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
                     if face_bounds.get().is_some_and(|face| face.contains(&event.position)) { return; }
                     this.close_picker(cx);
@@ -149,7 +159,7 @@ impl Overlay {
             }
             // Floats over whatever follows: painted after the tree (`deferred`), and marked so
             // the overlay's window region and mouse hit-testing cover it.
-            list = list.child(self.hits.float_mark());
+            list = list.child(self.hits.mark());
             wrapper = wrapper.child(deferred(div().absolute().top(px(40.0)).left_0().w_full().child(list)));
         }
         wrapper.child(face)

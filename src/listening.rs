@@ -215,17 +215,19 @@ mod tests {
         let (chunks, audio) = channel();
         let (commands, inbox) = channel();
         let (out, messages) = unbounded();
-        // 0.8 s of speech on both sources, then 2 s of silence, then stop.
-        for i in 0..40 {
-            for source in Source::ALL { chunks.send(AudioChunk { source, start_ms: i as f64 * 20.0, samples: vec![0.2; 320] }).unwrap(); }
-        }
-        for i in 40..140 {
-            for source in Source::ALL { chunks.send(AudioChunk { source, start_ms: i as f64 * 20.0, samples: vec![0.0; 320] }).unwrap(); }
-        }
         let worker = std::thread::spawn(move || {
             run(provider, audio, &Source::ALL, Vec::new(), LiveTranscript::new(EndpointConfig::default(), None), &inbox, &out, None);
         });
-        std::thread::sleep(Duration::from_millis(300));
+        // 0.8 s of speech on both sources, then 2 s of silence, then stop. The pauses let the
+        // recognizer threads deliver their events before the silence is fed, as in real time.
+        for i in 0..40 {
+            for source in Source::ALL { chunks.send(AudioChunk { source, start_ms: i as f64 * 20.0, samples: vec![0.2; 320] }).unwrap(); }
+        }
+        std::thread::sleep(Duration::from_millis(200));
+        for i in 40..140 {
+            for source in Source::ALL { chunks.send(AudioChunk { source, start_ms: i as f64 * 20.0, samples: vec![0.0; 320] }).unwrap(); }
+        }
+        std::thread::sleep(Duration::from_millis(200));
         commands.send(Command::Stop).unwrap();
         worker.join().unwrap();
         let messages = drain(messages);

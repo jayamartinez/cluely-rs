@@ -715,40 +715,20 @@ impl Render for Overlay {
 
 /// Bounds of the controls that should catch the mouse, collected while laying out a frame.
 #[derive(Clone, Default)]
-pub struct Hits(Rc<RefCell<Vec<Hit>>>, Rc<std::cell::Cell<f32>>, Rc<RefCell<Floating>>);
+pub struct Hits(Rc<RefCell<Vec<Hit>>>, Rc<std::cell::Cell<f32>>, Rc<RefCell<Vec<Hit>>>);
 
 type Hit = gpui::Bounds<gpui::Pixels>;
 
-/// Bounds of content painted deferred (an open dropdown list) in this frame and the last one.
-#[derive(Default)]
-struct Floating { current: Vec<Hit>, previous: Vec<Hit> }
-
 impl Hits {
-    fn clear(&self) {
-        self.0.borrow_mut().clear();
-        let mut floating = self.2.borrow_mut();
-        floating.previous = std::mem::take(&mut floating.current);
-    }
+    fn clear(&self) { self.0.borrow_mut().clear(); self.2.borrow_mut().clear(); }
 
-    /// Floating bounds known so far: this frame's, or the last frame's before the deferred
-    /// content has been laid out again.
-    fn floating(&self) -> Vec<Hit> {
-        let floating = self.2.borrow();
-        if floating.current.is_empty() { floating.previous.clone() } else { floating.current.clone() }
-    }
+    /// Areas reserved this frame for content painted deferred (an open dropdown list).
+    fn floating(&self) -> Vec<Hit> { self.2.borrow().clone() }
 
-    /// Like [`Hits::mark`] for content painted deferred (after the tree), such as an open
-    /// dropdown list: it also records the bounds for the window region, and asks for one more
-    /// frame when they are new, since the region is computed before deferred content is laid out.
-    pub fn float_mark(&self) -> impl IntoElement {
-        let hits = self.clone();
-        gpui::canvas(move |bounds, window, _| {
-            hits.0.borrow_mut().push(bounds);
-            let mut floating = hits.2.borrow_mut();
-            if !floating.previous.contains(&bounds) { window.refresh(); }
-            floating.current.push(bounds);
-        }, |_, _, _, _| {}).absolute().top_0().left_0().size_full()
-    }
+    /// Reserve `bounds` in the window region for content that is painted deferred, so it is
+    /// visible in the very frame it appears. Deferred content lays out after the region is
+    /// computed, so the element that opens it reserves the area during the main pass.
+    pub fn reserve(&self, bounds: Hit) { self.2.borrow_mut().push(bounds); }
 
     /// Whether a window-relative physical point lies on an interactive control.
     fn contains(&self, (x, y): (i32, i32)) -> bool {
