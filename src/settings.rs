@@ -29,17 +29,6 @@ impl ClaudeModel {
 #[serde(rename_all = "camelCase")]
 pub enum AnswerStyle { #[default] Spoken, Standard }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum AudioSource { #[default] Both, Desktop, Microphone }
-
-impl AudioSource {
-    /// The capture sources this choice listens to.
-    pub fn sources(self) -> &'static [Source] {
-        match self { Self::Both => &Source::ALL, Self::Desktop => &[Source::Them], Self::Microphone => &[Source::Me] }
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Settings {
@@ -56,7 +45,11 @@ pub struct Settings {
     pub answer_style: AnswerStyle,
     /// Transcribe the Live session's audio on this PC. Off keeps Live to the screen and typed questions.
     pub transcribe: bool,
-    pub audio_source: AudioSource,
+    pub listen_mic: bool,
+    pub listen_desktop: bool,
+    /// Device names from `audio::list_devices`; empty means the system default.
+    pub mic_device: String,
+    pub desktop_device: String,
     pub hide_from_capture: bool,
     pub screen_on_send: bool,
     pub start_live_on_launch: bool,
@@ -72,7 +65,8 @@ impl Default for Settings {
         Self {
             provider: Provider::default(), claude_model: ClaudeModel::default(), codex_model: String::new(),
             api_provider: "anthropic".into(), api_models: BTreeMap::new(), custom_base_url: String::new(),
-            answer_style: AnswerStyle::default(), transcribe: true, audio_source: AudioSource::default(),
+            answer_style: AnswerStyle::default(), transcribe: true, listen_mic: true, listen_desktop: true,
+            mic_device: String::new(), desktop_device: String::new(),
             hide_from_capture: true, screen_on_send: true, start_live_on_launch: false,
             save_sessions: true, save_screenshots: true, keep_sessions: Retention::default(),
         }
@@ -82,6 +76,20 @@ impl Default for Settings {
 impl Settings {
     /// Model for the selected API provider; empty until the user picks one.
     pub fn api_model(&self) -> &str { self.api_models.get(&self.api_provider).map(String::as_str).unwrap_or("") }
+
+    /// The sources Live captures.
+    pub fn sources(&self) -> Vec<Source> {
+        let mut sources = Vec::new();
+        if self.listen_mic { sources.push(Source::Me); }
+        if self.listen_desktop { sources.push(Source::Them); }
+        sources
+    }
+
+    /// Chosen capture devices; `None` is the system default.
+    pub fn devices(&self) -> crate::audio::Devices {
+        let pick = |name: &str| Some(name.trim().to_string()).filter(|name| !name.is_empty());
+        crate::audio::Devices { mic: pick(&self.mic_device), desktop: pick(&self.desktop_device) }
+    }
 }
 
 pub struct Store {
@@ -129,8 +137,11 @@ mod tests {
         assert_eq!(partial.provider, Provider::Claude);
         assert!(partial.hide_from_capture);
         assert!(partial.transcribe);
-        assert_eq!(partial.audio_source.sources(), &Source::ALL);
-        assert_eq!(AudioSource::Desktop.sources(), &[Source::Them]);
+        assert_eq!(partial.sources(), Source::ALL);
+        assert_eq!(Settings { listen_mic: false, ..Settings::default() }.sources(), [Source::Them]);
+        assert_eq!(partial.devices(), crate::audio::Devices::default());
+        let picked = Settings { mic_device: " USB Audio CODEC ".into(), ..Settings::default() };
+        assert_eq!(picked.devices().mic.as_deref(), Some("USB Audio CODEC"));
     }
 
     #[test]

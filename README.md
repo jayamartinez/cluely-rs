@@ -56,7 +56,8 @@ session, so other apps keep their shortcuts.
 **Listening** (Settings → Listening): a Live session transcribes desktop audio as **Them** and the microphone as **Me**
 on this PC with NVIDIA Parakeet Realtime (English). The Live panel shows the last two lines and what each side is
 saying right now; words the recognizer may still change are muted and italic, and a blue **?** marks a likely question.
-The model (176 MB) downloads from Settings the first time, verified against a pinned checksum. Turn **Transcribe
+The model (176 MB) downloads from Settings the first time, verified against a pinned checksum. Each source has its own
+toggle and device picker (the system default unless you choose one). Turn **Transcribe
 conversations** off to keep Live to the screen and typed questions.
 
 **Sessions** (clock button in the pill) is a normal window for reviewing past Live sessions: an AI summary at three

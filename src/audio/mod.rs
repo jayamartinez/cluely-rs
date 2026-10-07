@@ -5,6 +5,6 @@ pub mod capture;
 pub mod frame;
 pub mod normalize;
 
-pub use capture::{AudioCapture, SourceInfo};
+pub use capture::{AudioCapture, DeviceList, Devices, SourceInfo, list_devices};
 pub use frame::{AudioChunk, SAMPLE_RATE, Source};
 pub use normalize::Normalizer;

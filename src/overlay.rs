@@ -33,6 +33,8 @@ use crate::win;
 const WIDTH: f32 = 600.0;
 const IDLE_HEIGHT: f32 = 120.0;
 const LIVE_HEIGHT: f32 = 600.0;
+/// Settings needs room for an open picker list below the content.
+const SETTINGS_HEIGHT: f32 = 760.0;
 /// Held movement eases in so a tap nudges, then cruises. Pixels per ~16 ms frame.
 const MOVE_START: f32 = 4.0;
 const MOVE_CRUISE: f32 = 22.0;
@@ -113,6 +115,14 @@ pub struct Overlay {
     pub(crate) model_download: Option<Download>,
     /// Feedback under the model row in Settings → Listening.
     pub(crate) model_notice: Option<SharedString>,
+    /// The dropdown that is open in Settings, if any.
+    pub(crate) open_picker: Option<crate::settings_view::Picker>,
+    /// Show subscription account names in Settings → Model (masked by default; never saved).
+    pub(crate) reveal_accounts: bool,
+    pub(crate) devices: Option<crate::audio::DeviceList>,
+    pub(crate) devices_loading: bool,
+    /// Bytes used by saved sessions, for Settings → History.
+    pub(crate) archive_bytes: Option<u64>,
 }
 
 impl Overlay {
@@ -182,7 +192,8 @@ impl Overlay {
             codex: crate::codex::CodexClient::new(), codex_status: None, claude_status: None, signing_in: false,
             motion: None, live_since: None, turns: Vec::new(), scroll: ScrollHandle::new(),
             listening: None, listening_status: None, listening_epoch: 0, transcript: Vec::new(), provisional: Default::default(),
-            model_installed: false, model_download: None, model_notice: None };
+            model_installed: false, model_download: None, model_notice: None,
+            open_picker: None, reveal_accounts: false, devices: None, devices_loading: false, archive_bytes: None };
         overlay.refresh_model_status();
         if start_live { overlay.set_live(true, window, cx); }
         overlay
@@ -203,15 +214,19 @@ impl Overlay {
             self.loaded_models.clear();
             self.key_notice = None;
         }
-        if previous.transcribe != self.store.value.transcribe || previous.audio_source != self.store.value.audio_source {
+        let now = &self.store.value;
+        if previous.transcribe != now.transcribe || previous.listen_mic != now.listen_mic || previous.listen_desktop != now.listen_desktop
+            || previous.mic_device != now.mic_device || previous.desktop_device != now.desktop_device {
             self.restart_listening_if_live(window, cx);
         }
         cx.notify();
     }
 
     pub fn open_settings(&mut self, tab: Tab, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_picker = None;
         if tab == Tab::Model { self.refresh_subscriptions(window, cx); }
-        if tab == Tab::Listening { self.refresh_model_status(); }
+        if tab == Tab::Listening { self.refresh_model_status(); self.load_devices(window, cx); }
+        if tab == Tab::History { self.refresh_archive_size(window, cx); }
         self.settings_tab = Some(tab);
         self.open_panel(window, cx);
     }
@@ -234,6 +249,8 @@ impl Overlay {
     /// Close settings and return to the overlay.
     pub fn close_panels(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.settings_tab = None;
+        self.open_picker = None;
+        self.reveal_accounts = false;
         self.hotkeys.set_panel_open(false);
         self.fit(window);
         cx.notify();
@@ -247,8 +264,8 @@ impl Overlay {
 
     /// Size the window to its content state; transparent area outside the content still takes clicks.
     fn fit(&self, window: &mut Window) {
-        let tall = self.live_since.is_some() || self.settings_tab.is_some();
-        window.resize(size(px(WIDTH), px(if tall { LIVE_HEIGHT } else { IDLE_HEIGHT })));
+        let height = if self.settings_tab.is_some() { SETTINGS_HEIGHT } else if self.live_since.is_some() { LIVE_HEIGHT } else { IDLE_HEIGHT };
+        window.resize(size(px(WIDTH), px(height)));
     }
 
     fn handle(&mut self, action: Action, window: &mut Window, cx: &mut Context<Self>) {

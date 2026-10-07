@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 
-use crate::audio::{AudioCapture, AudioChunk, Source};
+use crate::audio::{AudioCapture, AudioChunk, Devices, Source};
 use crate::metrics::{self, LatencyRecorder};
 use crate::stt::parakeet::ParakeetRealtime;
 use crate::stt::{Availability, StreamingAsr, Transcriber};
@@ -62,7 +62,7 @@ pub struct Listening {
 impl Listening {
     /// Start capturing `sources` and transcribing with `provider`. Returns immediately: device
     /// setup and model loading happen on the pipeline thread, which reports through `Message`s.
-    pub fn start(provider: Arc<dyn StreamingAsr>, sources: Vec<Source>) -> (Self, UnboundedReceiver<Message>) {
+    pub fn start(provider: Arc<dyn StreamingAsr>, sources: Vec<Source>, devices: Devices) -> (Self, UnboundedReceiver<Message>) {
         let (out, messages) = unbounded();
         let (commands, inbox) = channel();
         let started = Instant::now();
@@ -70,7 +70,7 @@ impl Listening {
             let _ = out.unbounded_send(Message::Status(Status::Starting));
             let (chunks, audio) = channel();
             let recorder = LatencyRecorder::new(started);
-            let (capture, failures) = match AudioCapture::start(&sources, chunks) {
+            let (capture, failures) = match AudioCapture::start_with(&sources, &devices, chunks) {
                 Ok(started) => started,
                 Err(error) => { let _ = out.unbounded_send(Message::Status(Status::Failed(error.to_string()))); return; }
             };
@@ -275,7 +275,7 @@ mod tests {
     #[test]
     fn dropping_the_handle_stops_the_pipeline_without_blocking() {
         // No devices in CI-like runs is fine: the pipeline reports Failed or Listening on its own thread.
-        let (listening, mut messages) = Listening::start(Arc::new(ScriptedAsr::new(vec![])), vec![Source::Me]);
+        let (listening, mut messages) = Listening::start(Arc::new(ScriptedAsr::new(vec![])), vec![Source::Me], Devices::default());
         let started = Instant::now();
         drop(listening);
         assert!(started.elapsed() < Duration::from_millis(50));

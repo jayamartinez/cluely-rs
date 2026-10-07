@@ -67,7 +67,13 @@ impl Overlay {
         }
         self.listening_epoch += 1;
         let epoch = self.listening_epoch;
-        let (listening, mut messages) = Listening::start(provider, self.store.value.audio_source.sources().to_vec());
+        let sources = self.store.value.sources();
+        if sources.is_empty() {
+            self.listening_status = Some(Status::Failed("Turn on the microphone or desktop audio in Settings → Listening.".into()));
+            cx.notify();
+            return;
+        }
+        let (listening, mut messages) = Listening::start(provider, sources, self.store.value.devices());
         self.listening = Some(listening);
         self.listening_status = Some(Status::Starting);
         cx.notify();

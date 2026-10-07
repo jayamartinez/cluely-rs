@@ -90,3 +90,37 @@ pub fn close_button(id: &'static str) -> gpui::Stateful<Div> {
 pub fn panel_header() -> Div {
     div().flex().items_center().justify_between().px(px(18.0)).pt(px(14.0)).pb(px(12.0)).border_b_1().border_color(theme::divider())
 }
+
+/// A dropdown's closed face: the current value and a chevron. Pair with [`menu`] while open.
+pub fn picker(id: impl Into<ElementId>, value: impl Into<SharedString>, open: bool) -> gpui::Stateful<Div> {
+    div().id(id).flex().items_center().justify_between().gap(px(8.0)).h(px(36.0)).px(px(12.0)).rounded(px(9.0)).cursor_pointer()
+        .bg(theme::field()).border_1().border_color(if open { theme::accent() } else { theme::hairline() })
+        .child(div().min_w_0().text_size(px(13.0)).text_color(theme::text()).text_ellipsis().child(value.into()))
+        .child(chevron(open))
+}
+
+fn chevron(up: bool) -> impl IntoElement {
+    icon(if up { "icons/chevron-up.svg" } else { "icons/chevron-down.svg" }, 12.0, theme::muted())
+}
+
+/// The open list under a [`picker`]. Place it absolutely under the picker inside a `relative()`
+/// parent and wrap it in `gpui::deferred` so it paints over what follows.
+pub fn menu() -> Div {
+    div().flex().flex_col().p(px(4.0)).rounded(px(10.0)).bg(theme::raised()).border_1().border_color(theme::keycap_border())
+        .shadow_lg()
+}
+
+pub fn menu_item(id: impl Into<ElementId>, label: impl Into<SharedString>, selected: bool) -> gpui::Stateful<Div> {
+    let row = div().id(id).flex().items_center().justify_between().gap(px(8.0)).px(px(10.0)).py(px(7.0)).rounded(px(7.0)).cursor_pointer()
+        .text_size(px(13.0)).hover(|row| row.bg(rgb(0x26292d)))
+        .child(div().truncate().child(label.into()));
+    if selected { row.bg(rgb(0x26292d)).text_color(theme::text()).child(div().text_color(theme::accent()).font_weight(FontWeight::BOLD).child("✓")) }
+    else { row.text_color(theme::body()) }
+}
+
+/// A settings row: label on the left, control on the right, hairline below.
+pub fn setting_row(label: &'static str, control: impl IntoElement) -> Div {
+    div().flex().items_center().justify_between().gap(px(12.0)).h(px(46.0)).border_b_1().border_color(theme::divider())
+        .child(div().text_size(px(13.0)).text_color(theme::text()).child(label))
+        .child(control)
+}
