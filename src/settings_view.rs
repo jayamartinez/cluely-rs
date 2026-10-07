@@ -314,7 +314,7 @@ impl Overlay {
         let transcribe = div().flex().items_center().gap(px(12.0))
             .child(div().flex().flex_col().gap(px(1.0)).flex_1()
                 .child(div().text_size(px(13.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child("Transcribe conversations"))
-                .child(div().text_size(px(12.0)).text_color(theme::muted()).child("On this PC, while Live is on")))
+                .child(div().text_size(px(12.0)).text_color(theme::muted()).child(if s.stt_provider == SttProvider::Deepgram { "Sent to Deepgram, while Live is on" } else { "On this PC, while Live is on" })))
             .child(switch("transcribe", s.transcribe, |s, v| s.transcribe = v, cx));
         let devices = self.devices.clone().unwrap_or_default();
         let device_options = |names: &[String], default: Option<&String>| {
@@ -355,7 +355,7 @@ impl Overlay {
         let focus = self.key_input.clone();
         let saved = crate::secrets::hint(deepgram::PROVIDER_ID);
         let mut status = div().flex().items_center().gap(px(12.0)).text_size(px(12.0)).text_color(theme::muted())
-            .child(match &saved { Some(hint) => format!("Saved key {hint} · audio is sent to Deepgram while Live is on"), None => "No key saved".to_string() });
+            .child(match &saved { Some(hint) => format!("Saved key {hint}"), None => "No key saved".to_string() });
         if saved.is_some() {
             status = status.child(div().id("remove-key").cursor_pointer().text_color(gpui::rgb(0xffb4a8))
                 .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.remove_key(cx))).child("Remove"));
