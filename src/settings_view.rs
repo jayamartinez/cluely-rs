@@ -3,7 +3,7 @@
 //! (capture hiding) and listening options apply to the running session.
 
 
-use gpui::{Context, Div, Focusable, FontWeight, IntoElement, MouseButton, ParentElement, SharedString, Styled, Window, div, prelude::*, px};
+use gpui::{Context, Div, Focusable, FontWeight, IntoElement, MouseButton, ParentElement, SharedString, Styled, Window, deferred, div, prelude::*, px};
 
 use crate::archive::Retention;
 use crate::chat::SubscriptionStatus;
@@ -103,7 +103,7 @@ impl Overlay {
         let mut panel = div().relative().w(px(560.0)).flex().flex_col().rounded(px(18.0)).bg(theme::glass())
             .border_1().border_color(theme::hairline()).overflow_hidden()
             .child(header)
-            .child(div().id("settings-body").flex().flex_col().px(px(18.0)).pt(px(14.0)).pb(px(20.0)).max_h(px(630.0)).overflow_y_scroll().child(body));
+            .child(div().id("settings-body").flex().flex_col().px(px(18.0)).pt(px(14.0)).pb(px(20.0)).max_h(px(470.0)).overflow_y_scroll().child(body));
         if let Some(warning) = self.store.warning {
             panel = panel.child(div().px(px(18.0)).pb(px(12.0)).text_size(px(12.0)).text_color(gpui::rgb(0xffb4a8)).child(warning));
         }
@@ -123,14 +123,20 @@ impl Overlay {
     fn dropdown(&self, picker: Picker, value: impl Into<SharedString>, options: Vec<(String, String)>, selected: &str,
         set: fn(&mut Settings, String), cx: &mut Context<Self>) -> Div {
         let open = self.open_picker == Some(picker);
-        let face = ui::picker(("picker", picker as usize), value, open)
+        let mut face = ui::picker(("picker", picker as usize), value, open).relative()
             .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| { cx.stop_propagation(); this.toggle_picker(picker, cx) }));
-        // The list expands in place (the panel grows with it) rather than floating: the panel
-        // clips to its rounded corners and the body scrolls, which would cut a floating list.
-        let mut wrapper = div().flex().flex_col().gap(px(4.0)).w_full().child(face);
+        let mut wrapper = div().relative().w_full();
         if open {
-            let mut list = ui::menu().id("menu").w_full().max_h(px(300.0)).overflow_y_scroll()
-                .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_picker(cx)));
+            // The face records where it is, so the list's "click outside" ignores clicks on it
+            // (the face's own handler closes the list).
+            let face_bounds = self.picker_face.clone();
+            face = face.child(gpui::canvas(move |bounds, _, _| face_bounds.set(Some(bounds)), |_, _, _, _| {}).absolute().top_0().left_0().size_full());
+            let face_bounds = self.picker_face.clone();
+            let mut list = ui::menu().id("menu").relative().w_full().max_h(px(300.0)).overflow_y_scroll()
+                .on_mouse_down_out(cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                    if face_bounds.get().is_some_and(|face| face.contains(&event.position)) { return; }
+                    this.close_picker(cx);
+                }));
             for (index, (id, label)) in options.into_iter().enumerate() {
                 let chosen = id.clone();
                 list = list.child(ui::menu_item(("item", index), label, id == selected)
@@ -141,9 +147,12 @@ impl Overlay {
                         this.update_settings(|s| set(s, value), window, cx);
                     })));
             }
-            wrapper = wrapper.child(list);
+            // Floats over whatever follows: painted after the tree (`deferred`), and marked so
+            // the overlay's window region and mouse hit-testing cover it.
+            list = list.child(self.hits.float_mark());
+            wrapper = wrapper.child(deferred(div().absolute().top(px(40.0)).left_0().w_full().child(list)));
         }
-        wrapper
+        wrapper.child(face)
     }
 
     fn model_tab(&self, cx: &mut Context<Self>) -> Div {

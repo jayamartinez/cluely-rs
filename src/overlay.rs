@@ -123,6 +123,8 @@ pub struct Overlay {
     pub(crate) devices_loading: bool,
     /// Bytes used by saved sessions, for Settings → History.
     pub(crate) archive_bytes: Option<u64>,
+    /// Where the open dropdown's face was laid out, so a click on it closes rather than reopens.
+    pub(crate) picker_face: Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
 }
 
 impl Overlay {
@@ -193,7 +195,7 @@ impl Overlay {
             motion: None, live_since: None, turns: Vec::new(), scroll: ScrollHandle::new(),
             listening: None, listening_status: None, listening_epoch: 0, transcript: Vec::new(), provisional: Default::default(),
             model_installed: false, model_download: None, model_notice: None,
-            open_picker: None, reveal_accounts: false, devices: None, devices_loading: false, archive_bytes: None };
+            open_picker: None, reveal_accounts: false, devices: None, devices_loading: false, archive_bytes: None, picker_face: Rc::default() };
         overlay.refresh_model_status();
         if start_live { overlay.set_live(true, window, cx); }
         overlay
@@ -713,12 +715,40 @@ impl Render for Overlay {
 
 /// Bounds of the controls that should catch the mouse, collected while laying out a frame.
 #[derive(Clone, Default)]
-pub struct Hits(Rc<RefCell<Vec<Hit>>>, Rc<std::cell::Cell<f32>>);
+pub struct Hits(Rc<RefCell<Vec<Hit>>>, Rc<std::cell::Cell<f32>>, Rc<RefCell<Floating>>);
 
 type Hit = gpui::Bounds<gpui::Pixels>;
 
+/// Bounds of content painted deferred (an open dropdown list) in this frame and the last one.
+#[derive(Default)]
+struct Floating { current: Vec<Hit>, previous: Vec<Hit> }
+
 impl Hits {
-    fn clear(&self) { self.0.borrow_mut().clear(); }
+    fn clear(&self) {
+        self.0.borrow_mut().clear();
+        let mut floating = self.2.borrow_mut();
+        floating.previous = std::mem::take(&mut floating.current);
+    }
+
+    /// Floating bounds known so far: this frame's, or the last frame's before the deferred
+    /// content has been laid out again.
+    fn floating(&self) -> Vec<Hit> {
+        let floating = self.2.borrow();
+        if floating.current.is_empty() { floating.previous.clone() } else { floating.current.clone() }
+    }
+
+    /// Like [`Hits::mark`] for content painted deferred (after the tree), such as an open
+    /// dropdown list: it also records the bounds for the window region, and asks for one more
+    /// frame when they are new, since the region is computed before deferred content is laid out.
+    pub fn float_mark(&self) -> impl IntoElement {
+        let hits = self.clone();
+        gpui::canvas(move |bounds, window, _| {
+            hits.0.borrow_mut().push(bounds);
+            let mut floating = hits.2.borrow_mut();
+            if !floating.previous.contains(&bounds) { window.refresh(); }
+            floating.current.push(bounds);
+        }, |_, _, _, _| {}).absolute().top_0().left_0().size_full()
+    }
 
     /// Whether a window-relative physical point lies on an interactive control.
     fn contains(&self, (x, y): (i32, i32)) -> bool {
@@ -747,9 +777,10 @@ fn click_through(hwnd: Option<HWND>, hits: Hits, applied: Rc<RefCell<Vec<win::Sh
         let physical = |value: gpui::Pixels| (f32::from(value) * scale).round() as i32;
         // The window keeps the shape of everything visible (pill, panel, caption); the space
         // around them is cut away. Inside the panel, `passthrough` decides per cursor position.
-        let shapes: Vec<win::Shape> = children.iter().map(|bounds| {
+        let floating = hits.floating();
+        let shapes: Vec<win::Shape> = children.iter().map(|bounds| (bounds, false)).chain(floating.iter().map(|bounds| (bounds, true))).map(|(bounds, float)| {
             let height = f32::from(bounds.size.height);
-            let radius = if height <= 44.0 { height / 2.0 } else { 18.0 };
+            let radius = if float { 10.0 } else if height <= 44.0 { height / 2.0 } else { 18.0 };
             (physical(bounds.left()) - 1, physical(bounds.top()) - 1, physical(bounds.right()) + 1, physical(bounds.bottom()) + 1,
                 (radius * scale).round() as i32)
         }).collect();

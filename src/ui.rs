@@ -106,8 +106,8 @@ fn chevron(up: bool) -> impl IntoElement {
 /// The open list under a [`picker`]. Place it absolutely under the picker inside a `relative()`
 /// parent and wrap it in `gpui::deferred` so it paints over what follows.
 pub fn menu() -> Div {
+    // No shadow: the overlay's window region hugs the list, so a soft shadow would be cut square.
     div().flex().flex_col().p(px(4.0)).rounded(px(10.0)).bg(theme::raised()).border_1().border_color(theme::keycap_border())
-        .shadow_lg()
 }
 
 pub fn menu_item(id: impl Into<ElementId>, label: impl Into<SharedString>, selected: bool) -> gpui::Stateful<Div> {
