@@ -55,6 +55,11 @@ impl AudioCapture {
     /// Open the requested sources. Sources that fail are reported but don't stop the others;
     /// it's an error only when nothing could be opened.
     pub fn start(sources: &[Source], sink: Sender<AudioChunk>) -> anyhow::Result<(Self, Vec<(Source, String)>)> {
+        Self::start_with(sources, &Devices::default(), sink)
+    }
+
+    /// Like `start`, capturing from the chosen devices (system defaults where unset).
+    pub fn start_with(sources: &[Source], devices: &Devices, sink: Sender<AudioChunk>) -> anyhow::Result<(Self, Vec<(Source, String)>)> {
         let shared = Arc::new(Shared { stop: AtomicBool::new(false), levels: Default::default(), dropped: Default::default() });
         let session_start = Instant::now();
         let mut capture = Self { shared, threads: Vec::new(), opened: Vec::new() };
@@ -62,8 +67,9 @@ impl AudioCapture {
         for &source in sources {
             let (ready_tx, ready_rx) = channel();
             let (shared, sink) = (capture.shared.clone(), sink.clone());
+            let chosen = match source { Source::Me => devices.mic.clone(), Source::Them => devices.desktop.clone() };
             let thread = std::thread::Builder::new().name(format!("cluelyrs-audio-{}", source.label()))
-                .spawn(move || run_source(source, session_start, shared, sink, ready_tx))?;
+                .spawn(move || run_source(source, chosen, session_start, shared, sink, ready_tx))?;
             match ready_rx.recv_timeout(Duration::from_secs(5)) {
                 Ok(Ok(info)) => { capture.opened.push(info); capture.threads.push(thread); }
                 Ok(Err(error)) => { failures.push((source, error)); let _ = thread.join(); }
@@ -91,9 +97,9 @@ impl Drop for AudioCapture {
     fn drop(&mut self) { self.shutdown(); }
 }
 
-fn run_source(source: Source, session_start: Instant, shared: Arc<Shared>, sink: Sender<AudioChunk>,
+fn run_source(source: Source, chosen: Option<String>, session_start: Instant, shared: Arc<Shared>, sink: Sender<AudioChunk>,
     ready: Sender<Result<SourceInfo, String>>) {
-    let (device, config) = match open_device(source) {
+    let (device, config) = match open_device(source, chosen.as_deref()) {
         Ok(found) => found,
         Err(error) => { let _ = ready.send(Err(error)); return; }
     };
@@ -152,21 +158,59 @@ fn run_source(source: Source, session_start: Instant, shared: Arc<Shared>, sink:
     drop(stream);
 }
 
-fn open_device(source: Source) -> Result<(cpal::Device, cpal::SupportedStreamConfig), String> {
+/// Open the chosen device for `source`, or the system default when none is chosen or the
+/// chosen one is gone (unplugged since it was picked).
+fn open_device(source: Source, chosen: Option<&str>) -> Result<(cpal::Device, cpal::SupportedStreamConfig), String> {
     let host = cpal::default_host();
     let (device, config) = match source {
         Source::Me => {
-            let device = host.default_input_device().ok_or("No microphone is available.")?;
+            let device = find_named(host.input_devices(), chosen).or_else(|| host.default_input_device()).ok_or("No microphone is available.")?;
             let config = device.default_input_config();
             (device, config)
         }
         Source::Them => {
-            let device = host.default_output_device().ok_or("No playback device is available for desktop audio.")?;
+            let device = find_named(host.output_devices(), chosen).or_else(|| host.default_output_device()).ok_or("No playback device is available for desktop audio.")?;
             let config = device.default_output_config();
             (device, config)
         }
     };
     Ok((device, config.map_err(|error| error.to_string())?))
+}
+
+fn find_named<I: Iterator<Item = cpal::Device>>(devices: Result<I, cpal::Error>, name: Option<&str>) -> Option<cpal::Device> {
+    let name = name?;
+    devices.ok()?.find(|device| device.to_string() == name)
+}
+
+fn names<I: Iterator<Item = cpal::Device>>(devices: Result<I, cpal::Error>) -> Vec<String> {
+    devices.map(|devices| devices.map(|device| device.to_string()).collect()).unwrap_or_default()
+}
+
+/// Names of the microphones and playback devices on this PC, for the device pickers.
+/// Enumeration can take a moment; call it off the UI thread.
+pub fn list_devices() -> DeviceList {
+    let host = cpal::default_host();
+    DeviceList {
+        microphones: names(host.input_devices()),
+        playback: names(host.output_devices()),
+        default_microphone: host.default_input_device().map(|device| device.to_string()),
+        default_playback: host.default_output_device().map(|device| device.to_string()),
+    }
+}
+
+/// Which devices to capture from; `None` means the system default.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Devices {
+    pub mic: Option<String>,
+    pub desktop: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DeviceList {
+    pub microphones: Vec<String>,
+    pub playback: Vec<String>,
+    pub default_microphone: Option<String>,
+    pub default_playback: Option<String>,
 }
 
 /// Xruns (WASAPI loopback reports them around silence), reroutes and refused real-time

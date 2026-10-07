@@ -49,7 +49,8 @@ pub fn open(existing: &mut Option<WindowHandle<SessionsWindow>>, root: PathBuf, 
     }
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(1280.0), px(800.0)), cx))),
-        titlebar: Some(TitlebarOptions { title: Some("Sessions".into()), appears_transparent: false, traffic_light_position: None }),
+        // The frame is drawn by the window itself (title bar with its own controls).
+        titlebar: Some(TitlebarOptions { title: Some("Sessions".into()), appears_transparent: true, traffic_light_position: None }),
         kind: WindowKind::Normal,
         focus: true,
         show: true,
@@ -532,20 +533,44 @@ impl SessionsWindow {
 
 impl Render for SessionsWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let root = div().size_full().flex().bg(theme::glass()).font_family(theme::FONT).text_color(theme::text())
-            .child(self.sidebar(cx));
-        let Some(session) = self.session.clone() else {
-            return root.child(div().flex_1().flex().items_center().justify_center().text_size(px(14.0)).text_color(theme::muted())
-                .child("Select a session to review it."));
+        let mut content = div().flex_1().min_h_0().flex().child(self.sidebar(cx));
+        content = match self.session.clone() {
+            None => content.child(div().flex_1().flex().items_center().justify_center().text_size(px(14.0)).text_color(theme::muted())
+                .child("Select a session to review it.")),
+            Some(session) => {
+                let body = match self.tab {
+                    Tab::Summary => self.summary_tab(&session, cx),
+                    Tab::Timeline => self.timeline_tab(&session, cx),
+                    Tab::Transcript => self.transcript_tab(&session),
+                    Tab::Answers => self.answers_tab(&session),
+                    Tab::Screenshots => self.screenshots_tab(&session, cx),
+                };
+                content.child(div().flex_1().min_w_0().h_full().flex().flex_col().child(self.header(&session, window, cx)).child(body))
+                    .child(self.rail(&session, cx))
+            }
         };
-        let body = match self.tab {
-            Tab::Summary => self.summary_tab(&session, cx),
-            Tab::Timeline => self.timeline_tab(&session, cx),
-            Tab::Transcript => self.transcript_tab(&session),
-            Tab::Answers => self.answers_tab(&session),
-            Tab::Screenshots => self.screenshots_tab(&session, cx),
-        };
-        root.child(div().flex_1().min_w_0().h_full().flex().flex_col().child(self.header(&session, window, cx)).child(body))
-            .child(self.rail(&session, cx))
+        // A normal, opaque window with its own title bar: Sessions is a workspace, not an overlay.
+        div().size_full().flex().flex_col().bg(rgb(0x0f1012)).font_family(theme::FONT).text_color(theme::text())
+            .child(title_bar())
+            .child(content)
     }
+}
+
+/// Drag area with the app mark, the window's name and its own minimize / maximize / close.
+fn title_bar() -> impl IntoElement {
+    let control = |id: &'static str, icon: &'static str, danger: bool| {
+        div().id(id).w(px(46.0)).h(px(36.0)).flex().items_center().justify_center().cursor_pointer()
+            .hover(move |button| if danger { button.bg(rgb(0xc42b1c)).text_color(rgb(0xffffff)) } else { button.bg(theme::raised()) })
+            .child(crate::ui::icon(icon, 10.0, theme::body()))
+    };
+    div().id("title-bar").flex_none().h(px(36.0)).flex().items_center().justify_between().pl(px(14.0))
+        .bg(rgb(0x131417)).border_b_1().border_color(theme::divider())
+        .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())
+        .child(div().flex().items_center().gap(px(8.0))
+            .child(crate::ui::mark(16.0))
+            .child(div().text_size(px(12.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::body()).child("Sessions")))
+        .child(div().flex().h_full()
+            .child(control("minimize", "icons/minimize.svg", false).on_mouse_down(MouseButton::Left, |_, window, cx| { cx.stop_propagation(); window.minimize_window(); }))
+            .child(control("maximize", "icons/maximize.svg", false).on_mouse_down(MouseButton::Left, |_, window, cx| { cx.stop_propagation(); window.zoom_window(); }))
+            .child(control("close-window", "icons/window-close.svg", true).on_mouse_down(MouseButton::Left, |_, window, cx| { cx.stop_propagation(); window.remove_window(); })))
 }

@@ -9,7 +9,7 @@ use windows::Win32::Graphics::Dwm::{
     DWMWCP_DONOTROUND, DwmSetWindowAttribute,
 };
 use windows::Win32::Graphics::Gdi::{
-    CombineRgn, CreateRectRgn, CreateRoundRectRgn, DeleteObject, GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO,
+    ClientToScreen, CombineRgn, CreateRectRgn, CreateRoundRectRgn, DeleteObject, GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO,
     MonitorFromWindow, RGN_OR, SetWindowRgn,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -91,9 +91,17 @@ pub type Shape = (i32, i32, i32, i32, i32);
 /// clicks and hover go straight to whatever is underneath.
 pub fn set_shape(hwnd: HWND, shapes: &[Shape]) {
     unsafe {
+        // Shapes are in client pixels, but a window region is relative to the window's outer
+        // frame, which keeps invisible resize borders (8 px left, 1 px top here) even without a
+        // caption. Without this offset the region sat left of the content and clipped its right edge.
+        let mut frame = RECT::default();
+        let _ = GetWindowRect(hwnd, &mut frame);
+        let mut client = POINT::default();
+        let _ = ClientToScreen(hwnd, &mut client);
+        let (dx, dy) = (client.x - frame.left, client.y - frame.top);
         let region = CreateRectRgn(0, 0, 0, 0);
         for &(left, top, right, bottom, radius) in shapes {
-            let part = CreateRoundRectRgn(left, top, right + 1, bottom + 1, radius * 2, radius * 2);
+            let part = CreateRoundRectRgn(left + dx, top + dy, right + dx + 1, bottom + dy + 1, radius * 2, radius * 2);
             CombineRgn(Some(region), Some(region), Some(part), RGN_OR);
             let _ = DeleteObject(part.into());
         }

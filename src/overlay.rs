@@ -1,6 +1,6 @@
-//! The overlay: a draggable pill (mark · Start/live timer · Hide · Stop) above one
-//! glass panel. Spike scope: layout, live state, keybind movement and scrolling.
-//! Answers are placeholder text until the provider slice lands.
+//! The overlay: a draggable pill (mark · Start/live timer · Hide · Stop) above one glass
+//! panel with the live transcript, the answer thread, quick actions and the composer.
+//! Listening (capture, transcription, endpointing) runs off this thread; see `transcript_view`.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -19,7 +19,9 @@ use windows::Win32::Foundation::HWND;
 use crate::answer::{self, Exchange};
 use crate::archive::{self, Archive, Recorder};
 use crate::input::{InputEvent, TextInput};
+use crate::listening::{self, Listening};
 use crate::settings::Provider;
+use crate::transcript_view::{Download, ProvisionalLine, TranscriptLine};
 use crate::sessions_window::{self, SessionsWindow};
 use crate::hotkeys::{Action, Hotkeys};
 use crate::settings::{Settings, Store};
@@ -31,6 +33,8 @@ use crate::win;
 const WIDTH: f32 = 600.0;
 const IDLE_HEIGHT: f32 = 120.0;
 const LIVE_HEIGHT: f32 = 600.0;
+/// Settings needs room for an open picker list below the content.
+const SETTINGS_HEIGHT: f32 = 760.0;
 /// Held movement eases in so a tap nudges, then cruises. Pixels per ~16 ms frame.
 const MOVE_START: f32 = 4.0;
 const MOVE_CRUISE: f32 = 22.0;
@@ -92,12 +96,35 @@ pub struct Overlay {
     pub(crate) claude_status: Option<crate::chat::SubscriptionStatus>,
     pub(crate) signing_in: bool,
     /// The Live session being saved to History, when saving is on.
-    recorder: Option<Recorder>,
+    pub(crate) recorder: Option<Recorder>,
     /// The held-key loop that is currently running, if any.
     motion: Option<Motion>,
-    live_since: Option<Instant>,
+    pub(crate) live_since: Option<Instant>,
     turns: Vec<Turn>,
     scroll: ScrollHandle,
+    /// The capture + transcription pipeline while Live is transcribing.
+    pub(crate) listening: Option<Listening>,
+    pub(crate) listening_status: Option<listening::Status>,
+    /// Bumped on every pipeline start, so a replaced pipeline's messages are ignored.
+    pub(crate) listening_epoch: u64,
+    /// Committed transcript of the current Live session, with source and timestamps.
+    pub(crate) transcript: Vec<TranscriptLine>,
+    /// What each source is still saying: Me, then Them.
+    pub(crate) provisional: [Option<ProvisionalLine>; 2],
+    pub(crate) model_installed: bool,
+    pub(crate) model_download: Option<Download>,
+    /// Feedback under the model row in Settings → Listening.
+    pub(crate) model_notice: Option<SharedString>,
+    /// The dropdown that is open in Settings, if any.
+    pub(crate) open_picker: Option<crate::settings_view::Picker>,
+    /// Show subscription account names in Settings → Model (masked by default; never saved).
+    pub(crate) reveal_accounts: bool,
+    pub(crate) devices: Option<crate::audio::DeviceList>,
+    pub(crate) devices_loading: bool,
+    /// Bytes used by saved sessions, for Settings → History.
+    pub(crate) archive_bytes: Option<u64>,
+    /// Where the open dropdown's face was laid out, so a click on it closes rather than reopens.
+    pub(crate) picker_face: Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
 }
 
 impl Overlay {
@@ -165,12 +192,16 @@ impl Overlay {
             recorder: None, shape: Rc::default(), hits: Hits::default(), composer, key_input, model_input, base_url_input,
             key_notice: None, loaded_models: Vec::new(), models_loading: false, job_cancel: None, next_turn: 0, catching_mouse: true, return_focus: None,
             codex: crate::codex::CodexClient::new(), codex_status: None, claude_status: None, signing_in: false,
-            motion: None, live_since: None, turns: Vec::new(), scroll: ScrollHandle::new() };
+            motion: None, live_since: None, turns: Vec::new(), scroll: ScrollHandle::new(),
+            listening: None, listening_status: None, listening_epoch: 0, transcript: Vec::new(), provisional: Default::default(),
+            model_installed: false, model_download: None, model_notice: None,
+            open_picker: None, reveal_accounts: false, devices: None, devices_loading: false, archive_bytes: None, picker_face: Rc::default() };
+        overlay.refresh_model_status();
         if start_live { overlay.set_live(true, window, cx); }
         overlay
     }
 
-    pub fn update_settings(&mut self, change: impl FnOnce(&mut Settings), _window: &mut Window, cx: &mut Context<Self>) {
+    pub fn update_settings(&mut self, change: impl FnOnce(&mut Settings), window: &mut Window, cx: &mut Context<Self>) {
         let previous = self.store.value.clone();
         change(&mut self.store.value);
         if self.store.value == previous { return; }
@@ -185,11 +216,19 @@ impl Overlay {
             self.loaded_models.clear();
             self.key_notice = None;
         }
+        let now = &self.store.value;
+        if previous.transcribe != now.transcribe || previous.listen_mic != now.listen_mic || previous.listen_desktop != now.listen_desktop
+            || previous.mic_device != now.mic_device || previous.desktop_device != now.desktop_device {
+            self.restart_listening_if_live(window, cx);
+        }
         cx.notify();
     }
 
     pub fn open_settings(&mut self, tab: Tab, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_picker = None;
         if tab == Tab::Model { self.refresh_subscriptions(window, cx); }
+        if tab == Tab::Listening { self.refresh_model_status(); self.load_devices(window, cx); }
+        if tab == Tab::History { self.refresh_archive_size(window, cx); }
         self.settings_tab = Some(tab);
         self.open_panel(window, cx);
     }
@@ -212,6 +251,8 @@ impl Overlay {
     /// Close settings and return to the overlay.
     pub fn close_panels(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.settings_tab = None;
+        self.open_picker = None;
+        self.reveal_accounts = false;
         self.hotkeys.set_panel_open(false);
         self.fit(window);
         cx.notify();
@@ -225,8 +266,8 @@ impl Overlay {
 
     /// Size the window to its content state; transparent area outside the content still takes clicks.
     fn fit(&self, window: &mut Window) {
-        let tall = self.live_since.is_some() || self.settings_tab.is_some();
-        window.resize(size(px(WIDTH), px(if tall { LIVE_HEIGHT } else { IDLE_HEIGHT })));
+        let height = if self.settings_tab.is_some() { SETTINGS_HEIGHT } else if self.live_since.is_some() { LIVE_HEIGHT } else { IDLE_HEIGHT };
+        window.resize(size(px(WIDTH), px(height)));
     }
 
     fn handle(&mut self, action: Action, window: &mut Window, cx: &mut Context<Self>) {
@@ -247,9 +288,14 @@ impl Overlay {
         if !live {
             if let Some(cancel) = self.job_cancel.take() { cancel.store(true, Ordering::Relaxed); }
             self.turns.clear();
+            // The pipeline's own final commits arrive after it's gone and are dropped, so save
+            // what each source was still saying from the last provisional text first.
+            self.archive_provisional();
+            self.stop_listening();
+            self.clear_transcript();
         }
         self.record(live);
-        if live { self.settings_tab = None; self.hotkeys.set_panel_open(false); }
+        if live { self.settings_tab = None; self.hotkeys.set_panel_open(false); self.start_listening(window, cx); }
         self.fit(window);
         cx.notify();
     }
@@ -567,7 +613,6 @@ impl Overlay {
             .bg(theme::glass()).border_1().border_color(theme::hairline())
             // Dragging the pill background moves the whole overlay.
             .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())
-            .child(self.hits.mark())
             .child(mark).child(status).child(hide);
         let active = |button: gpui::Stateful<gpui::Div>, on: bool| button.when(on, |button| button.bg(theme::bubble()).border_1().border_color(theme::bubble_border()));
         if !live {
@@ -586,15 +631,11 @@ impl Overlay {
                 .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| this.set_live(false, window, cx)))
                 .child(div().size(px(10.0)).rounded(px(2.0)).bg(theme::text())));
         }
-        pill
+        pill.child(self.hits.mark())
     }
 
     fn panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let ticker = div().flex().items_center().gap(px(10.0)).px(px(16.0)).py(px(10.0))
-            .border_b_1().border_color(theme::divider())
-            .child(div().text_size(px(11.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::accent_soft()).child("HEARD"))
-            .child(div().text_size(px(12.0)).text_color(theme::muted()).truncate()
-                .child("Listening for the conversation…"));
+        let ticker = self.transcript_block();
         let mut thread = div().id("thread").flex().flex_col().gap(px(14.0)).px(px(18.0)).py(px(14.0))
             .flex_1().overflow_y_scroll().track_scroll(&self.scroll);
         if self.turns.is_empty() {
@@ -619,11 +660,10 @@ impl Overlay {
             actions = actions.child(div().id(("action", index)).relative().px(px(10.0)).py(px(6.0)).rounded(px(8.0)).cursor_pointer()
                 .text_size(px(13.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).hover(|b| b.bg(theme::raised()))
                 .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, window, cx| this.send(label, String::new(), window, cx)))
-                .child(self.hits.mark()).child(label));
+                .child(label).child(self.hits.mark()));
         }
         let composer = div().relative().mx(px(12.0)).mb(px(12.0)).flex().flex_col().gap(px(12.0)).p(px(12.0)).rounded(px(13.0))
             .bg(theme::field()).border_1().border_color(theme::hairline())
-            .child(self.hits.mark())
             .child(div().id("composer-input").cursor_text()
                 .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| window.focus(&this.composer.focus_handle(cx))))
                 .child(self.composer.clone()))
@@ -638,7 +678,8 @@ impl Overlay {
                     .child(keycap(self.hotkeys.label(Action::Assist))).child(div().text_size(px(12.0)).text_color(theme::muted()).child("Assist")))
                 .child(div().id("send").size(px(30.0)).rounded_full().bg(theme::accent()).flex().items_center().justify_center().cursor_pointer()
                     .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| { let input = this.composer.clone(); this.send_composer(input, window, cx); }))
-                    .text_color(theme::accent_ink()).font_weight(FontWeight::BOLD).child("↑")));
+                    .text_color(theme::accent_ink()).font_weight(FontWeight::BOLD).child("↑")))
+            .child(self.hits.mark());
         div().w(px(560.0)).flex_1().min_h_0().flex().flex_col().rounded(px(18.0)).bg(theme::glass())
             .border_1().border_color(theme::hairline()).overflow_hidden()
             .child(ticker).child(thread).child(actions).child(composer)
@@ -674,12 +715,20 @@ impl Render for Overlay {
 
 /// Bounds of the controls that should catch the mouse, collected while laying out a frame.
 #[derive(Clone, Default)]
-pub struct Hits(Rc<RefCell<Vec<Hit>>>, Rc<std::cell::Cell<f32>>);
+pub struct Hits(Rc<RefCell<Vec<Hit>>>, Rc<std::cell::Cell<f32>>, Rc<RefCell<Vec<Hit>>>);
 
 type Hit = gpui::Bounds<gpui::Pixels>;
 
 impl Hits {
-    fn clear(&self) { self.0.borrow_mut().clear(); }
+    fn clear(&self) { self.0.borrow_mut().clear(); self.2.borrow_mut().clear(); }
+
+    /// Areas reserved this frame for content painted deferred (an open dropdown list).
+    fn floating(&self) -> Vec<Hit> { self.2.borrow().clone() }
+
+    /// Reserve `bounds` in the window region for content that is painted deferred, so it is
+    /// visible in the very frame it appears. Deferred content lays out after the region is
+    /// computed, so the element that opens it reserves the area during the main pass.
+    pub fn reserve(&self, bounds: Hit) { self.2.borrow_mut().push(bounds); }
 
     /// Whether a window-relative physical point lies on an interactive control.
     fn contains(&self, (x, y): (i32, i32)) -> bool {
@@ -688,7 +737,10 @@ impl Hits {
         self.0.borrow().iter().any(|bounds| bounds.contains(&point))
     }
 
-    /// An invisible child that records its parent's bounds. The parent must be `relative()`.
+    /// An invisible child that records its parent's bounds. The parent must be `relative()`, and
+    /// the mark must be its *last* child: the layout engine still applies the parent's `gap`
+    /// after an absolutely positioned first child, which pushed the real children past the
+    /// window region (the pill's right end was cut off).
     pub fn mark(&self) -> impl IntoElement {
         let hits = self.clone();
         gpui::canvas(move |bounds, _, _| hits.0.borrow_mut().push(bounds), |_, _, _, _| {}).absolute().top_0().left_0().size_full()
@@ -705,9 +757,10 @@ fn click_through(hwnd: Option<HWND>, hits: Hits, applied: Rc<RefCell<Vec<win::Sh
         let physical = |value: gpui::Pixels| (f32::from(value) * scale).round() as i32;
         // The window keeps the shape of everything visible (pill, panel, caption); the space
         // around them is cut away. Inside the panel, `passthrough` decides per cursor position.
-        let shapes: Vec<win::Shape> = children.iter().map(|bounds| {
+        let floating = hits.floating();
+        let shapes: Vec<win::Shape> = children.iter().map(|bounds| (bounds, false)).chain(floating.iter().map(|bounds| (bounds, true))).map(|(bounds, float)| {
             let height = f32::from(bounds.size.height);
-            let radius = if height <= 44.0 { height / 2.0 } else { 18.0 };
+            let radius = if float { 10.0 } else if height <= 44.0 { height / 2.0 } else { 18.0 };
             (physical(bounds.left()) - 1, physical(bounds.top()) - 1, physical(bounds.right()) + 1, physical(bounds.bottom()) + 1,
                 (radius * scale).round() as i32)
         }).collect();

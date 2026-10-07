@@ -1,15 +1,18 @@
-//! Settings panel, laid out like the Paper "Settings · Model" artboard. Every change
-//! saves immediately; window-level options (capture hiding) also apply immediately.
+//! Settings panel, laid out like the Paper "Settings" v2 artboards: short labels, dropdown
+//! pickers, toggles on the right. Every change saves immediately; window-level options
+//! (capture hiding) and listening options apply to the running session.
 
-use gpui::{Context, Div, Focusable, FontWeight, IntoElement, MouseButton, ParentElement, SharedString, Styled, div, prelude::*, px};
+
+use gpui::{Context, Div, Focusable, FontWeight, IntoElement, MouseButton, ParentElement, SharedString, Styled, Window, deferred, div, prelude::*, px};
 
 use crate::archive::Retention;
+use crate::chat::SubscriptionStatus;
 use crate::hotkeys::{Action, DEFAULTS};
 use crate::overlay::Overlay;
-use crate::settings::{
-    AnswerStyle, AudioSource, ClaudeModel, Language, Provider, Settings, SpeechEngine, WhisperModel,
-};
+use crate::settings::{AnswerStyle, ClaudeModel, Provider, Settings};
+use crate::stt::parakeet::MODEL;
 use crate::theme;
+use crate::transcript_view::model_size_label;
 use crate::ui;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -21,6 +24,13 @@ impl Tab {
         match self { Tab::Model => "Model", Tab::Listening => "Listening", Tab::Keys => "Keys", Tab::Window => "Window", Tab::History => "History" }
     }
 }
+
+/// The dropdowns in Settings; at most one is open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Picker { CodexModel, ClaudeModel, AnswerStyle, ApiProvider, ApiModel, Mic, Desktop }
+
+/// Taller lists scroll.
+const MENU_MAX_HEIGHT: f32 = 300.0;
 
 /// A segmented control over `options`; clicking applies `set` and saves.
 fn choice<T: Copy + PartialEq + 'static>(
@@ -35,16 +45,39 @@ fn choice<T: Copy + PartialEq + 'static>(
 }
 
 fn field(label: &'static str, control: impl IntoElement) -> Div {
-    div().flex().flex_col().gap(px(6.0)).child(div().text_size(px(12.0)).text_color(theme::muted()).child(label)).child(control)
+    div().flex().flex_col().gap(px(6.0)).flex_1().min_w_0().child(div().text_size(px(12.0)).text_color(theme::muted()).child(label)).child(control)
 }
 
-fn toggle(name: &'static str, title: &'static str, detail: &'static str, on: bool, set: fn(&mut Settings, bool), cx: &mut Context<Overlay>) -> impl IntoElement {
-    div().id(name).flex().items_center().gap(px(12.0)).py(px(8.0)).cursor_pointer()
-        .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, window, cx| this.update_settings(|s| set(s, !on), window, cx)))
-        .child(div().flex().flex_col().gap(px(1.0)).flex_1()
-            .child(div().text_size(px(13.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child(title))
-            .child(div().text_size(px(12.0)).text_color(theme::muted()).child(detail)))
+/// A clickable switch bound to a boolean setting.
+fn switch(name: &'static str, on: bool, set: fn(&mut Settings, bool), cx: &mut Context<Overlay>) -> impl IntoElement {
+    div().id(name).flex_none().cursor_pointer()
+        .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, window, cx| { cx.stop_propagation(); this.update_settings(|s| set(s, !on), window, cx) }))
         .child(ui::switch(on))
+}
+
+fn button(id: &'static str, label: impl Into<SharedString>, primary: bool) -> gpui::Stateful<Div> {
+    let base = div().id(id).flex_none().px(px(12.0)).py(px(6.0)).rounded(px(9.0)).cursor_pointer().text_size(px(12.0)).font_weight(FontWeight::SEMIBOLD).child(label.into());
+    if primary { base.bg(theme::accent()).text_color(theme::accent_ink()) } else { base.border_1().border_color(theme::hairline()).text_color(theme::body()) }
+}
+
+/// "plus" → "ChatGPT Plus", "max_5x" → "Max 5x": the plan as the CLI reports it, made readable.
+fn plan_label(provider: Provider, plan: &str) -> String {
+    let words: Vec<String> = plan.split(['_', '-', ' ']).filter(|w| !w.is_empty()).map(|word| {
+        let mut chars = word.chars();
+        match chars.next() { Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(), None => String::new() }
+    }).collect();
+    let plan = words.join(" ");
+    match (provider, plan.strip_prefix("Chatgpt")) {
+        (_, Some(rest)) => format!("ChatGPT{rest}"),
+        (Provider::Codex, None) => format!("ChatGPT {plan}"),
+        (_, None) => plan,
+    }
+}
+
+/// Everything after the first character hidden, including the domain.
+fn masked(account: &str) -> String {
+    let mut chars = account.chars();
+    match chars.next() { Some(first) => format!("{first}{}", "•".repeat(account.chars().count().clamp(6, 15))), None => "••••••".into() }
 }
 
 impl Overlay {
@@ -59,9 +92,10 @@ impl Overlay {
                 .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, window, cx| this.open_settings(item, window, cx)))
                 .child(item.label()));
         }
-        let header = ui::panel_header().child(tabs)
-            .child(ui::close_button("close-settings")
-                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| this.close_panels(window, cx))));
+        let close = ui::round_button("close-settings").size(px(28.0)).border_1().border_color(theme::hairline())
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| this.close_panels(window, cx)))
+            .child(ui::icon("icons/close.svg", 12.0, theme::body()));
+        let header = ui::panel_header().child(tabs).child(close);
         let body = match tab {
             Tab::Model => self.model_tab(cx).into_any_element(),
             Tab::Listening => self.listening_tab(cx).into_any_element(),
@@ -71,21 +105,76 @@ impl Overlay {
         };
         let mut panel = div().relative().w(px(560.0)).flex().flex_col().rounded(px(18.0)).bg(theme::glass())
             .border_1().border_color(theme::hairline()).overflow_hidden()
-            .child(self.hits.mark())
             .child(header)
-            .child(div().id("settings-body").flex().flex_col().gap(px(16.0)).px(px(18.0)).py(px(16.0)).max_h(px(470.0)).overflow_y_scroll().child(body));
+            .child(div().id("settings-body").flex().flex_col().px(px(18.0)).pt(px(14.0)).pb(px(20.0)).max_h(px(470.0)).overflow_y_scroll().child(body));
         if let Some(warning) = self.store.warning {
             panel = panel.child(div().px(px(18.0)).pb(px(12.0)).text_size(px(12.0)).text_color(gpui::rgb(0xffb4a8)).child(warning));
         }
-        panel
+        panel.child(self.hits.mark())
+    }
+
+    pub(crate) fn toggle_picker(&mut self, picker: Picker, cx: &mut Context<Self>) {
+        self.open_picker = if self.open_picker == Some(picker) { None } else { Some(picker) };
+        cx.notify();
+    }
+
+    pub(crate) fn close_picker(&mut self, cx: &mut Context<Self>) {
+        if self.open_picker.take().is_some() { cx.notify(); }
+    }
+
+    /// A dropdown bound to a string-valued choice. `options` are (id, label); `set` gets the id.
+    fn dropdown(&self, picker: Picker, value: impl Into<SharedString>, options: Vec<(String, String)>, selected: &str,
+        set: fn(&mut Settings, String), cx: &mut Context<Self>) -> Div {
+        let open = self.open_picker == Some(picker);
+        let mut face = ui::picker(("picker", picker as usize), value, open).relative()
+            .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| { cx.stop_propagation(); this.toggle_picker(picker, cx) }));
+        let mut wrapper = div().relative().w_full();
+        if open {
+            // The face records where it is, so the list's "click outside" ignores clicks on it
+            // (the face's own handler closes the list).
+            // The list hangs 40 px below the face, the same width, up to its scroll limit. Its
+            // area is reserved now so the window region shows it in the first frame.
+            let face_bounds = self.picker_face.clone();
+            let hits = self.hits.clone();
+            let list_height = px((options.len() as f32 * 34.0 + 12.0).min(MENU_MAX_HEIGHT + 12.0));
+            face = face.child(gpui::canvas(move |bounds, _, _| {
+                face_bounds.set(Some(bounds));
+                hits.reserve(gpui::Bounds::new(gpui::point(bounds.left(), bounds.bottom() + px(4.0)), gpui::size(bounds.size.width, list_height)));
+            }, |_, _, _, _| {}).absolute().top_0().left_0().size_full());
+            let face_bounds = self.picker_face.clone();
+            let mut list = ui::menu().id("menu").relative().w_full().max_h(px(MENU_MAX_HEIGHT)).overflow_y_scroll()
+                .on_mouse_down_out(cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                    if face_bounds.get().is_some_and(|face| face.contains(&event.position)) { return; }
+                    this.close_picker(cx);
+                }));
+            for (index, (id, label)) in options.into_iter().enumerate() {
+                let chosen = id.clone();
+                list = list.child(ui::menu_item(("item", index), label, id == selected)
+                    .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.close_picker(cx);
+                        let value = chosen.clone();
+                        this.update_settings(|s| set(s, value), window, cx);
+                    })));
+            }
+            // Floats over whatever follows: painted after the tree (`deferred`), and marked so
+            // the overlay's window region and mouse hit-testing cover it.
+            list = list.child(self.hits.mark());
+            wrapper = wrapper.child(deferred(div().absolute().top(px(40.0)).left_0().w_full().child(list)));
+        }
+        wrapper.child(face)
     }
 
     fn model_tab(&self, cx: &mut Context<Self>) -> Div {
         let s = &self.store.value;
+        let detail = |provider: Provider, cli: &str, status: Option<&SubscriptionStatus>| match status.and_then(|st| st.plan.as_deref()).filter(|_| status.is_some_and(|st| st.signed_in)) {
+            Some(plan) => format!("{cli} · {}", plan_label(provider, plan)),
+            None => cli.to_string(),
+        };
         let providers = [
-            (Provider::Codex, "ChatGPT subscription", "Through the official Codex CLI sign-in"),
-            (Provider::Claude, "Claude subscription", "Through the official Claude Code sign-in"),
-            (Provider::ApiKey, "Your API key", "Anthropic or OpenAI · billed to your account"),
+            (Provider::Codex, "ChatGPT subscription", detail(Provider::Codex, "Codex CLI", self.codex_status.as_ref())),
+            (Provider::Claude, "Claude subscription", detail(Provider::Claude, "Claude Code", self.claude_status.as_ref())),
+            (Provider::ApiKey, "Your API key", "Anthropic, OpenAI, OpenRouter, Gemini, Ollama…".to_string()),
         ];
         let mut list = div().flex().flex_col().gap(px(8.0)).child(ui::section_label("ANSWER WITH"));
         for (index, (provider, title, detail)) in providers.into_iter().enumerate() {
@@ -97,39 +186,34 @@ impl Overlay {
         let model: Div = match s.provider {
             Provider::Codex => {
                 let models = self.codex_status.as_ref().map(|st| st.models.clone()).unwrap_or_default();
-                if models.is_empty() {
-                    field("Model", div().text_size(px(13.0)).text_color(theme::body()).child("Codex default · the list appears once you're signed in"))
-                } else {
-                    let mut chips = ui::segmented().child(ui::segment("codex-default", "Default", s.codex_model.is_empty())
-                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| this.update_settings(|s| s.codex_model.clear(), window, cx))));
-                    for (index, (id, name)) in models.into_iter().take(12).enumerate() {
-                        let chosen = id.clone();
-                        chips = chips.child(ui::segment(("codex-model", index), name, s.codex_model == id)
-                            .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, window, cx| { let id = chosen.clone(); this.update_settings(|s| s.codex_model = id, window, cx) })));
-                    }
-                    field("Model", div().flex().flex_col().gap(px(8.0)).child(chips)
-                        .child(div().id("codex-sign-out").cursor_pointer().text_size(px(12.0)).text_color(theme::muted())
-                            .hover(|t| t.text_color(theme::body()))
-                            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| this.sign_out_codex(window, cx)))
-                            .child("Sign out of ChatGPT")))
-                }
+                let mut options = vec![(String::new(), "Default".to_string())];
+                options.extend(models.iter().cloned());
+                let value = models.iter().find(|(id, _)| *id == s.codex_model).map(|(_, name)| name.clone())
+                    .unwrap_or_else(|| if s.codex_model.is_empty() { "Default".into() } else { s.codex_model.clone() });
+                field("Model", self.dropdown(Picker::CodexModel, value, options, &s.codex_model, |s, v| s.codex_model = v, cx))
             }
-            Provider::Claude => field("Model", choice("claude-model",
-                &[(ClaudeModel::Sonnet, "Sonnet"), (ClaudeModel::Opus, "Opus"), (ClaudeModel::Haiku, "Haiku")],
-                s.claude_model, |s, v| s.claude_model = v, cx)),
-            Provider::ApiKey => self.api_section(cx),
+            Provider::Claude => {
+                let options = [(ClaudeModel::Sonnet, "Sonnet"), (ClaudeModel::Opus, "Opus"), (ClaudeModel::Haiku, "Haiku")];
+                let value = options.iter().find(|(m, _)| *m == s.claude_model).map(|(_, l)| *l).unwrap_or("Sonnet");
+                field("Model", self.dropdown(Picker::ClaudeModel, value, options.iter().map(|(m, l)| (m.id().to_string(), l.to_string())).collect(), s.claude_model.id(),
+                    |s, v| s.claude_model = match v.as_str() { "opus" => ClaudeModel::Opus, "haiku" => ClaudeModel::Haiku, _ => ClaudeModel::Sonnet }, cx))
+            }
+            Provider::ApiKey => self.api_model_field(cx),
         };
-        div().flex().flex_col().gap(px(16.0))
-            .child(list)
-            .child(model)
-            .child(field("Answer style", choice("style",
-                &[(AnswerStyle::Spoken, "Words I can say aloud"), (AnswerStyle::Standard, "Standard explanations")],
-                s.answer_style, |s, v| s.answer_style = v, cx)))
+        let styles = [(AnswerStyle::Spoken, "Words I can say aloud"), (AnswerStyle::Standard, "Standard explanations")];
+        let style_value = styles.iter().find(|(st, _)| *st == s.answer_style).map(|(_, l)| *l).unwrap_or("Words I can say aloud");
+        let style = field("Answer style", self.dropdown(Picker::AnswerStyle, style_value,
+            styles.iter().map(|(st, l)| (format!("{st:?}"), l.to_string())).collect(), &format!("{:?}", s.answer_style),
+            |s, v| s.answer_style = if v == "Standard" { AnswerStyle::Standard } else { AnswerStyle::Spoken }, cx));
+        let mut tab = div().flex().flex_col().gap(px(16.0)).child(list).child(div().flex().gap(px(12.0)).child(model).child(style));
+        if s.provider == Provider::ApiKey { tab = tab.child(self.api_key_section(cx)); }
+        tab
     }
 
-    /// Trailing status for a provider row: connected account, a Sign in button, or a hint.
+    /// Trailing status for a provider row: the account (masked until clicked), a Sign in
+    /// button, or a hint.
     fn connection_badge(&self, provider: Provider, index: usize, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let text = |label: String, color: gpui::Rgba| div().w(px(150.0)).flex_none().flex().justify_end().text_size(px(12.0)).text_color(color).truncate().child(label).into_any_element();
+        let text = |label: String, color: gpui::Rgba| div().flex_none().text_size(px(12.0)).text_color(color).child(label).into_any_element();
         let status = match provider {
             Provider::Codex => self.codex_status.as_ref(),
             Provider::Claude => self.claude_status.as_ref(),
@@ -141,24 +225,48 @@ impl Overlay {
         };
         match status {
             None => text("Checking…".into(), theme::muted()),
-            Some(st) if st.signed_in => text(st.account.clone().unwrap_or("Connected".into()), theme::ok()),
+            Some(st) if st.signed_in => {
+                let account = st.account.clone().unwrap_or("Connected".into());
+                let shown = if self.reveal_accounts { account.clone() } else { masked(&account) };
+                let mut badge = div().flex().items_center().gap(px(6.0));
+                if self.reveal_accounts && provider == Provider::Codex {
+                    badge = badge.child(div().id(("sign-out", index)).cursor_pointer().text_size(px(12.0)).text_color(theme::muted()).hover(|t| t.text_color(theme::body()))
+                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| { cx.stop_propagation(); this.sign_out_codex(window, cx) }))
+                        .child("Sign out"));
+                }
+                badge.child(div().id(("account", index)).cursor_pointer().flex().items_center().gap(px(6.0))
+                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| { cx.stop_propagation(); this.reveal_accounts = !this.reveal_accounts; cx.notify(); }))
+                        .child(div().font_family(theme::MONO).text_size(px(12.0)).text_color(theme::ok()).px(px(8.0)).py(px(3.0)).rounded(px(6.0)).bg(theme::raised()).child(shown))
+                        .child(ui::icon(if self.reveal_accounts { "icons/eye-off.svg" } else { "icons/eye.svg" }, 14.0, theme::muted())))
+                    .into_any_element()
+            }
             Some(st) if !st.installed => text("CLI not installed".into(), theme::muted()),
             Some(_) => div().id(("sign-in", index)).flex_none().px(px(10.0)).py(px(5.0)).rounded(px(8.0)).bg(theme::accent()).cursor_pointer()
                 .text_size(px(12.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::accent_ink())
-                .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, window, cx| this.sign_in(provider, window, cx)))
+                .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, window, cx| { cx.stop_propagation(); this.sign_in(provider, window, cx) }))
                 .child(if self.signing_in { "Waiting for browser…" } else { "Sign in" }).into_any_element(),
         }
     }
 
-    fn api_section(&self, cx: &mut Context<Self>) -> Div {
+    /// Model for "Your API key": a picker over loaded or suggested models, plus a free-text id.
+    fn api_model_field(&self, cx: &mut Context<Self>) -> Div {
         let s = &self.store.value;
-        let mut presets = ui::segmented();
-        for (index, preset) in crate::providers::PRESETS.iter().enumerate() {
-            let id = preset.id;
-            presets = presets.child(ui::segment(("api-provider", index), preset.label, s.api_provider == id)
-                .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, window, cx| this.update_settings(|s| s.api_provider = id.to_string(), window, cx))));
-        }
-        let Some(preset) = crate::providers::preset(&s.api_provider) else { return field("Provider", presets) };
+        let suggestions: Vec<String> = match crate::providers::preset(&s.api_provider) {
+            Some(preset) if self.loaded_models.is_empty() => preset.suggested_models.iter().map(|m| m.to_string()).collect(),
+            Some(_) => self.loaded_models.iter().take(60).cloned().collect(),
+            None => Vec::new(),
+        };
+        let value = if s.api_model().is_empty() { "Choose a model".to_string() } else { s.api_model().to_string() };
+        let options = suggestions.into_iter().map(|m| (m.clone(), m)).collect();
+        field("Model", self.dropdown(Picker::ApiModel, value, options, s.api_model(), |s, v| { s.api_models.insert(s.api_provider.clone(), v); }, cx))
+    }
+
+    fn api_key_section(&self, cx: &mut Context<Self>) -> Div {
+        let s = &self.store.value;
+        let presets: Vec<(String, String)> = crate::providers::PRESETS.iter().map(|p| (p.id.to_string(), p.label.to_string())).collect();
+        let current = crate::providers::preset(&s.api_provider).map(|p| p.label).unwrap_or("Choose a provider");
+        let provider = field("Provider", self.dropdown(Picker::ApiProvider, current, presets, &s.api_provider, |s, v| s.api_provider = v, cx));
+        let Some(preset) = crate::providers::preset(&s.api_provider) else { return provider };
         let input_box = |input: gpui::Entity<crate::input::TextInput>, id: &'static str| {
             let focus = input.clone();
             div().id(id).flex_1().min_w_0().px(px(10.0)).py(px(7.0)).rounded(px(9.0))
@@ -166,145 +274,208 @@ impl Overlay {
                 .on_mouse_down(MouseButton::Left, cx.listener(move |_, _, window, cx| window.focus(&focus.focus_handle(cx))))
                 .child(input)
         };
-        let mut section = div().flex().flex_col().gap(px(16.0)).child(field("Provider", presets));
+        let mut section = div().flex().flex_col().gap(px(16.0));
+        let mut top = div().flex().gap(px(12.0)).child(provider);
         if preset.needs_key {
             let saved = crate::secrets::hint(preset.id);
-            let page = preset.key_page;
             let mut status = div().flex().items_center().gap(px(12.0)).text_size(px(12.0)).text_color(theme::muted())
                 .child(match &saved { Some(hint) => format!("Saved key {hint}"), None => "No key saved".to_string() });
             if saved.is_some() {
                 status = status.child(div().id("remove-key").cursor_pointer().text_color(gpui::rgb(0xffb4a8))
                     .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.remove_key(cx))).child("Remove"));
             }
-            if !page.is_empty() {
+            if !preset.key_page.is_empty() {
+                let page = preset.key_page;
                 status = status.child(div().id("key-page").cursor_pointer().text_color(theme::accent_soft())
                     .on_mouse_down(MouseButton::Left, cx.listener(move |_, _, _, cx| cx.open_url(page))).child("Get a key ↗"));
             }
-            section = section.child(field("API key", div().flex().flex_col().gap(px(8.0))
+            top = top.child(field("API key", div().flex().flex_col().gap(px(6.0))
                 .child(div().flex().items_center().gap(px(8.0))
                     .child(input_box(self.key_input.clone(), "key-box"))
-                    .child(div().id("save-key").cursor_pointer().px(px(12.0)).py(px(7.0)).rounded(px(9.0)).bg(theme::accent())
-                        .text_size(px(12.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::accent_ink())
-                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.save_key(cx))).child("Save key")))
+                    .child(button("save-key", "Save", true).on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.save_key(cx)))))
                 .child(status)));
-        } else if preset.local {
-            section = section.child(div().text_size(px(12.0)).text_color(theme::muted())
-                .child(format!("{} runs on this PC, so no key is needed. Make sure it's running.", preset.label)));
         }
+        section = section.child(top);
         if preset.base_url.is_empty() {
             section = section.child(field("Base URL (OpenAI-compatible)", input_box(self.base_url_input.clone(), "base-url-box")));
         }
-        let mut models = div().flex().flex_wrap().gap(px(6.0));
-        let suggestions: Vec<String> = if self.loaded_models.is_empty() {
-            preset.suggested_models.iter().map(|m| m.to_string()).collect()
-        } else { self.loaded_models.iter().take(40).cloned().collect() };
-        for (index, model) in suggestions.into_iter().enumerate() {
-            let selected = s.api_model() == model;
-            let chosen = model.clone();
-            models = models.child(ui::segment(("model", index), model, selected).border_1().border_color(theme::hairline())
-                .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, window, cx| this.choose_model(chosen.clone(), window, cx))));
-        }
-        let load = div().id("load-models").cursor_pointer().px(px(10.0)).py(px(5.0)).rounded(px(8.0)).border_1().border_color(theme::hairline())
-            .text_size(px(12.0)).text_color(theme::body())
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| this.load_models(window, cx)))
-            .child(if self.models_loading { "Loading…" } else { "Load models" });
-        section = section.child(field("Model", div().flex().flex_col().gap(px(8.0))
-            .child(div().flex().items_center().gap(px(8.0)).child(input_box(self.model_input.clone(), "model-box")).child(load))
-            .child(models)));
+        let mut model_row = div().flex().items_center().gap(px(8.0)).child(input_box(self.model_input.clone(), "model-box"))
+            .child(button("load-models", if self.models_loading { "Loading…" } else { "Load models" }, false)
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| this.load_models(window, cx))));
         if let Some(notice) = self.key_notice.clone() {
-            section = section.child(div().text_size(px(12.0)).text_color(theme::accent_soft()).child(notice));
+            model_row = model_row.child(div().text_size(px(12.0)).text_color(theme::accent_soft()).child(notice));
         }
-        section.child(div().text_size(px(12.0)).text_color(theme::muted())
-            .child("Keys are kept in Windows Credential Manager, never in the settings file, and are only sent to the provider you choose."))
+        section.child(field("Custom model id", model_row))
     }
 
     fn listening_tab(&self, cx: &mut Context<Self>) -> Div {
         let s = &self.store.value;
-        let mut languages = ui::segmented();
-        for (index, language) in Language::ALL.into_iter().enumerate() {
-            languages = languages.child(ui::segment(("language", index), language.label(), s.language == language)
-                .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, window, cx| this.update_settings(|s| s.language = language, window, cx))));
-        }
-        let engine_note: SharedString = match (s.speech_engine, s.effective_engine()) {
-            (SpeechEngine::Parakeet, SpeechEngine::Whisper) => format!("Parakeet v3 doesn't support {}, so Whisper transcribes it.", s.language.label()).into(),
-            (SpeechEngine::Parakeet, _) => "Parakeet TDT 0.6B v3 · fastest, 25 European languages, runs locally.".into(),
-            _ => "Whisper · 99 languages, runs locally. A GPU makes larger models fast.".into(),
+        let transcribe = div().flex().items_center().gap(px(12.0))
+            .child(div().flex().flex_col().gap(px(1.0)).flex_1()
+                .child(div().text_size(px(13.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child("Transcribe conversations"))
+                .child(div().text_size(px(12.0)).text_color(theme::muted()).child("On this PC, while Live is on")))
+            .child(switch("transcribe", s.transcribe, |s, v| s.transcribe = v, cx));
+        let devices = self.devices.clone().unwrap_or_default();
+        let device_options = |names: &[String], default: Option<&String>| {
+            let mut options = vec![(String::new(), match default { Some(name) => format!("Default · {name}"), None => "Default".to_string() })];
+            options.extend(names.iter().map(|name| (name.clone(), name.clone())));
+            options
         };
-        let mut tab = div().flex().flex_col().gap(px(16.0))
-            .child(field("Speech engine", div().flex().flex_col().gap(px(6.0))
-                .child(choice("engine", &[(SpeechEngine::Parakeet, "Parakeet v3"), (SpeechEngine::Whisper, "Whisper")], s.speech_engine, |s, v| s.speech_engine = v, cx))
-                .child(div().text_size(px(12.0)).text_color(theme::muted()).child(engine_note))))
-            .child(field("Language", languages));
-        if s.effective_engine() == SpeechEngine::Whisper {
-            tab = tab.child(field("Whisper model", choice("whisper",
-                &[(WhisperModel::Small, "Small · fast"), (WhisperModel::Turbo, "Turbo · balanced"), (WhisperModel::Large, "Large · most accurate")],
-                s.whisper_model, |s, v| s.whisper_model = v, cx)));
+        let value = |chosen: &str, default: Option<&String>| if chosen.is_empty() {
+            match default { Some(name) => format!("Default · {name}"), None => if self.devices_loading { "Loading devices…".into() } else { "Default".into() } }
+        } else { chosen.to_string() };
+        let device_column = |label: &'static str, name: &'static str, on: bool, set_on: fn(&mut Settings, bool), picker: Picker, chosen: &str,
+            names: &[String], default: Option<&String>, set: fn(&mut Settings, String), cx: &mut Context<Self>| {
+            div().flex().flex_col().gap(px(6.0)).flex_1().min_w_0()
+                .child(div().flex().items_center().justify_between().h(px(20.0))
+                    .child(div().text_size(px(12.0)).text_color(theme::muted()).child(label))
+                    .child(switch(name, on, set_on, cx)))
+                .child(self.dropdown(picker, value(chosen, default), device_options(names, default), chosen, set, cx))
+        };
+        let columns = div().flex().gap(px(12.0))
+            .child(device_column("Microphone", "listen-mic", s.listen_mic, |s, v| s.listen_mic = v, Picker::Mic, &s.mic_device,
+                &devices.microphones, devices.default_microphone.as_ref(), |s, v| s.mic_device = v, cx))
+            .child(device_column("Desktop audio", "listen-desktop", s.listen_desktop, |s, v| s.listen_desktop = v, Picker::Desktop, &s.desktop_device,
+                &devices.playback, devices.default_playback.as_ref(), |s, v| s.desktop_device = v, cx));
+        div().flex().flex_col().gap(px(16.0)).child(transcribe).child(self.model_row(cx)).child(columns)
+    }
+
+    /// The Parakeet model: installed, downloading (with progress and Cancel), or a Download button.
+    fn model_row(&self, cx: &mut Context<Self>) -> Div {
+        let trailing: gpui::AnyElement = if let Some(progress) = self.download_progress() {
+            div().flex().items_center().gap(px(10.0))
+                .child(div().w(px(120.0)).h(px(6.0)).rounded_full().bg(theme::hairline())
+                    .child(div().h_full().rounded_full().bg(theme::accent()).w(px(120.0 * progress.clamp(0.0, 1.0) as f32))))
+                .child(div().w(px(36.0)).font_family(theme::MONO).text_size(px(11.0)).text_color(theme::muted()).child(format!("{:.0}%", progress * 100.0)))
+                .child(button("cancel-download", "Cancel", false).on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| { this.cancel_download(); cx.notify(); })))
+                .into_any_element()
+        } else if self.model_installed {
+            div().text_size(px(12.0)).text_color(theme::ok()).child("Installed").into_any_element()
+        } else {
+            button("download-model", format!("Download {}", model_size_label(&MODEL)), true)
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| this.download_model(window, cx)))
+                .into_any_element()
+        };
+        let mut row = div().flex().flex_col().gap(px(6.0))
+            .child(div().flex().items_center().gap(px(12.0)).px(px(12.0)).py(px(10.0)).rounded(px(12.0)).border_1().border_color(theme::hairline())
+                .child(div().flex().flex_col().gap(px(1.0)).flex_1().min_w_0()
+                    .child(div().text_size(px(13.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child("Parakeet Realtime · English"))
+                    .child(div().id("model-license").cursor_pointer().text_size(px(12.0)).text_color(theme::muted()).truncate()
+                        .hover(|t| t.text_color(theme::accent_soft()))
+                        .on_mouse_down(MouseButton::Left, cx.listener(|_, _, _, cx| cx.open_url(MODEL.license_url)))
+                        .child(format!("{} · NVIDIA Open Model License", model_size_label(&MODEL)))))
+                .child(trailing));
+        if let Some(notice) = self.model_notice.clone() {
+            row = row.child(div().text_size(px(12.0)).text_color(theme::accent_soft()).child(notice));
         }
-        tab.child(field("Listen to", choice("source",
-            &[(AudioSource::Both, "Desktop + mic"), (AudioSource::Desktop, "Desktop only"), (AudioSource::Microphone, "Mic only")],
-            s.audio_source, |s, v| s.audio_source = v, cx)))
-            .child(div().text_size(px(12.0)).text_color(theme::muted())
-                .child("Desktop and mic are transcribed separately, so the transcript can tell You from Them."))
+        row
+    }
+
+    /// Enumerate audio devices off the UI thread for the Listening tab's pickers.
+    pub(crate) fn load_devices(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.devices_loading { return; }
+        self.devices_loading = true;
+        cx.spawn_in(window, async move |this, cx| {
+            let devices = cx.background_executor().spawn(async move { crate::audio::list_devices() }).await;
+            let _ = this.update(cx, |this, cx| { this.devices = Some(devices); this.devices_loading = false; cx.notify(); });
+        }).detach();
+    }
+
+    /// Size the saved sessions folder off the UI thread for the History tab.
+    pub(crate) fn refresh_archive_size(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(root) = self.archive.as_ref().map(|archive| archive.root().to_path_buf()) else { return };
+        cx.spawn_in(window, async move |this, cx| {
+            let bytes = cx.background_executor().spawn(async move { folder_bytes(&root) }).await;
+            let _ = this.update(cx, |this, cx| { this.archive_bytes = Some(bytes); cx.notify(); });
+        }).detach();
     }
 
     fn keys_tab(&self) -> Div {
         let mut list = div().flex().flex_col();
         for (action, _) in DEFAULTS {
             let label = match action {
-                Action::Assist => "Assist (screen + conversation)", Action::Live => "Start / stop Live",
-                Action::Focus => "Type a question",
+                Action::Live => "Start / stop Live", Action::Focus => "Type a question", Action::Assist => "Assist",
                 Action::Toggle => "Show / hide overlay", Action::MoveUp => "Move up", Action::MoveDown => "Move down",
                 Action::MoveLeft => "Move left", Action::MoveRight => "Move right",
                 Action::ScrollUp => "Scroll answer up", Action::ScrollDown => "Scroll answer down",
                 Action::Close => "Close settings",
             };
             let taken = self.hotkeys.unavailable.contains(action);
-            list = list.child(div().flex().items_center().justify_between().py(px(8.0)).border_b_1().border_color(theme::divider())
-                .child(div().text_size(px(13.0)).text_color(theme::text()).child(label))
-                .child(div().flex().items_center().gap(px(8.0))
-                    .when(taken, |row| row.child(div().text_size(px(12.0)).text_color(gpui::rgb(0xffb4a8)).child("Used by another app")))
-                    .child(ui::keycap(self.hotkeys.label(*action)))));
+            list = list.child(ui::setting_row(label, div().flex().items_center().gap(px(8.0))
+                .when(taken, |row| row.child(div().text_size(px(12.0)).text_color(gpui::rgb(0xffb4a8)).child("Used by another app")))
+                .child(ui::keycap(self.hotkeys.label(*action)))).h(px(40.0)));
         }
-        div().flex().flex_col().gap(px(10.0))
-            .child(list)
-            .child(div().text_size(px(12.0)).text_color(theme::muted())
-                .child("Assist is only claimed during a Live session, move and scroll keys only while the overlay is visible, and Esc only while settings is open, so other apps keep their shortcuts."))
+        list
     }
 
     fn history_tab(&self, cx: &mut Context<Self>) -> Div {
         let s = &self.store.value;
-        let mut tab = div().flex().flex_col()
-            .child(toggle("save-sessions", "Save sessions", "Keeps each Live session's transcript, questions and answers on this PC.",
-                s.save_sessions, |s, v| s.save_sessions = v, cx));
+        let mut rows = div().flex().flex_col()
+            .child(ui::setting_row("Save sessions", switch("save-sessions", s.save_sessions, |s, v| s.save_sessions = v, cx)));
         if s.save_sessions {
-            tab = tab
-                .child(toggle("save-screenshots", "Save screenshots", "Stores the screen each answer used, so you can see what was on screen.",
-                    s.save_screenshots, |s, v| s.save_screenshots = v, cx))
-                .child(div().pt(px(8.0)).child(field("Keep sessions for", choice("retention",
+            rows = rows
+                .child(ui::setting_row("Save screenshots", switch("save-screenshots", s.save_screenshots, |s, v| s.save_screenshots = v, cx)))
+                .child(ui::setting_row("Keep for", choice("retention",
                     &[(Retention::Days7, "7 days"), (Retention::Days30, "30 days"), (Retention::Forever, "Forever")],
-                    s.keep_sessions, |s, v| s.keep_sessions = v, cx))));
+                    s.keep_sessions, |s, v| s.keep_sessions = v, cx)).h(px(52.0)).border_b_0());
         }
-        tab.child(div().flex().gap(px(8.0)).pt(px(14.0))
-                .child(div().id("view-history").cursor_pointer().px(px(12.0)).py(px(6.0)).rounded(px(9.0)).bg(theme::accent())
-                    .text_size(px(12.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::accent_ink())
-                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.open_sessions(cx)))
-                    .child("Open sessions"))
-                .child(div().id("open-archive").cursor_pointer().px(px(12.0)).py(px(6.0)).rounded(px(9.0)).border_1().border_color(theme::hairline())
-                    .text_size(px(12.0)).text_color(theme::body())
-                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, _| this.reveal_archive()))
-                    .child("Open folder")))
-            .child(div().pt(px(10.0)).text_size(px(12.0)).text_color(theme::muted())
-                .child("Recordings of other people may need their consent where you live."))
+        let size = self.archive_bytes.map(|bytes| match bytes {
+            0 => "Nothing saved yet".to_string(),
+            b if b < 1_000_000 => format!("{} KB on this PC", (b as f64 / 1e3).ceil()),
+            b => format!("{:.0} MB on this PC", b as f64 / 1e6),
+        }).unwrap_or_default();
+        rows.child(div().flex().items_center().justify_between().pt(px(10.0))
+            .child(div().flex().gap(px(8.0))
+                .child(button("view-history", "Open sessions", true).on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.open_sessions(cx))))
+                .child(button("open-archive", "Open folder", false).on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, _| this.reveal_archive()))))
+            .child(div().text_size(px(12.0)).text_color(theme::muted()).child(size)))
     }
 
     fn window_tab(&self, cx: &mut Context<Self>) -> Div {
         let s = &self.store.value;
         div().flex().flex_col()
-            .child(toggle("hide-capture", "Hide from screen capture", "Keeps the overlay out of screen shares, recordings and screenshots.",
-                s.hide_from_capture, |s, v| s.hide_from_capture = v, cx))
-            .child(toggle("screen-on-send", "Attach screen to every message", "Takes a fresh screenshot whenever you ask or press Assist.",
-                s.screen_on_send, |s, v| s.screen_on_send = v, cx))
-            .child(toggle("live-on-launch", "Start Live when the app opens", "Begins listening right away instead of waiting for Start.",
-                s.start_live_on_launch, |s, v| s.start_live_on_launch = v, cx))
+            .child(ui::setting_row("Hide from screen capture", switch("hide-capture", s.hide_from_capture, |s, v| s.hide_from_capture = v, cx)))
+            .child(ui::setting_row("Attach a screenshot to every message", switch("screen-on-send", s.screen_on_send, |s, v| s.screen_on_send = v, cx)))
+            .child(ui::setting_row("Start Live when the app opens", switch("live-on-launch", s.start_live_on_launch, |s, v| s.start_live_on_launch = v, cx)).border_b_0())
+    }
+}
+
+/// Total size of a folder tree (sessions and their screenshots).
+fn folder_bytes(root: &std::path::Path) -> u64 {
+    let mut total = 0;
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            let Ok(meta) = entry.metadata() else { continue };
+            if meta.is_dir() { pending.push(entry.path()); } else { total += meta.len(); }
+        }
+    }
+    total
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plans_and_accounts_read_as_intended() {
+        assert_eq!(plan_label(Provider::Codex, "plus"), "ChatGPT Plus");
+        assert_eq!(plan_label(Provider::Codex, "chatgpt_pro"), "ChatGPT Pro");
+        assert_eq!(plan_label(Provider::Claude, "max_5x"), "Max 5x");
+        assert_eq!(masked("martinezjay404@gmail.com"), format!("m{}", "•".repeat(15)));
+        assert_eq!(masked("ab"), "a••••••");
+        assert_eq!(masked(""), "••••••");
+    }
+
+    #[test]
+    fn folder_size_counts_every_file() {
+        let dir = std::env::temp_dir().join(format!("cluelyrs-size-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("inner")).unwrap();
+        std::fs::write(dir.join("a.bin"), [0u8; 10]).unwrap();
+        std::fs::write(dir.join("inner").join("b.bin"), [0u8; 5]).unwrap();
+        assert_eq!(folder_bytes(&dir), 15);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
