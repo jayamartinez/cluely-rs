@@ -58,7 +58,7 @@ fn main() {
             Event::Done(result) => {
                 let total = started.elapsed();
                 match result {
-                    Ok(answer) => println!("first words: {:.2} s, full answer: {:.2} s, {} chars\n---\n{}",
+                    Ok(answer) => println!("first words: {:.2} s, full answer: {:.2} s, {} words\n---\n{}",
                         first.unwrap_or(total).as_secs_f64(), total.as_secs_f64(), answer.split_whitespace().count(), answer.trim()),
                     Err(error) => println!("failed after {:.2} s: {error}", total.as_secs_f64()),
                 }
@@ -75,7 +75,10 @@ fn prewarm(session: &ReasoningSession, settings: &cluely_rs::settings::Settings)
     // The preparation holds the session's thread lock until the thread is open.
     std::thread::sleep(Duration::from_millis(100));
     session.wait_prepared();
-    println!("prepared in {:.2} s (app-server, model list, thread)", started.elapsed().as_secs_f64());
+    println!("prepared in {:.2} s (Codex: app-server, model list, thread; Claude: process started)", started.elapsed().as_secs_f64());
+    // Live has been on for a moment before anyone presses Assist; a prepared Claude process
+    // finishes booting in that time.
+    std::thread::sleep(Duration::from_secs(2));
 }
 
 /// A 1600×900 screenshot-sized JPEG with enough detail to encode like a real screen.

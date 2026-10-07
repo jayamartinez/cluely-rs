@@ -8,6 +8,8 @@ use std::sync::{Arc, Mutex};
 use futures::channel::mpsc::{UnboundedReceiver, unbounded};
 
 use crate::answer::{self, Exchange, Target};
+use crate::chat::Effort;
+use crate::claude_cli::{ClaudeCli, Spare};
 use crate::codex::{CodexClient, CodexThread};
 use crate::metrics::{Context, LatencyRecorder, Stage};
 use crate::settings::{Provider, Settings};
@@ -40,6 +42,8 @@ pub struct ReasoningSession {
     codex: Arc<CodexClient>,
     /// The Codex thread for this session, opened on the first request and kept for all of them.
     thread: Arc<Mutex<Option<CodexThread>>>,
+    /// A Claude Code process started ahead of the next answer (Claude subscription only).
+    claude: Arc<Mutex<Option<Spare>>>,
     recorder: Option<LatencyRecorder>,
     generation: Generation,
     cancel: Option<Arc<AtomicBool>>,
@@ -47,7 +51,7 @@ pub struct ReasoningSession {
 
 impl ReasoningSession {
     pub fn new(codex: Arc<CodexClient>, recorder: Option<LatencyRecorder>) -> Self {
-        Self { codex, thread: Arc::new(Mutex::new(None)), recorder, generation: Generation::default(), cancel: None }
+        Self { codex, thread: Arc::new(Mutex::new(None)), claude: Arc::new(Mutex::new(None)), recorder, generation: Generation::default(), cancel: None }
     }
 
     pub fn generation(&self) -> Generation { self.generation }
@@ -63,10 +67,20 @@ impl ReasoningSession {
         }
     }
 
-    /// Free preparation when Live starts: for the ChatGPT subscription, start the app-server and
-    /// open the session's thread in the background, so the first answer only pays for its turn.
-    /// A request that arrives meanwhile waits for the thread rather than opening a second one.
+    /// Free preparation when Live starts, in the background, so the first answer only pays for
+    /// its turn. ChatGPT subscription: start the app-server and open the session's thread (a
+    /// request that arrives meanwhile waits for it rather than opening a second one). Claude
+    /// subscription: start a Claude Code process for the first answer. Nothing is sent either way.
     pub fn prewarm(&self, settings: &Settings) {
+        if settings.provider == Provider::Claude {
+            let (claude, system) = (self.claude.clone(), answer::system(settings));
+            let (model, effort) = (settings.claude_model.id().to_string(), Effort::from_smart_mode(settings.smart_mode));
+            let _ = std::thread::Builder::new().name("cluelyrs-answer-prewarm".into()).spawn(move || {
+                let mut spare = claude.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                if let Err(error) = ClaudeCli::prepare(&mut spare, &system, Some(&model), effort) { eprintln!("answer prewarm skipped: {error}"); }
+            });
+            return;
+        }
         if settings.provider != Provider::Codex { return; }
         let (codex, thread, system) = (self.codex.clone(), self.thread.clone(), answer::system(settings));
         let _ = std::thread::Builder::new().name("cluelyrs-answer-prewarm".into()).spawn(move || {
@@ -76,7 +90,7 @@ impl ReasoningSession {
     }
 
     /// Blocks until a preparation started by [`ReasoningSession::prewarm`] has finished.
-    pub fn wait_prepared(&self) { drop(self.thread.lock()); }
+    pub fn wait_prepared(&self) { drop(self.thread.lock()); drop(self.claude.lock()); }
 
     /// Start a request under a new generation, cancelling the previous one. Replies arrive on
     /// the returned channel from a worker thread; the provider blocks, the UI never does.
@@ -94,6 +108,7 @@ impl ReasoningSession {
         if let Some(recorder) = &self.recorder { recorder.mark(Stage::LlmRequestStarted, context.clone()); }
         let recorder = self.recorder.clone();
         let thread = self.thread.clone();
+        let claude = self.claude.clone();
         let codex = self.codex.clone();
         std::thread::Builder::new().name(format!("cluelyrs-answer-{}", generation.0)).spawn(move || {
             let deltas = sender.clone();
@@ -110,6 +125,11 @@ impl ReasoningSession {
                 Target::Codex(req, _) => {
                     let mut open = thread.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                     codex.stream_turn(&mut open, req, &cancel, &mut on_delta)
+                }
+                // A process started ahead of time, and a fresh one ready for the next answer.
+                Target::Claude(req) => {
+                    let mut spare = claude.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    ClaudeCli::stream_warm(&mut spare, true, req, &cancel, &mut on_delta)
                 }
                 other => answer::run(other, &cancel, &mut on_delta),
             };

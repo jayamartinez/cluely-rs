@@ -107,6 +107,29 @@ impl ClaudeCli {
     /// Streams one answer. `on_delta` receives answer text only; reasoning, tool and
     /// system events are never forwarded.
     pub fn stream(req: &ChatRequest, cancel: &AtomicBool, on_delta: &mut dyn FnMut(&str)) -> Result<String, String> {
+        Self::stream_warm(&mut None, false, req, cancel, on_delta)
+    }
+
+    /// Start a Claude Code process for the next answer, so the CLI's boot (about 0.9 s) is
+    /// already done when it's needed. Nothing is sent: the process waits for its first input,
+    /// with the same restrictions as any answer. Replaces any spare with other settings.
+    pub fn prepare(spare: &mut Option<Spare>, system: &str, model: Option<&str>, effort: Effort) -> Result<(), String> {
+        let model = validate_model(model)?;
+        if system.chars().count() > MAX_SYSTEM { return Err("The assistant instructions are too large.".into()); }
+        let args = stream_args(system, model, effort);
+        if spare.as_mut().is_some_and(|ready| ready.usable_for(&args)) { return Ok(()); }
+        *spare = None;
+        let exe = resolve_executable()?;
+        check_command_line(&exe, &args, COMMAND_LINE_LIMIT)?;
+        *spare = Some(Spare { running: Some(launch(&exe, &args, true, true)?), args, started: Instant::now() });
+        Ok(())
+    }
+
+    /// Like [`ClaudeCli::stream`], answering with the spare process when it was started with
+    /// this request's settings. With `refill`, a new spare is started for the next answer once
+    /// this one ends (each answer gets a fresh process: its history is folded in as usual, so
+    /// earlier turns' context never piles up inside a long-lived process).
+    pub fn stream_warm(spare: &mut Option<Spare>, refill: bool, req: &ChatRequest, cancel: &AtomicBool, on_delta: &mut dyn FnMut(&str)) -> Result<String, String> {
         validate_messages(&req.messages)?;
         let model = validate_model(req.model.as_deref())?;
         if req.system.chars().count() > MAX_SYSTEM {
@@ -120,12 +143,41 @@ impl ClaudeCli {
         if cancel.load(Ordering::SeqCst) {
             return Err(CANCELLED.into());
         }
-        let mut running = launch(&exe, &args, true, true)?;
+        let ready = spare.take().and_then(|mut ready| if ready.usable_for(&args) { ready.running.take() } else { None });
+        let mut running = match ready { Some(running) => running, None => launch(&exe, &args, true, true)? };
         let result = run_stream(&mut running, line, cancel, on_delta);
         // After a complete turn the CLI may exit on its own within a grace period;
         // on failure or cancellation it is killed immediately.
         reap(running, if result.is_ok() { EXIT_GRACE } else { Duration::ZERO });
+        if refill && let Ok(next) = launch(&exe, &args, true, true) {
+            *spare = Some(Spare { running: Some(next), args, started: Instant::now() });
+        }
         result
+    }
+}
+
+/// A Claude Code process started ahead of time for one answer (see [`ClaudeCli::prepare`]).
+/// It holds no conversation; it is killed when dropped.
+pub struct Spare {
+    running: Option<Running>,
+    args: Vec<String>,
+    started: Instant,
+}
+
+/// A spare older than this is replaced rather than trusted (sign-in or CLI state may have moved on).
+const SPARE_MAX_AGE: Duration = Duration::from_secs(10 * 60);
+
+impl Spare {
+    /// Started with exactly these arguments, recently, and still waiting.
+    fn usable_for(&mut self, args: &[String]) -> bool {
+        self.args == args && self.started.elapsed() < SPARE_MAX_AGE
+            && self.running.as_mut().is_some_and(|running| matches!(running.child.try_wait(), Ok(None)))
+    }
+}
+
+impl Drop for Spare {
+    fn drop(&mut self) {
+        if let Some(running) = self.running.take() { reap(running, Duration::ZERO); }
     }
 }
 
@@ -825,6 +877,45 @@ mod tests {
         assert_eq!(escaped, plain + 2);
         // Non-BMP characters take two UTF-16 units.
         assert_eq!(command_line_len(exe, &["\u{1F600}".into()]), command_line_len(exe, &["ab".into()]));
+    }
+
+    /// A spare is only used for a request with exactly its arguments, while it's still running,
+    /// and is killed when dropped. A long-lived stand-in process plays the CLI waiting on stdin.
+    #[cfg(windows)]
+    #[test]
+    fn a_spare_serves_only_matching_requests_and_dies_with_its_owner() {
+        let waiting = |args: &[String]| {
+            let exe = PathBuf::from(std::env::var_os("ComSpec").unwrap_or_else(|| "C:\\Windows\\System32\\cmd.exe".into()));
+            let running = launch(&exe, &["/c".into(), "ping".into(), "-n".into(), "30".into(), "127.0.0.1".into()], true, true).unwrap();
+            Spare { running: Some(running), args: args.to_vec(), started: Instant::now() }
+        };
+        let fast = stream_args("Be brief.", Some("sonnet"), Effort::Fast);
+        let smart = stream_args("Be brief.", Some("sonnet"), Effort::Smart);
+        let mut spare = waiting(&fast);
+        assert!(spare.usable_for(&fast));
+        assert!(!spare.usable_for(&smart), "Smart mode or another model needs another process");
+        let mut stale = waiting(&fast);
+        stale.started = Instant::now() - SPARE_MAX_AGE;
+        assert!(!stale.usable_for(&fast));
+
+        let child = spare.running.as_mut().unwrap();
+        let _ = child.child.kill();
+        let _ = child.child.wait();
+        assert!(!spare.usable_for(&fast), "an exited process is never used");
+
+        let mut owned = Some(waiting(&fast));
+        let pid = owned.as_ref().unwrap().running.as_ref().unwrap().child.id();
+        owned = None;
+        drop(owned);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline && process_alive(pid) { thread::sleep(Duration::from_millis(50)); }
+        assert!(!process_alive(pid), "a dropped spare is killed");
+    }
+
+    #[cfg(windows)]
+    fn process_alive(pid: u32) -> bool {
+        let output = Command::new("tasklist").args(["/FI", &format!("PID eq {pid}"), "/NH"]).output().unwrap();
+        String::from_utf8_lossy(&output.stdout).contains(&pid.to_string())
     }
 
     #[test]
