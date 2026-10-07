@@ -182,8 +182,10 @@ impl Overlay {
             .child(div().text_size(px(11.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::accent_soft()).child("HEARD"))
             .child(div().size(px(6.0)).flex_none().rounded_full().bg(dot))
             .child(div().text_size(px(12.0)).text_color(color).truncate().child(label));
-        // Two committed lines plus up to one in-progress line per source: a fixed strip.
-        let mut lines = div().flex().flex_col().gap(px(4.0)).px(px(16.0)).pb(px(10.0));
+        // A fixed-height strip anchored to its newest line: the answer thread below never moves
+        // while someone talks. Older lines are cut off at the top when in-progress lines need the room.
+        let mut lines = div().flex().flex_col().justify_end().gap(px(ROW_GAP)).h(px(STRIP_HEIGHT)).overflow_hidden()
+            .mx(px(16.0)).mb(px(10.0));
         let shown = self.transcript.len().saturating_sub(SHOWN_LINES);
         for line in &self.transcript[shown..] {
             lines = lines.child(transcript_row(line.source, archive::clock(line.at_ms), committed_text(&line.text)));
@@ -272,21 +274,52 @@ fn committed_text(text: &str) -> AnyElement {
 }
 
 /// Stable words in the body color, the unstable tail muted and italic, plus a question mark
-/// once the utterance reads as a question.
+/// once the utterance reads as a question. At most two lines: a long utterance shows its newest
+/// words after a leading "…", so what is being said right now stays visible.
 fn provisional_text(line: &ProvisionalLine) -> AnyElement {
     let mut text = line.stable.clone();
     if !line.unstable.is_empty() {
         if !text.is_empty() { text.push(' '); }
         text.push_str(&line.unstable);
     }
-    let unstable_from = text.len() - line.unstable.len();
+    let mut unstable_from = text.len() - line.unstable.len();
+    if let Some(cut) = tail_start(&text, PROVISIONAL_CHARS) {
+        text = format!("{ELLIPSIS}{}", &text[cut..]);
+        unstable_from = (unstable_from.max(cut) - cut) + ELLIPSIS.len();
+    }
     let question_from = text.len();
     if line.question { text.push_str(" ?"); }
     let styled = StyledText::new(SharedString::from(text)).with_highlights([
         (unstable_from..question_from, HighlightStyle { color: Some(theme::muted().into()), font_style: Some(FontStyle::Italic), ..Default::default() }),
         (question_from..question_from + if line.question { 2 } else { 0 }, HighlightStyle { color: Some(theme::accent_soft().into()), font_weight: Some(FontWeight::BOLD), ..Default::default() }),
     ].into_iter().filter(|(range, _)| !range.is_empty()));
-    div().text_color(theme::body()).child(styled).into_any_element()
+    // The character budget keeps the text within two lines; the height cap is a backstop.
+    div().text_color(theme::body()).max_h(px(2.0 * LINE_HEIGHT)).overflow_hidden().child(styled).into_any_element()
+}
+
+const LINE_HEIGHT: f32 = 18.0;
+const ROW_GAP: f32 = 4.0;
+/// Room for four text lines: two committed lines and a two-line in-progress one.
+const STRIP_HEIGHT: f32 = 4.0 * LINE_HEIGHT + 3.0 * ROW_GAP;
+const ELLIPSIS: &str = "… ";
+/// Characters that fit in two lines of the strip's text column (about 438 px at 13 px Segoe UI,
+/// whose lowercase letters average about 6 px). Budgeted at 7.3 px a character, less a word per
+/// line lost to wrapping, so real speech never needs a third line.
+const PROVISIONAL_CHARS: usize = 104;
+
+/// Where to start showing `text` so that at most `max_chars` characters remain (counting the
+/// leading ellipsis), cut at a word boundary. `None` when the text already fits.
+fn tail_start(text: &str, max_chars: usize) -> Option<usize> {
+    let total = text.chars().count();
+    if total <= max_chars { return None; }
+    let keep = max_chars.saturating_sub(ELLIPSIS.chars().count());
+    // Byte index where the last `keep` characters begin.
+    let (start, _) = text.char_indices().nth(total - keep)?;
+    // Move forward to the next word so no word is shown cut in half.
+    match text[start..].find(' ') {
+        Some(space) if start > 0 && !text[..start].ends_with(' ') && space + 1 < text.len() - start => Some(start + space + 1),
+        _ => Some(start),
+    }
 }
 
 #[cfg(test)]
@@ -298,5 +331,30 @@ mod tests {
         assert_eq!(speaker(Source::Me), Speaker::You);
         assert_eq!(speaker(Source::Them), Speaker::Them);
         assert_eq!(model_size_label(&MODEL), "176 MB");
+    }
+
+    #[test]
+    fn long_speech_keeps_its_newest_words_within_the_budget() {
+        assert_eq!(tail_start("short line", 104), None);
+        let text = "he quickly becomes a mascot for sad basement dwellers everywhere self aware enough to know what they're missing out on but too numb";
+        let cut = tail_start(text, 40).unwrap();
+        let shown = &text[cut..];
+        assert!(text.ends_with(shown));
+        assert!(shown.chars().count() + ELLIPSIS.chars().count() <= 40, "{shown}");
+        // Starts on a whole word.
+        assert_eq!(&text[cut - 1..cut], " ");
+        assert!(shown.starts_with("missing") || shown.starts_with("out") || shown.starts_with("they're"), "{shown}");
+    }
+
+    #[test]
+    fn tails_are_cut_on_character_boundaries_and_never_lose_the_last_word() {
+        let text = "ça va très bien merci beaucoup pour la question née à Zürich ok";
+        let cut = tail_start(text, 20).unwrap();
+        assert!(text.is_char_boundary(cut));
+        assert!(text[cut..].ends_with("ok"));
+        // One very long word: cut inside it rather than showing nothing.
+        let word = "supercalifragilisticexpialidocious";
+        let cut = tail_start(word, 10).unwrap();
+        assert_eq!(word[cut..].chars().count(), 10 - ELLIPSIS.chars().count());
     }
 }
