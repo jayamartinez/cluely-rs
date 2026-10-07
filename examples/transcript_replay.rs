@@ -3,9 +3,10 @@
 //! where speech starts and stops in the audio, when the recognizer's words and end-of-utterance
 //! signals arrive relative to that, and when each utterance is committed and why.
 //!
-//!   cargo run --example transcript_replay -- <wav> [--source me|them]
+//!   cargo run --example transcript_replay -- <wav> [--source me|them] [--provider parakeet|deepgram]
 //!
-//! Uses the installed model (`cargo run --example parakeet_bench -- download`). Writes nothing.
+//! Parakeet uses the installed model (`cargo run --example parakeet_bench -- download`). Deepgram
+//! (paid) uses the key saved in Settings → Listening, or DEEPGRAM_API_KEY. Writes nothing.
 
 use std::sync::Arc;
 use futures::StreamExt;
@@ -16,6 +17,7 @@ use anyhow::{Context, bail};
 use cluely_rs::audio::{AudioChunk, Source};
 use cluely_rs::listening::{self, Message, Status};
 use cluely_rs::stt::parakeet::ParakeetRealtime;
+use cluely_rs::stt::{StreamingAsr, deepgram};
 use cluely_rs::transcript::endpoint::EndpointConfig;
 use cluely_rs::transcript::live::{LiveTranscript, Update};
 
@@ -27,8 +29,16 @@ fn main() -> anyhow::Result<()> {
     let source = match args.iter().position(|a| a == "--source").and_then(|i| args.get(i + 1)).map(String::as_str) {
         Some("me") => Source::Me, _ => Source::Them,
     };
+    let provider: Arc<dyn StreamingAsr> = match args.iter().position(|a| a == "--provider").and_then(|i| args.get(i + 1)).map(String::as_str) {
+        Some("deepgram") => match std::env::var("DEEPGRAM_API_KEY") {
+            Ok(key) => Arc::new(deepgram::Deepgram::with_key(key)),
+            Err(_) => Arc::new(deepgram::Deepgram::from_store()),
+        },
+        _ => Arc::new(ParakeetRealtime::default()),
+    };
+    if let Some(reason) = listening::not_ready(&provider.availability()) { bail!("{reason}"); }
     let pcm = read_wav(wav)?;
-    println!("audio: {:.1}s as {}", pcm.len() as f64 / 16000.0, source.label());
+    println!("audio: {:.1}s as {} via {}", pcm.len() as f64 / 16000.0, source.label(), provider.capabilities().label);
     println!("\nspeech in the audio (RMS over 20 ms blocks above 0.01, gaps under 300 ms joined):");
     for (start, end) in speech_segments(&pcm) { println!("  {start:7.0} – {end:7.0} ms"); }
 
@@ -36,7 +46,6 @@ fn main() -> anyhow::Result<()> {
     let (_commands, inbox) = channel::<listening::Command>();
     let (out, mut messages) = futures::channel::mpsc::unbounded();
     let live = LiveTranscript::new(EndpointConfig::default(), None);
-    let provider: Arc<ParakeetRealtime> = Arc::new(ParakeetRealtime::default());
     let worker = std::thread::spawn(move || listening::run(provider, audio, &[source], Vec::new(), live, &inbox, &out, None));
     let feeder = std::thread::spawn(move || {
         let start = Instant::now();
