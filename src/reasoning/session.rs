@@ -129,11 +129,12 @@ mod tests {
         Request { action: "Ask".into(), question: "hello".into(), history: Vec::new(), conversation: String::new(), screenshot: None, utterance: Some(3) }
     }
 
-    /// The local Ollama preset needs no key and nothing listens on its port here, so the
-    /// request fails fast on the worker: generations, cancellation and reply tagging are
-    /// exercised without any network or sign-in.
+    /// The custom OpenAI-compatible preset pointed at loopback port 9 (discard; nothing ever
+    /// listens there), so the request fails fast on the worker on any machine: generations,
+    /// cancellation and reply tagging are exercised without network or sign-in.
     fn settings() -> Settings {
-        Settings { provider: Provider::ApiKey, api_provider: "ollama".into(), api_models: [("ollama".to_string(), "llama3".to_string())].into(), ..Settings::default() }
+        Settings { provider: Provider::ApiKey, api_provider: "custom".into(), custom_base_url: "http://127.0.0.1:9/v1".into(),
+            api_models: [("custom".to_string(), "test-model".to_string())].into(), ..Settings::default() }
     }
 
     #[test]
