@@ -1400,6 +1400,28 @@ fn account_from_response(response: &Value) -> Account {
     Account::ChatGpt { email: field("email", 254), plan: field("planType", 64) }
 }
 
+/// A thread kept open across the turns of one Live session (see `CodexClient::stream_turn`).
+/// It is bound to the app-server connection it was started on and is unsubscribed when dropped.
+pub struct CodexThread {
+    connection: Arc<Connection>,
+    thread_id: String,
+    system: String,
+    /// Turns the server has accepted on this thread.
+    turns: u32,
+}
+
+impl CodexThread {
+    pub fn id(&self) -> &str { &self.thread_id }
+}
+
+impl Drop for CodexThread {
+    fn drop(&mut self) {
+        if self.connection.usable() {
+            self.connection.send_detached("thread/unsubscribe", json!({ "threadId": self.thread_id }));
+        }
+    }
+}
+
 /// The official Codex app-server, started on demand and restarted after failures.
 pub struct CodexClient {
     launcher: Box<dyn Launcher>,
@@ -1614,27 +1636,77 @@ impl CodexClient {
         if cancel.load(Ordering::Relaxed) {
             return Err(err(Kind::Cancelled));
         }
-        // The effective config is refreshed before every model thread.
+        let thread_id = self.start_thread(&connection, &req.system)?;
+        let result = self.run_turn(&connection, &thread_id, input, model, cancel, on_delta);
+        if connection.usable() {
+            connection.send_detached("thread/unsubscribe", json!({ "threadId": thread_id }));
+        }
+        result
+    }
+
+    /// Starts a restricted, ephemeral thread and returns its id. The effective config is
+    /// refreshed before every thread; the server's reply is checked for every restriction.
+    fn start_thread(&self, connection: &Arc<Connection>, system: &str) -> Result<String, CodexError> {
         let effective = connection.call("config/read", json!({ "includeLayers": false, "cwd": connection.cwd }), self.limits.request)?;
         let config = thread_config_from_effective(effective.get("config"))?;
         let started = connection.call(
             "thread/start",
             json!({
-                "baseInstructions": req.system, "developerInstructions": "", "ephemeral": true, "cwd": connection.cwd,
+                "baseInstructions": system, "developerInstructions": "", "ephemeral": true, "cwd": connection.cwd,
                 "modelProvider": "openai", "approvalPolicy": "never", "sandbox": "read-only", "config": config,
             }),
             self.limits.request,
         )?;
-        let thread_id = match validate_thread_start(&started, &connection.cwd, connection.policy.get()) {
-            Ok(thread_id) => thread_id,
+        match validate_thread_start(&started, &connection.cwd, connection.policy.get()) {
+            Ok(thread_id) => Ok(thread_id),
             Err(error) => {
                 connection.fail(error.clone());
-                return Err(error);
+                Err(error)
             }
-        };
-        let result = self.run_turn(&connection, &thread_id, input, model, cancel, on_delta);
-        if connection.usable() {
-            connection.send_detached("thread/unsubscribe", json!({ "threadId": thread_id }));
+        }
+    }
+
+    /// One turn on a thread kept open across requests (a Live session). The thread carries the
+    /// conversation server-side, so only the last message of `req.messages` is sent; when the
+    /// app-server has been restarted since the thread opened (or no thread is open yet), a new
+    /// thread is started with the same restrictions and the whole `req.messages` history is
+    /// folded into its first turn. Cancellation interrupts the turn; the thread stays usable.
+    pub fn stream_turn(&self, thread: &mut Option<CodexThread>, req: &ChatRequest, cancel: &AtomicBool, on_delta: &mut dyn FnMut(&str)) -> Result<String, String> {
+        self.stream_turn_inner(thread, req, cancel, on_delta).map_err(|error| error.message)
+    }
+
+    fn stream_turn_inner(&self, thread: &mut Option<CodexThread>, req: &ChatRequest, cancel: &AtomicBool, on_delta: &mut dyn FnMut(&str)) -> Result<String, CodexError> {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(err(Kind::Cancelled));
+        }
+        let model = req.model.as_deref().map(str::trim).filter(|model| !model.is_empty());
+        if model.is_some_and(|model| !valid_model(model)) {
+            return Err(CodexError::new(Kind::InputInvalid, "Choose a valid Codex model in Settings."));
+        }
+        if req.system.len() > MAX_INSTRUCTIONS {
+            return Err(err(Kind::RequestTooLarge));
+        }
+        let connection = self.connection()?;
+        self.require_chatgpt(&connection)?;
+        if cancel.load(Ordering::Relaxed) {
+            return Err(err(Kind::Cancelled));
+        }
+        let reusable = thread.as_ref().is_some_and(|open| Arc::ptr_eq(&open.connection, &connection) && open.system == req.system);
+        if !reusable {
+            *thread = None;
+            let thread_id = self.start_thread(&connection, &req.system)?;
+            *thread = Some(CodexThread { connection: connection.clone(), thread_id, system: req.system.clone(), turns: 0 });
+        }
+        let open = thread.as_mut().expect("thread was just opened");
+        // A reused thread already holds the earlier exchanges; only the new message goes in.
+        let messages = if open.turns > 0 { &req.messages[req.messages.len().saturating_sub(1)..] } else { &req.messages[..] };
+        let input = fold_input(messages)?;
+        let result = self.run_turn(&connection, &open.thread_id, input, model, cancel, on_delta);
+        match &result {
+            Ok(_) => open.turns += 1,
+            // The server never heard the message (or the connection is gone); don't count on it.
+            Err(_) if !connection.usable() => *thread = None,
+            Err(_) => {}
         }
         result
     }
@@ -2381,6 +2453,46 @@ mod tests {
         // The process is reused for the next answer.
         assert!(codex.stream(&request(), &AtomicBool::new(false), &mut |_| {}).is_ok());
         assert_eq!(launcher.launches.load(Ordering::SeqCst), 1);
+        assert!(methods(&launcher).contains(&"thread/unsubscribe".to_string()));
+    }
+
+    /// A Live session keeps one thread: later turns send only the new message, the
+    /// restrictions are applied once at thread start, and a restarted server gets a new thread
+    /// with the history folded in.
+    #[test]
+    fn stream_turn_reuses_one_thread_per_session_and_recovers_after_a_restart() {
+        let events = vec![delta("turn_1", "m", "Answer"), completed("completed")];
+        let launcher = Arc::new(FakeLauncher::new(server(chatgpt(), good_thread(), events)));
+        let codex = client(&launcher);
+        let mut thread = None;
+        let first = request();
+        assert_eq!(codex.stream_turn(&mut thread, &first, &AtomicBool::new(false), &mut |_| {}).unwrap(), "Answer");
+        let mut second = request();
+        second.messages = vec![user("Hi"), Message { role: Role::Assistant, parts: vec![Part::Text("Answer".into())] }, user("And then?")];
+        assert_eq!(codex.stream_turn(&mut thread, &second, &AtomicBool::new(false), &mut |_| {}).unwrap(), "Answer");
+        let received = lock(&launcher.received).clone();
+        let turns: Vec<&Value> = received.iter().filter(|m| m["method"] == "turn/start").collect();
+        assert_eq!(methods(&launcher).iter().filter(|m| *m == "thread/start").count(), 1);
+        assert_eq!(turns.len(), 2);
+        // The second turn carries only the new message; the thread already has the rest.
+        let input = turns[1]["params"]["input"].as_array().unwrap();
+        assert_eq!(input.len(), 1);
+        assert_eq!(input[0]["text"], "And then?");
+        assert!(!methods(&launcher).contains(&"thread/unsubscribe".to_string()));
+        assert_eq!(thread.as_ref().map(|t| t.id()), Some("thr_1"));
+
+        // The server goes away: the next turn opens a fresh thread and folds the history in.
+        codex.shutdown();
+        let third = second.clone();
+        assert_eq!(codex.stream_turn(&mut thread, &third, &AtomicBool::new(false), &mut |_| {}).unwrap(), "Answer");
+        assert_eq!(launcher.launches.load(Ordering::SeqCst), 2);
+        assert_eq!(methods(&launcher).iter().filter(|m| *m == "thread/start").count(), 2);
+        let last = lock(&launcher.received).iter().rev().find(|m| m["method"] == "turn/start").cloned().unwrap();
+        assert!(last["params"]["input"][0]["text"].as_str().unwrap().starts_with("Conversation so far:"));
+        // Dropping the thread unsubscribes it.
+        drop(thread);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !methods(&launcher).contains(&"thread/unsubscribe".to_string()) && Instant::now() < deadline { std::thread::sleep(Duration::from_millis(10)); }
         assert!(methods(&launcher).contains(&"thread/unsubscribe".to_string()));
     }
 
