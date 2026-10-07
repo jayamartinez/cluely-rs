@@ -206,7 +206,8 @@ impl Overlay {
         let style = field("Answer style", self.dropdown(Picker::AnswerStyle, style_value,
             styles.iter().map(|(st, l)| (format!("{st:?}"), l.to_string())).collect(), &format!("{:?}", s.answer_style),
             |s, v| s.answer_style = if v == "Standard" { AnswerStyle::Standard } else { AnswerStyle::Spoken }, cx));
-        let mut tab = div().flex().flex_col().gap(px(16.0)).child(list).child(div().flex().gap(px(12.0)).child(model).child(style));
+        let smart = ui::setting_row("Smart mode · slower, deeper reasoning", switch("smart-mode", s.smart_mode, |s, v| s.smart_mode = v, cx)).border_b_0();
+        let mut tab = div().flex().flex_col().gap(px(16.0)).child(list).child(div().flex().gap(px(12.0)).child(model).child(style)).child(smart);
         if s.provider == Provider::ApiKey { tab = tab.child(self.api_key_section(cx)); }
         tab
     }

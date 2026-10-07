@@ -12,6 +12,8 @@ use std::time::Duration;
 use base64::Engine as _;
 use serde_json::{Value, json};
 
+use crate::chat::Effort;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Wire {
     Anthropic,
@@ -92,6 +94,9 @@ pub struct Request {
     pub system: String,
     pub messages: Vec<Message>,
     pub max_tokens: u32,
+    /// Fast answers send no reasoning settings (or the lowest where a model reasons by
+    /// default); Smart turns on extended thinking / high reasoning effort where the wire supports it.
+    pub effort: Effort,
 }
 
 #[derive(Debug)]
@@ -432,7 +437,22 @@ fn anthropic_body(req: &Request) -> Value {
     if !req.system.trim().is_empty() {
         body["system"] = json!(req.system);
     }
+    if req.effort == Effort::Smart {
+        // Extended thinking: the budget must fit inside max_tokens, so the answer keeps its room.
+        body["thinking"] = json!({"type": "enabled", "budget_tokens": ANTHROPIC_THINKING_BUDGET});
+        body["max_tokens"] = json!(req.max_tokens + ANTHROPIC_THINKING_BUDGET);
+    }
     body
+}
+
+/// Thinking tokens Smart mode allows Anthropic models before they answer.
+const ANTHROPIC_THINKING_BUDGET: u32 = 4096;
+
+/// OpenAI models that take `reasoning_effort` (others reject the field).
+fn is_openai_reasoning_model(model: &str) -> bool {
+    let model = model.trim().to_ascii_lowercase();
+    let o_series = model.starts_with('o') && model[1..].starts_with(|c: char| c.is_ascii_digit());
+    o_series || model.starts_with("gpt-5") || model.starts_with("gpt-6")
 }
 
 fn openai_body(req: &Request, base: &str) -> Value {
@@ -471,6 +491,10 @@ fn openai_body(req: &Request, base: &str) -> Value {
     // OpenAI's current models reject `max_tokens`; other compatible servers expect it.
     let limit_field = if is_openai(base) { "max_completion_tokens" } else { "max_tokens" };
     body[limit_field] = json!(req.max_tokens);
+    // OpenAI's reasoning models think by default; Fast asks for the least, Smart for more.
+    if is_openai(base) && is_openai_reasoning_model(&req.model) {
+        body["reasoning_effort"] = json!(match req.effort { Effort::Fast => "low", Effort::Smart => "high" });
+    }
     body
 }
 
@@ -707,6 +731,7 @@ mod tests {
                 Message { role: Role::User, parts: vec![Part::Text("Thanks".into())] },
             ],
             max_tokens: 1024,
+            effort: Effort::Fast,
         }
     }
 
@@ -857,6 +882,27 @@ data: [DONE]\n\n";
         let body = openai_body(&request(Wire::OpenAiCompatible, base), base);
         assert_eq!(body["max_completion_tokens"], 1024);
         assert!(body.get("max_tokens").is_none());
+    }
+
+    #[test]
+    fn smart_mode_turns_on_reasoning_only_where_the_wire_and_model_take_it() {
+        // Anthropic: no thinking when fast; a thinking budget on top of the answer's room when smart.
+        let fast = anthropic_body(&request(Wire::Anthropic, "https://api.anthropic.com/v1"));
+        assert!(fast.get("thinking").is_none());
+        let smart = anthropic_body(&Request { effort: Effort::Smart, ..request(Wire::Anthropic, "https://api.anthropic.com/v1") });
+        assert_eq!(smart["thinking"], json!({"type": "enabled", "budget_tokens": ANTHROPIC_THINKING_BUDGET}));
+        assert_eq!(smart["max_tokens"], 1024 + ANTHROPIC_THINKING_BUDGET);
+        // OpenAI: reasoning models get the least effort when fast and high when smart.
+        let openai = "https://api.openai.com/v1";
+        let reasoning = |model: &str, effort| openai_body(&Request { model: model.into(), effort, ..request(Wire::OpenAiCompatible, openai) }, openai);
+        assert_eq!(reasoning("gpt-5-mini", Effort::Fast)["reasoning_effort"], "low");
+        assert_eq!(reasoning("o4-mini", Effort::Smart)["reasoning_effort"], "high");
+        // Models that reject the field, and other OpenAI-compatible servers, never get it.
+        assert!(reasoning("gpt-4o", Effort::Smart).get("reasoning_effort").is_none());
+        assert!(reasoning("omni-moderation", Effort::Smart).get("reasoning_effort").is_none());
+        let other = "https://openrouter.ai/api/v1";
+        let routed = openai_body(&Request { model: "openai/o3".into(), effort: Effort::Smart, ..request(Wire::OpenAiCompatible, other) }, other);
+        assert!(routed.get("reasoning_effort").is_none());
     }
 
     #[test]

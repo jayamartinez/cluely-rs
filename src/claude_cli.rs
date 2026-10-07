@@ -20,7 +20,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use base64::Engine as _;
 use serde_json::{Value, json};
 
-use crate::chat::{ChatRequest, SubscriptionStatus};
+use crate::chat::{ChatRequest, Effort, SubscriptionStatus};
 use crate::providers::{Message, Part, Role};
 
 const MODELS: [(&str, &str); 3] = [("sonnet", "Sonnet"), ("opus", "Opus"), ("haiku", "Haiku")];
@@ -112,7 +112,7 @@ impl ClaudeCli {
         if req.system.chars().count() > MAX_SYSTEM {
             return Err("The assistant instructions are too large.".into());
         }
-        let args = stream_args(&req.system, model);
+        let args = stream_args(&req.system, model, req.effort);
         let exe = resolve_executable()?;
         check_command_line(&exe, &args, COMMAND_LINE_LIMIT)?;
         let mut line = serde_json::to_string(&fold_history(&req.messages)).map_err(|_| INPUT_INVALID.to_string())?;
@@ -138,7 +138,7 @@ fn models() -> Vec<(String, String)> {
 // ---------------------------------------------------------------------------
 
 /// Restricted print-mode argv. Every value is its own argv entry; no shell parses it.
-fn stream_args(system: &str, model: Option<&str>) -> Vec<String> {
+fn stream_args(system: &str, model: Option<&str>, effort: Effort) -> Vec<String> {
     let mut args: Vec<String> = [
         "-p",
         "--input-format",
@@ -164,7 +164,18 @@ fn stream_args(system: &str, model: Option<&str>) -> Vec<String> {
         args.push("--model".into());
         args.push(model.to_string());
     }
+    if let Some(level) = effort_level(model, effort) {
+        args.push("--effort".into());
+        args.push(level.into());
+    }
     args
+}
+
+/// `--effort` for the request: the least thinking for normal answers, high in Smart mode.
+/// Haiku is left at its default (it is the fast model already and may not take the flag).
+fn effort_level(model: Option<&str>, effort: Effort) -> Option<&'static str> {
+    if model.is_some_and(|model| model.to_ascii_lowercase().contains("haiku")) { return None; }
+    Some(match effort { Effort::Fast => "low", Effort::Smart => "high" })
 }
 
 /// Upper bound of the quoted Windows command line, in UTF-16 units: each argument may
@@ -772,7 +783,7 @@ mod tests {
 
     #[test]
     fn argv_is_restricted_and_ordered() {
-        let args = stream_args("Be brief.", Some("haiku"));
+        let args = stream_args("Be brief.", Some("haiku"), Effort::Fast);
         assert_eq!(
             args,
             [
@@ -783,7 +794,13 @@ mod tests {
         );
         let tools = args.iter().position(|arg| arg == "--tools").unwrap();
         assert_eq!(args[tools + 1], "", "an empty element disables every tool");
-        assert!(!stream_args("x", None).contains(&"--model".to_string()));
+        assert!(!stream_args("x", None, Effort::Fast).contains(&"--model".to_string()));
+        // Normal answers think least; Smart mode thinks more; Haiku keeps its default.
+        let fast = stream_args("x", Some("sonnet"), Effort::Fast);
+        assert_eq!(fast[fast.len() - 2..], ["--effort", "low"]);
+        let smart = stream_args("x", None, Effort::Smart);
+        assert_eq!(smart[smart.len() - 2..], ["--effort", "high"]);
+        assert!(!args.contains(&"--effort".to_string()));
     }
 
     #[test]
@@ -799,8 +816,8 @@ mod tests {
     #[test]
     fn command_line_length_is_guarded() {
         let exe = Path::new(r"C:\Users\me\.local\bin\claude.exe");
-        assert!(check_command_line(exe, &stream_args("short", None), 30_000).is_ok());
-        let error = check_command_line(exe, &stream_args(&"x".repeat(30_000), None), 30_000).unwrap_err();
+        assert!(check_command_line(exe, &stream_args("short", None, Effort::Fast), 30_000).is_ok());
+        let error = check_command_line(exe, &stream_args(&"x".repeat(30_000), None, Effort::Fast), 30_000).unwrap_err();
         assert!(error.contains("too long"));
         // Quotes and backslashes count toward the escaped length.
         let plain = command_line_len(exe, &["aaaa".into()]);
@@ -1066,6 +1083,7 @@ mod tests {
             system: "Answer in one short line.".into(),
             messages: vec![user("Reply with exactly: pong", 0)],
             model: Some("haiku".into()),
+            effort: Effort::Fast,
         };
         let mut deltas = 0;
         let answer = ClaudeCli::stream(&req, &AtomicBool::new(false), &mut |_| deltas += 1);
@@ -1088,6 +1106,7 @@ mod tests {
                 parts: vec![Part::Text("What colour is this image?".into()), Part::Jpeg(jpeg)],
             }],
             model: Some("haiku".into()),
+            effort: Effort::Fast,
         };
         let answer = ClaudeCli::stream(&req, &AtomicBool::new(false), &mut |_| {});
         println!("live_image: {answer:?}");

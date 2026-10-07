@@ -6,7 +6,7 @@ use std::sync::atomic::AtomicBool;
 
 use futures::channel::mpsc::{UnboundedReceiver, unbounded};
 
-use crate::chat::ChatRequest;
+use crate::chat::{ChatRequest, Effort};
 use crate::claude_cli::ClaudeCli;
 use crate::codex::CodexClient;
 use crate::providers::{self, Message, Part, Request, Role};
@@ -67,20 +67,26 @@ My question: {}", question.trim())); }
     let mut parts = vec![Part::Text(text)];
     if let Some(jpeg) = screenshot { parts.push(Part::Jpeg(jpeg)); }
     messages.push(Message { role: Role::User, parts });
-    let style = match settings.answer_style { AnswerStyle::Spoken => SPOKEN, AnswerStyle::Standard => STANDARD };
-    target(settings, codex, format!("{SYSTEM}
+    target(settings, codex, system(settings), messages, 1500)
+}
 
-{style}"), messages, 1500)
+/// The instructions every answer runs under (also used to open a Codex thread ahead of time).
+pub fn system(settings: &Settings) -> String {
+    let style = match settings.answer_style { AnswerStyle::Spoken => SPOKEN, AnswerStyle::Standard => STANDARD };
+    format!("{SYSTEM}
+
+{style}")
 }
 
 /// Route a conversation to the selected provider (also used for session summaries and questions).
 pub fn target(settings: &Settings, codex: &Arc<CodexClient>, system: String, messages: Vec<Message>, max_tokens: u32) -> Result<Target, String> {
+    let effort = Effort::from_smart_mode(settings.smart_mode);
     match settings.provider {
         Provider::Codex => {
             let model = Some(settings.codex_model.trim().to_string()).filter(|m| !m.is_empty());
-            Ok(Target::Codex(ChatRequest { system, messages, model }, codex.clone()))
+            Ok(Target::Codex(ChatRequest { system, messages, model, effort }, codex.clone()))
         }
-        Provider::Claude => Ok(Target::Claude(ChatRequest { system, messages, model: Some(settings.claude_model.id().to_string()) })),
+        Provider::Claude => Ok(Target::Claude(ChatRequest { system, messages, model: Some(settings.claude_model.id().to_string()), effort })),
         Provider::ApiKey => {
             let preset = providers::preset(&settings.api_provider).ok_or("Choose an API provider in Settings → Model.")?;
             let base_url = if preset.base_url.is_empty() { settings.custom_base_url.trim().to_string() } else { preset.base_url.to_string() };
@@ -89,7 +95,7 @@ pub fn target(settings: &Settings, codex: &Arc<CodexClient>, system: String, mes
             if preset.needs_key && api_key.is_none() { return Err(format!("Add your {} API key in Settings → Model.", preset.label)); }
             let model = settings.api_model().trim().to_string();
             if model.is_empty() { return Err(format!("Choose a {} model in Settings → Model.", preset.label)); }
-            Ok(Target::Api(Request { wire: preset.wire, base_url, api_key, model, system, messages, max_tokens }))
+            Ok(Target::Api(Request { wire: preset.wire, base_url, api_key, model, system, messages, max_tokens, effort }))
         }
     }
 }
