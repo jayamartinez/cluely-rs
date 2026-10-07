@@ -304,6 +304,7 @@ impl Overlay {
             self.hotkeys.set_panel_open(false);
             self.metrics = listening::Metrics::for_session(self.live_since.unwrap_or_else(Instant::now));
             self.reasoning = Some(ReasoningSession::new(self.codex.clone(), self.metrics.as_ref().map(|metrics| metrics.recorder.clone())));
+            if let Some(session) = &self.reasoning { session.prewarm(&self.store.value); }
             self.start_listening(window, cx);
         }
         self.fit(window);

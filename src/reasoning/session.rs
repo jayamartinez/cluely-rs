@@ -63,6 +63,21 @@ impl ReasoningSession {
         }
     }
 
+    /// Free preparation when Live starts: for the ChatGPT subscription, start the app-server and
+    /// open the session's thread in the background, so the first answer only pays for its turn.
+    /// A request that arrives meanwhile waits for the thread rather than opening a second one.
+    pub fn prewarm(&self, settings: &Settings) {
+        if settings.provider != Provider::Codex { return; }
+        let (codex, thread, system) = (self.codex.clone(), self.thread.clone(), answer::system(settings));
+        let _ = std::thread::Builder::new().name("cluelyrs-answer-prewarm".into()).spawn(move || {
+            let mut open = thread.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Err(error) = codex.prepare_thread(&mut open, &system) { eprintln!("answer prewarm skipped: {error}"); }
+        });
+    }
+
+    /// Blocks until a preparation started by [`ReasoningSession::prewarm`] has finished.
+    pub fn wait_prepared(&self) { drop(self.thread.lock()); }
+
     /// Start a request under a new generation, cancelling the previous one. Replies arrive on
     /// the returned channel from a worker thread; the provider blocks, the UI never does.
     pub fn ask(&mut self, settings: &Settings, request: Request) -> Result<(Generation, UnboundedReceiver<Reply>), String> {
