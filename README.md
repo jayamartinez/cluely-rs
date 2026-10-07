@@ -53,9 +53,11 @@ session, so other apps keep their shortcuts.
 - **Your API key**: Anthropic, OpenAI, OpenRouter, Google Gemini, xAI, Groq, DeepSeek, Mistral, Together, local Ollama or
   LM Studio, or any OpenAI-compatible URL. Keys are stored in Windows Credential Manager.
 
-Answers use the least reasoning the provider offers, so the first words stream within a few seconds; the ChatGPT
-subscription also opens its thread when Live starts. **Smart mode** (Settings → Model) asks for deeper reasoning when
-speed matters less.
+Answers are short by default (one to three sentences, longer only when the question is genuinely complex) and use
+the least reasoning the provider offers, so the first words stream within a few seconds. When Live starts, the ChatGPT
+subscription opens its thread and the Claude subscription starts a Claude Code process for the next answer, so neither
+pays its start-up when you press Assist. **Smart mode** (Settings → Model) asks for deeper reasoning and allows longer
+answers when speed matters less.
 
 **Listening** (Settings → Listening): a Live session transcribes desktop audio as **Them** and the microphone as **Me**
 on this PC with NVIDIA Parakeet Realtime (English). The Live panel shows the last two lines and what each side is
