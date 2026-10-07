@@ -7,6 +7,11 @@
 //!
 //! Parakeet uses the installed model (`cargo run --example parakeet_bench -- download`). Deepgram
 //! (paid) uses the key saved in Settings → Listening, or DEEPGRAM_API_KEY. Writes nothing.
+//!
+//!   DEEPGRAM_API_KEY=... cargo run --example transcript_replay -- --store-key
+//!
+//! stores that key in Windows Credential Manager (what Settings → Listening does), so the key
+//! never has to be typed on a command line in plain text.
 
 use std::sync::Arc;
 use futures::StreamExt;
@@ -25,6 +30,12 @@ const BLOCK: usize = 320; // 20 ms
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("--store-key") {
+        let key = std::env::var("DEEPGRAM_API_KEY").context("set DEEPGRAM_API_KEY in the environment first")?;
+        cluely_rs::secrets::set(deepgram::PROVIDER_ID, &key)?;
+        println!("Deepgram key stored in Windows Credential Manager (service CluelyRS, id {}).", deepgram::PROVIDER_ID);
+        return Ok(());
+    }
     let Some(wav) = args.first() else { bail!("usage: transcript_replay <wav> [--source me|them]") };
     let source = match args.iter().position(|a| a == "--source").and_then(|i| args.get(i + 1)).map(String::as_str) {
         Some("me") => Source::Me, _ => Source::Them,

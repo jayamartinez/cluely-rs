@@ -319,7 +319,9 @@ mod tests {
         let Ok(key) = std::env::var("DEEPGRAM_API_KEY") else { return };
         let wav = std::env::var("CLUELYRS_BENCH_WAV").expect("CLUELYRS_BENCH_WAV=<16 kHz mono wav from dev/make-bench-audio.ps1>");
         let bytes = std::fs::read(wav).unwrap();
-        let pcm: Vec<f32> = bytes[44..].chunks_exact(2).map(|s| i16::from_le_bytes([s[0], s[1]]) as f32 / 32768.0).collect();
+        // The data chunk follows a fmt chunk whose size varies (System.Speech writes 18 bytes).
+        let data = bytes.windows(4).position(|w| w == b"data").expect("no data chunk") + 8;
+        let pcm: Vec<f32> = bytes[data..].chunks_exact(2).map(|s| i16::from_le_bytes([s[0], s[1]]) as f32 / 32768.0).collect();
         let (tx, rx) = std::sync::mpsc::channel();
         let provider = Deepgram::with_key(key);
         let mut session = provider.start_session(EventSink::new(crate::audio::Source::Them, crate::stt::Generation(1), tx)).unwrap();
@@ -329,6 +331,13 @@ mod tests {
         }
         session.finish().unwrap();
         let events: Vec<_> = rx.try_iter().collect();
-        assert!(events.iter().any(|e| matches!(e.kind, EventKind::Final { .. } | EventKind::EndOfUtterance { .. })), "{events:?}");
+        let settled: Vec<&str> = events.iter().filter_map(|e| match &e.kind {
+            EventKind::Final { text } | EventKind::EndOfUtterance { text } if !text.is_empty() => Some(text.as_str()), _ => None }).collect();
+        let ends = events.iter().filter(|e| matches!(e.kind, EventKind::EndOfUtterance { .. })).count();
+        println!("{} settled segments, {ends} end-of-utterance signals: {settled:?}", settled.len());
+        assert!(settled.iter().any(|text| text.to_lowercase().contains("cache")), "{settled:?}");
+        // The clip has six questions with pauses between them.
+        assert!(ends >= 6, "{ends} end-of-utterance signals");
+        assert!(events.iter().all(|e| !matches!(e.kind, EventKind::Error { .. })), "{events:?}");
     }
 }
