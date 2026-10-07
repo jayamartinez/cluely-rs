@@ -27,6 +27,9 @@ pub struct Capabilities {
     pub emits_end_of_utterance: bool,
     /// BCP-47 language tags; empty means unspecified/multilingual.
     pub languages: &'static [&'static str],
+    /// How far behind the audio the provider's words can arrive while someone is still talking.
+    /// Endpointing counts quiet from the recognizer only beyond this.
+    pub text_lag_ms: f64,
 }
 
 /// Whether a provider can start right now, and if not, what the user needs to do.

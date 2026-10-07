@@ -113,7 +113,7 @@ pub fn run(provider: Arc<dyn StreamingAsr>, audio: Receiver<AudioChunk>, sources
     let (events, inbox) = channel();
     let mut transcriber = Transcriber::new(events);
     match transcriber.start(provider.clone(), sources) {
-        Ok(generation) => live.set_generation(generation, provider.capabilities().id),
+        Ok(generation) => { let caps = provider.capabilities(); live.set_generation(generation, caps.id); live.set_text_lag(caps.text_lag_ms); }
         Err(error) => { let _ = out.unbounded_send(Message::Status(Status::Failed(error.to_string()))); return; }
     }
     let _ = out.unbounded_send(Message::Status(Status::Listening { sources: sources.to_vec(), failures }));

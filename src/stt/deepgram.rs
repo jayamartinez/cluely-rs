@@ -51,7 +51,9 @@ pub fn listen_url() -> String {
 impl StreamingAsr for Deepgram {
     fn capabilities(&self) -> Capabilities {
         Capabilities { id: PROVIDER_ID, label: "Deepgram (cloud)", summary: "Deepgram Nova-3 over the network. Needs an API key; audio is sent to Deepgram.",
-            locality: Locality::Cloud, requires_api_key: true, emits_end_of_utterance: true, languages: &[] }
+            locality: Locality::Cloud, requires_api_key: true, emits_end_of_utterance: true, languages: &[],
+            // Interim results arrive about once a second while speech continues.
+            text_lag_ms: 1500.0 }
     }
 
     fn availability(&self) -> Availability {
