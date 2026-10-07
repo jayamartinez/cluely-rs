@@ -10,6 +10,38 @@ pub fn keycap(label: impl Into<SharedString>) -> impl IntoElement {
         .child(label.into())
 }
 
+/// A keycap for a chord, with Shift and Space drawn as icons: "Ctrl ⇧ ␣".
+pub fn chord_keycap(label: &str) -> impl IntoElement {
+    let mut cap = div().flex().flex_none().items_center().gap(px(5.0)).h(px(18.0)).px(px(6.0))
+        .border_1().border_color(theme::keycap_border()).rounded(px(5.0));
+    for key in label.split(' ') {
+        cap = cap.child(match key {
+            "Shift" => icon("icons/shift.svg", 11.0, theme::muted()).into_any_element(),
+            "Space" => icon("icons/space.svg", 13.0, theme::muted()).into_any_element(),
+            other => div().font_family(theme::MONO).text_size(px(11.0)).line_height(px(14.0)).text_color(theme::muted())
+                .child(SharedString::from(other.to_string())).into_any_element(),
+        });
+    }
+    cap
+}
+
+/// A rounded pill control in the composer bar (model switcher, Smart).
+pub fn pill(id: impl Into<ElementId>) -> gpui::Stateful<Div> {
+    div().id(id).relative().flex().flex_none().items_center().gap(px(6.0)).h(px(28.0)).pl(px(10.0)).pr(px(10.0))
+        .rounded_full().border_1().border_color(theme::hairline()).cursor_pointer()
+}
+
+/// A small explanation shown above a control while it's hovered, with a pointer at the bottom.
+pub fn tooltip(title: &'static str, body: &'static str) -> Div {
+    div().w(px(210.0)).flex().flex_col().items_center()
+        .child(div().flex().flex_col().gap(px(2.0)).px(px(11.0)).py(px(8.0)).rounded(px(9.0))
+            .bg(rgb(0x26292d)).border_1().border_color(theme::keycap_border())
+            .child(div().text_size(px(12.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child(title))
+            .child(div().text_size(px(12.0)).line_height(px(16.0)).text_color(theme::body()).child(body)))
+        // The pointer, in the bubble's colour, overlapping its bottom border by a pixel.
+        .child(gpui::svg().path("icons/tooltip-pointer.svg").w(px(12.0)).h(px(6.0)).mt(px(-1.0)).flex_none().text_color(rgb(0x26292d)))
+}
+
 /// Rounded dark capsule used inside the pill.
 pub fn chip() -> Div {
     div().flex().items_center().gap(px(8.0)).h(px(30.0)).px(px(12.0)).rounded_full().bg(theme::raised())
