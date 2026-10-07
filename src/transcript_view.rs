@@ -182,9 +182,10 @@ impl Overlay {
             .child(div().text_size(px(11.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::accent_soft()).child("HEARD"))
             .child(div().size(px(6.0)).flex_none().rounded_full().bg(dot))
             .child(div().text_size(px(12.0)).text_color(color).truncate().child(label));
-        // A fixed-height strip anchored to its newest line: the answer thread below never moves
-        // while someone talks. Older lines are cut off at the top when in-progress lines need the room.
-        let mut lines = div().flex().flex_col().justify_end().gap(px(ROW_GAP)).h(px(STRIP_HEIGHT)).overflow_hidden()
+        // At most two lines, always the newest: a two-line in-progress utterance, or the last
+        // committed line plus the one in progress. The strip only grows from one line to two, so
+        // the answer thread below barely moves, and there is never empty space above the text.
+        let mut lines = div().flex().flex_col().justify_end().gap(px(ROW_GAP)).max_h(px(STRIP_HEIGHT)).overflow_hidden()
             .mx(px(16.0)).mb(px(10.0));
         let shown = self.transcript.len().saturating_sub(SHOWN_LINES);
         for line in &self.transcript[shown..] {
@@ -299,8 +300,8 @@ fn provisional_text(line: &ProvisionalLine) -> AnyElement {
 
 const LINE_HEIGHT: f32 = 18.0;
 const ROW_GAP: f32 = 4.0;
-/// Room for four text lines: two committed lines and a two-line in-progress one.
-const STRIP_HEIGHT: f32 = 4.0 * LINE_HEIGHT + 3.0 * ROW_GAP;
+/// Two text lines. Older rows above are cut off when newer ones need the room.
+const STRIP_HEIGHT: f32 = 2.0 * LINE_HEIGHT + ROW_GAP;
 const ELLIPSIS: &str = "… ";
 /// Characters that fit in two lines of the strip's text column (about 438 px at 13 px Segoe UI,
 /// whose lowercase letters average about 6 px). Budgeted at 7.3 px a character, less a word per
