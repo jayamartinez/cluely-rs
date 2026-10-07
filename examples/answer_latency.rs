@@ -6,6 +6,7 @@
 //!   cargo run --example answer_latency            # as the app would answer now
 //!   cargo run --example answer_latency -- --warm  # after Live start's preparation (prewarm)
 //!   cargo run --example answer_latency -- --smart # Smart mode
+//!   cargo run --example answer_latency -- --provider claude   # override the saved provider (claude|codex)
 //!
 //! Every run makes ONE real request through your ChatGPT/Claude subscription or API key and
 //! counts against its usage. Never run it automatically.
@@ -25,6 +26,12 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut settings = Store::load().value;
     if args.iter().any(|a| a == "--smart") { settings.smart_mode = true; }
+    match args.iter().position(|a| a == "--provider").and_then(|i| args.get(i + 1)).map(String::as_str) {
+        Some("claude") => settings.provider = cluely_rs::settings::Provider::Claude,
+        Some("codex") => settings.provider = cluely_rs::settings::Provider::Codex,
+        Some(other) => panic!("unknown provider {other} (claude or codex)"),
+        None => {}
+    }
     let mut session = ReasoningSession::new(CodexClient::new(), None);
     if args.iter().any(|a| a == "--warm") {
         prewarm(&session, &settings);
@@ -52,7 +59,7 @@ fn main() {
                 let total = started.elapsed();
                 match result {
                     Ok(answer) => println!("first words: {:.2} s, full answer: {:.2} s, {} chars\n---\n{}",
-                        first.unwrap_or(total).as_secs_f64(), total.as_secs_f64(), answer.chars().count(), answer.trim()),
+                        first.unwrap_or(total).as_secs_f64(), total.as_secs_f64(), answer.split_whitespace().count(), answer.trim()),
                     Err(error) => println!("failed after {:.2} s: {error}", total.as_secs_f64()),
                 }
                 break;
