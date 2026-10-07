@@ -53,6 +53,10 @@ session, so other apps keep their shortcuts.
 - **Your API key**: Anthropic, OpenAI, OpenRouter, Google Gemini, xAI, Groq, DeepSeek, Mistral, Together, local Ollama or
   LM Studio, or any OpenAI-compatible URL. Keys are stored in Windows Credential Manager.
 
+Answers use the least reasoning the provider offers, so the first words stream within a few seconds; the ChatGPT
+subscription also opens its thread when Live starts. **Smart mode** (Settings → Model) asks for deeper reasoning when
+speed matters less.
+
 **Listening** (Settings → Listening): a Live session transcribes desktop audio as **Them** and the microphone as **Me**
 on this PC with NVIDIA Parakeet Realtime (English). The Live panel shows the last two lines and what each side is
 saying right now; words the recognizer may still change are muted and italic, and a blue **?** marks a likely question.
@@ -92,6 +96,8 @@ $env:CLUELYRS_DATA_DIR = "$env:TEMP\cluelyrs-demo"; cargo run
 Latency: set `CLUELYRS_METRICS=1` to export each Live session's pipeline timings as JSON Lines to
 `%LOCALAPPDATA%\CluelyRS\metrics\`, together with what each source captured (`live-<time>-me.wav` and `-them.wav`,
 16 kHz mono). Compare runs with `cargo run --example latency_report -- <file.jsonl>...` (grouped per provider).
+`cargo run --example answer_latency -- [--warm] [--smart]` times one Assist-shaped answer through your selected provider
+(one real request each run, so it uses your subscription or key).
 
 Transcription: `cargo run --example parakeet_bench -- download` installs the Parakeet model, and the same example
 benchmarks speed, latency, CPU, memory and long-run reliability (usage at the top of `examples/parakeet_bench.rs`; test
