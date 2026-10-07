@@ -73,7 +73,7 @@ impl Overlay {
             cx.notify();
             return;
         }
-        let (listening, mut messages) = Listening::start(provider, sources, self.store.value.devices());
+        let (listening, mut messages) = Listening::start(provider, sources, self.store.value.devices(), self.metrics.clone());
         self.listening = Some(listening);
         self.listening_status = Some(Status::Starting);
         cx.notify();
@@ -153,6 +153,23 @@ impl Overlay {
                 }
             }
         }
+    }
+
+    /// The conversation heard so far, for answers: committed lines plus what each side is
+    /// saying right now.
+    pub(crate) fn conversation(&self) -> crate::reasoning::Conversation {
+        let lines = self.transcript.iter().map(|line| crate::reasoning::Line { source: line.source, at_ms: line.at_ms, text: line.text.clone() }).collect();
+        let now = [Source::Them, Source::Me].into_iter().filter_map(|source| {
+            let line = self.provisional[slot(source)].as_ref()?;
+            let text = format!("{} {}", line.stable, line.unstable).trim().to_string();
+            (!text.is_empty()).then_some(crate::reasoning::Now { source, text })
+        }).collect();
+        crate::reasoning::Conversation { lines, now }
+    }
+
+    /// The latest committed line from the other side, which an answer most likely addresses.
+    pub(crate) fn latest_heard_utterance(&self) -> Option<UtteranceId> {
+        self.transcript.iter().rev().find(|line| line.source == Source::Them).map(|line| line.id)
     }
 
     /// Pipeline audio time → milliseconds since the Live session started.

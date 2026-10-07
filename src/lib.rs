@@ -20,6 +20,7 @@ pub mod models;
 pub mod notes;
 pub mod overlay;
 pub mod providers;
+pub mod reasoning;
 pub mod secrets;
 pub mod sessions_window;
 pub mod settings;

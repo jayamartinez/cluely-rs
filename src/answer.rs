@@ -52,16 +52,15 @@ pub enum Target {
 }
 
 /// Resolve the selected provider into a request, or a user-facing reason it can't run.
-pub fn build(settings: &Settings, codex: &Arc<CodexClient>, action: &str, question: &str, history: &[Exchange], screenshot: Option<Vec<u8>>) -> Result<Target, String> {
+/// `conversation` is the heard conversation as prompt text (`reasoning::Conversation::render`).
+pub fn build(settings: &Settings, codex: &Arc<CodexClient>, action: &str, question: &str, history: &[Exchange], conversation: &str, screenshot: Option<Vec<u8>>) -> Result<Target, String> {
     let mut messages = Vec::new();
     for exchange in history.iter().rev().take(8).rev() {
         let asked = if exchange.question.is_empty() { exchange.action.clone() } else { format!("{}: {}", exchange.action, exchange.question) };
         messages.push(Message { role: Role::User, parts: vec![Part::Text(asked)] });
         messages.push(Message { role: Role::Assistant, parts: vec![Part::Text(exchange.answer.clone())] });
     }
-    let mut text = format!("{}
-
-No live transcript is available yet; rely on the screenshot.", instruction(action));
+    let mut text = format!("{}\n\n{}", instruction(action), conversation.trim());
     if !question.trim().is_empty() { text.push_str(&format!("
 
 My question: {}", question.trim())); }
@@ -95,7 +94,8 @@ pub fn target(settings: &Settings, codex: &Arc<CodexClient>, system: String, mes
     }
 }
 
-fn run(target: &Target, cancel: &AtomicBool, on_delta: &mut dyn FnMut(&str)) -> Result<String, String> {
+/// Run `target` on the calling thread, streaming deltas; every provider blocks.
+pub fn run(target: &Target, cancel: &AtomicBool, on_delta: &mut dyn FnMut(&str)) -> Result<String, String> {
     match target {
         Target::Api(request) => providers::stream(request, cancel, on_delta).map_err(|error| error.to_string()),
         Target::Claude(request) => ClaudeCli::stream(request, cancel, on_delta),
