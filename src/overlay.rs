@@ -217,7 +217,7 @@ impl Overlay {
             self.key_notice = None;
         }
         let now = &self.store.value;
-        if previous.transcribe != now.transcribe || previous.listen_mic != now.listen_mic || previous.listen_desktop != now.listen_desktop
+        if previous.transcribe != now.transcribe || previous.stt_provider != now.stt_provider || previous.listen_mic != now.listen_mic || previous.listen_desktop != now.listen_desktop
             || previous.mic_device != now.mic_device || previous.desktop_device != now.desktop_device {
             self.restart_listening_if_live(window, cx);
         }
@@ -468,10 +468,16 @@ impl Overlay {
         cx.notify();
     }
 
+    /// Which provider the key field belongs to: the transcription provider on the Listening
+    /// tab, the API-key answer provider on the Model tab.
+    pub(crate) fn key_target(&self) -> String {
+        if self.settings_tab == Some(Tab::Listening) { crate::stt::deepgram::PROVIDER_ID.to_string() } else { self.store.value.api_provider.clone() }
+    }
+
     pub fn save_key(&mut self, cx: &mut Context<Self>) {
         let key = self.key_input.read(cx).text().trim().to_string();
         if key.is_empty() { return; }
-        let provider = self.store.value.api_provider.clone();
+        let provider = self.key_target();
         self.key_notice = Some(match crate::secrets::set(&provider, &key) {
             Ok(()) => { self.key_input.update(cx, |input, cx| input.clear(cx)); "Saved to Windows Credential Manager.".into() }
             Err(error) => format!("Couldn't save the key: {error}").into(),
@@ -480,7 +486,7 @@ impl Overlay {
     }
 
     pub fn remove_key(&mut self, cx: &mut Context<Self>) {
-        let provider = self.store.value.api_provider.clone();
+        let provider = self.key_target();
         self.key_notice = Some(match crate::secrets::remove(&provider) { Ok(()) => "Key removed.".into(), Err(_) => "No saved key to remove.".into() });
         cx.notify();
     }

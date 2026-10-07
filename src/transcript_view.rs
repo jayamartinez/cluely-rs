@@ -59,7 +59,7 @@ impl Overlay {
     pub(crate) fn start_listening(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.stop_listening();
         if !self.store.value.transcribe { return; }
-        let provider = listening::provider();
+        let provider = listening::provider(&self.store.value);
         if let Some(reason) = listening::not_ready(&provider.availability()) {
             self.listening_status = Some(Status::Failed(reason));
             cx.notify();

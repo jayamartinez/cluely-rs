@@ -29,6 +29,11 @@ impl ClaudeModel {
 #[serde(rename_all = "camelCase")]
 pub enum AnswerStyle { #[default] Spoken, Standard }
 
+/// Which recognizer transcribes Live audio.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SttProvider { #[default] Parakeet, Deepgram }
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Settings {
@@ -45,6 +50,7 @@ pub struct Settings {
     pub answer_style: AnswerStyle,
     /// Transcribe the Live session's audio on this PC. Off keeps Live to the screen and typed questions.
     pub transcribe: bool,
+    pub stt_provider: SttProvider,
     pub listen_mic: bool,
     pub listen_desktop: bool,
     /// Device names from `audio::list_devices`; empty means the system default.
@@ -65,7 +71,7 @@ impl Default for Settings {
         Self {
             provider: Provider::default(), claude_model: ClaudeModel::default(), codex_model: String::new(),
             api_provider: "anthropic".into(), api_models: BTreeMap::new(), custom_base_url: String::new(),
-            answer_style: AnswerStyle::default(), transcribe: true, listen_mic: true, listen_desktop: true,
+            answer_style: AnswerStyle::default(), transcribe: true, stt_provider: SttProvider::default(), listen_mic: true, listen_desktop: true,
             mic_device: String::new(), desktop_device: String::new(),
             hide_from_capture: true, screen_on_send: true, start_live_on_launch: false,
             save_sessions: true, save_screenshots: true, keep_sessions: Retention::default(),

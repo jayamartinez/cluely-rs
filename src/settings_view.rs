@@ -9,7 +9,8 @@ use crate::archive::Retention;
 use crate::chat::SubscriptionStatus;
 use crate::hotkeys::{Action, DEFAULTS};
 use crate::overlay::Overlay;
-use crate::settings::{AnswerStyle, ClaudeModel, Provider, Settings};
+use crate::settings::{AnswerStyle, ClaudeModel, Provider, Settings, SttProvider};
+use crate::stt::deepgram;
 use crate::stt::parakeet::MODEL;
 use crate::theme;
 use crate::transcript_view::model_size_label;
@@ -27,7 +28,7 @@ impl Tab {
 
 /// The dropdowns in Settings; at most one is open.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Picker { CodexModel, ClaudeModel, AnswerStyle, ApiProvider, ApiModel, Mic, Desktop }
+pub enum Picker { CodexModel, ClaudeModel, AnswerStyle, ApiProvider, ApiModel, SttProvider, Mic, Desktop }
 
 /// Taller lists scroll.
 const MENU_MAX_HEIGHT: f32 = 300.0;
@@ -337,7 +338,42 @@ impl Overlay {
                 &devices.microphones, devices.default_microphone.as_ref(), |s, v| s.mic_device = v, cx))
             .child(device_column("Desktop audio", "listen-desktop", s.listen_desktop, |s, v| s.listen_desktop = v, Picker::Desktop, &s.desktop_device,
                 &devices.playback, devices.default_playback.as_ref(), |s, v| s.desktop_device = v, cx));
-        div().flex().flex_col().gap(px(16.0)).child(transcribe).child(self.model_row(cx)).child(columns)
+        let providers = [(SttProvider::Parakeet, "Parakeet Realtime · on this PC"), (SttProvider::Deepgram, "Deepgram · cloud")];
+        let current = providers.iter().find(|(p, _)| *p == s.stt_provider).map(|(_, l)| *l).unwrap_or("Parakeet Realtime · on this PC");
+        let with = field("Transcribe with", self.dropdown(Picker::SttProvider, current,
+            providers.iter().map(|(p, l)| (format!("{p:?}"), l.to_string())).collect(), &format!("{:?}", s.stt_provider),
+            |s, v| s.stt_provider = if v == "Deepgram" { SttProvider::Deepgram } else { SttProvider::Parakeet }, cx));
+        let provider_row = match s.stt_provider {
+            SttProvider::Parakeet => self.model_row(cx),
+            SttProvider::Deepgram => self.deepgram_key_row(cx),
+        };
+        div().flex().flex_col().gap(px(16.0)).child(transcribe).child(with).child(provider_row).child(columns)
+    }
+
+    /// The Deepgram API key: paste and save, or the saved key's hint with Remove.
+    fn deepgram_key_row(&self, cx: &mut Context<Self>) -> Div {
+        let focus = self.key_input.clone();
+        let saved = crate::secrets::hint(deepgram::PROVIDER_ID);
+        let mut status = div().flex().items_center().gap(px(12.0)).text_size(px(12.0)).text_color(theme::muted())
+            .child(match &saved { Some(hint) => format!("Saved key {hint} · audio is sent to Deepgram while Live is on"), None => "No key saved".to_string() });
+        if saved.is_some() {
+            status = status.child(div().id("remove-key").cursor_pointer().text_color(gpui::rgb(0xffb4a8))
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.remove_key(cx))).child("Remove"));
+        }
+        status = status.child(div().id("key-page").cursor_pointer().text_color(theme::accent_soft())
+            .on_mouse_down(MouseButton::Left, cx.listener(|_, _, _, cx| cx.open_url("https://console.deepgram.com/"))).child("Get a key ↗"));
+        let mut row = div().flex().flex_col().gap(px(6.0))
+            .child(div().flex().items_center().gap(px(8.0))
+                .child(div().id("key-box").flex_1().min_w_0().px(px(10.0)).py(px(7.0)).rounded(px(9.0))
+                    .bg(theme::field()).border_1().border_color(theme::hairline()).cursor_text()
+                    .on_mouse_down(MouseButton::Left, cx.listener(move |_, _, window, cx| window.focus(&focus.focus_handle(cx))))
+                    .child(self.key_input.clone()))
+                .child(button("save-key", "Save", true).on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.save_key(cx)))))
+            .child(status);
+        if let Some(notice) = self.key_notice.clone() {
+            row = row.child(div().text_size(px(12.0)).text_color(theme::accent_soft()).child(notice));
+        }
+        field("Deepgram API key", row)
     }
 
     /// The Parakeet model: installed, downloading (with progress and Cancel), or a Download button.
