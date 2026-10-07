@@ -28,10 +28,22 @@ impl Tab {
 
 /// The dropdowns in Settings; at most one is open.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Picker { CodexModel, ClaudeModel, AnswerStyle, ApiProvider, ApiModel, SttProvider, Mic, Desktop }
+/// `Composer` is the model switcher in the Live panel's composer bar.
+pub enum Picker { CodexModel, ClaudeModel, AnswerStyle, ApiProvider, ApiModel, SttProvider, Mic, Desktop, Composer }
 
 /// Taller lists scroll.
-const MENU_MAX_HEIGHT: f32 = 300.0;
+pub(crate) const MENU_MAX_HEIGHT: f32 = 300.0;
+
+/// The models offered for the selected provider (see `Overlay::model_choice`).
+pub(crate) struct ModelChoice {
+    pub picker: Picker,
+    /// What the current choice is called.
+    pub value: String,
+    /// (id, label) pairs.
+    pub options: Vec<(String, String)>,
+    pub selected: String,
+    pub set: fn(&mut Settings, String),
+}
 
 /// A segmented control over `options`; clicking applies `set` and saves.
 fn choice<T: Copy + PartialEq + 'static>(
@@ -184,23 +196,8 @@ impl Overlay {
                 .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, window, cx| this.update_settings(|s| s.provider = provider, window, cx)))
                 .child(self.connection_badge(provider, index, cx)));
         }
-        let model: Div = match s.provider {
-            Provider::Codex => {
-                let models = self.codex_status.as_ref().map(|st| st.models.clone()).unwrap_or_default();
-                let mut options = vec![(String::new(), "Default".to_string())];
-                options.extend(models.iter().cloned());
-                let value = models.iter().find(|(id, _)| *id == s.codex_model).map(|(_, name)| name.clone())
-                    .unwrap_or_else(|| if s.codex_model.is_empty() { "Default".into() } else { s.codex_model.clone() });
-                field("Model", self.dropdown(Picker::CodexModel, value, options, &s.codex_model, |s, v| s.codex_model = v, cx))
-            }
-            Provider::Claude => {
-                let options = [(ClaudeModel::Sonnet, "Sonnet"), (ClaudeModel::Opus, "Opus"), (ClaudeModel::Haiku, "Haiku")];
-                let value = options.iter().find(|(m, _)| *m == s.claude_model).map(|(_, l)| *l).unwrap_or("Sonnet");
-                field("Model", self.dropdown(Picker::ClaudeModel, value, options.iter().map(|(m, l)| (m.id().to_string(), l.to_string())).collect(), s.claude_model.id(),
-                    |s, v| s.claude_model = match v.as_str() { "opus" => ClaudeModel::Opus, "haiku" => ClaudeModel::Haiku, _ => ClaudeModel::Sonnet }, cx))
-            }
-            Provider::ApiKey => self.api_model_field(cx),
-        };
+        let choice = self.model_choice();
+        let model = field("Model", self.dropdown(choice.picker, choice.value, choice.options, &choice.selected, choice.set, cx));
         let styles = [(AnswerStyle::Spoken, "Words I can say aloud"), (AnswerStyle::Standard, "Standard explanations")];
         let style_value = styles.iter().find(|(st, _)| *st == s.answer_style).map(|(_, l)| *l).unwrap_or("Words I can say aloud");
         let style = field("Answer style", self.dropdown(Picker::AnswerStyle, style_value,
@@ -250,17 +247,37 @@ impl Overlay {
         }
     }
 
-    /// Model for "Your API key": a picker over loaded or suggested models, plus a free-text id.
-    fn api_model_field(&self, cx: &mut Context<Self>) -> Div {
+    /// The selected provider's models, the current one, and how to choose another. Shared by the
+    /// Settings → Model dropdown and the composer's model switcher, so both always agree.
+    pub(crate) fn model_choice(&self) -> ModelChoice {
         let s = &self.store.value;
-        let suggestions: Vec<String> = match crate::providers::preset(&s.api_provider) {
-            Some(preset) if self.loaded_models.is_empty() => preset.suggested_models.iter().map(|m| m.to_string()).collect(),
-            Some(_) => self.loaded_models.iter().take(60).cloned().collect(),
-            None => Vec::new(),
-        };
-        let value = if s.api_model().is_empty() { "Choose a model".to_string() } else { s.api_model().to_string() };
-        let options = suggestions.into_iter().map(|m| (m.clone(), m)).collect();
-        field("Model", self.dropdown(Picker::ApiModel, value, options, s.api_model(), |s, v| { s.api_models.insert(s.api_provider.clone(), v); }, cx))
+        match s.provider {
+            Provider::Codex => {
+                let models = self.codex_status.as_ref().map(|st| st.models.clone()).unwrap_or_default();
+                let mut options = vec![(String::new(), "Default".to_string())];
+                options.extend(models.iter().cloned());
+                let value = models.iter().find(|(id, _)| *id == s.codex_model).map(|(_, name)| name.clone())
+                    .unwrap_or_else(|| if s.codex_model.is_empty() { "Default".into() } else { s.codex_model.clone() });
+                ModelChoice { picker: Picker::CodexModel, value, options, selected: s.codex_model.clone(), set: |s, v| s.codex_model = v }
+            }
+            Provider::Claude => {
+                let models = [(ClaudeModel::Sonnet, "Sonnet"), (ClaudeModel::Opus, "Opus"), (ClaudeModel::Haiku, "Haiku")];
+                let value = models.iter().find(|(m, _)| *m == s.claude_model).map(|(_, l)| *l).unwrap_or("Sonnet").to_string();
+                ModelChoice { picker: Picker::ClaudeModel, value, options: models.iter().map(|(m, l)| (m.id().to_string(), l.to_string())).collect(),
+                    selected: s.claude_model.id().to_string(),
+                    set: |s, v| s.claude_model = match v.as_str() { "opus" => ClaudeModel::Opus, "haiku" => ClaudeModel::Haiku, _ => ClaudeModel::Sonnet } }
+            }
+            Provider::ApiKey => {
+                let suggestions: Vec<String> = match crate::providers::preset(&s.api_provider) {
+                    Some(preset) if self.loaded_models.is_empty() => preset.suggested_models.iter().map(|m| m.to_string()).collect(),
+                    Some(_) => self.loaded_models.iter().take(60).cloned().collect(),
+                    None => Vec::new(),
+                };
+                let value = if s.api_model().is_empty() { "Choose a model".to_string() } else { s.api_model().to_string() };
+                ModelChoice { picker: Picker::ApiModel, value, options: suggestions.into_iter().map(|m| (m.clone(), m)).collect(),
+                    selected: s.api_model().to_string(), set: |s, v| { s.api_models.insert(s.api_provider.clone(), v); } }
+            }
+        }
     }
 
     fn api_key_section(&self, cx: &mut Context<Self>) -> Div {

@@ -9,6 +9,7 @@ pub mod assets;
 pub mod audio;
 pub mod capture;
 pub mod chat;
+pub mod composer;
 pub mod claude_cli;
 pub mod codex;
 pub mod hotkeys;
