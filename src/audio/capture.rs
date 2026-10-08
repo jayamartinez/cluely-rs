@@ -9,7 +9,7 @@
 //! - `Source::Them` = default output device opened for input, which WASAPI turns into loopback;
 //!   on macOS, everything the system plays, from ScreenCaptureKit (`platform::SystemAudio`)
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{Sender, channel};
 use std::thread::JoinHandle;
@@ -42,6 +42,8 @@ struct Shared {
     levels: [AtomicU32; 2],
     /// Samples dropped because the worker fell behind, per source.
     dropped: [AtomicU64; 2],
+    /// Sources whose capture ended on its own mid-session, with why (user-facing), not yet taken.
+    ended: Mutex<Vec<(Source, String)>>,
 }
 
 pub struct AudioCapture {
@@ -61,7 +63,7 @@ impl AudioCapture {
 
     /// Like `start`, capturing from the chosen devices (system defaults where unset).
     pub fn start_with(sources: &[Source], devices: &Devices, sink: Sender<AudioChunk>) -> anyhow::Result<(Self, Vec<(Source, String)>)> {
-        let shared = Arc::new(Shared { stop: AtomicBool::new(false), levels: Default::default(), dropped: Default::default() });
+        let shared = Arc::new(Shared { stop: AtomicBool::new(false), levels: Default::default(), dropped: Default::default(), ended: Default::default() });
         let session_start = Instant::now();
         let mut capture = Self { shared, threads: Vec::new(), opened: Vec::new() };
         let mut failures = Vec::new();
@@ -85,6 +87,12 @@ impl AudioCapture {
     pub fn level(&self, source: Source) -> f32 { f32::from_bits(self.shared.levels[index(source)].load(Ordering::Relaxed)) }
 
     pub fn dropped_samples(&self, source: Source) -> u64 { self.shared.dropped[index(source)].load(Ordering::Relaxed) }
+
+    /// Sources whose capture has ended on its own since the last call, with why. Only macOS
+    /// system audio reports this so far; a WASAPI source that fails just goes quiet.
+    pub fn take_ended(&self) -> Vec<(Source, String)> {
+        std::mem::take(&mut *self.shared.ended.lock().unwrap_or_else(PoisonError::into_inner))
+    }
 
     pub fn stop(mut self) { self.shutdown(); }
 
@@ -291,7 +299,10 @@ fn run_system_audio(session_start: Instant, shared: Arc<Shared>, sink: Sender<Au
         SystemAudioEvent::Audio(buffer) => if let Err(TrySendError::Full(buffer)) = buffers.try_send(buffer) {
             counters.dropped[slot].fetch_add((buffer.samples.len() / buffer.channels.max(1) as usize) as u64, Ordering::Relaxed);
         },
-        SystemAudioEvent::Stopped(reason) => { eprintln!("system audio stopped: {reason}"); ended.store(true, Ordering::Relaxed); }
+        SystemAudioEvent::Stopped(reason) => {
+            counters.ended.lock().unwrap_or_else(PoisonError::into_inner).push((Source::Them, reason));
+            ended.store(true, Ordering::Relaxed);
+        }
     });
     let stream = match stream {
         Ok(stream) => stream,
@@ -303,10 +314,16 @@ fn run_system_audio(session_start: Instant, shared: Arc<Shared>, sink: Sender<Au
     };
     let _ = ready.send(Ok(SourceInfo { source: Source::Them, device: SYSTEM_AUDIO.into(), sample_rate: rate, channels }));
 
+    // Why capture ended on its own, for the Live panel; stopping the session isn't reported.
+    let mut failure = None;
     while !shared.stop.load(Ordering::Relaxed) && !stopped.load(Ordering::Relaxed) {
         let placed = match inbox.recv_timeout(DRAIN_EVERY) {
             Ok(buffer) if (buffer.sample_rate, buffer.channels) == SYSTEM_AUDIO_FORMAT => filler.push(session_ms(buffer.captured), &buffer.samples),
-            Ok(buffer) => { eprintln!("system audio arrived as {} Hz x{}, not as configured", buffer.sample_rate, buffer.channels); break; }
+            Ok(buffer) => {
+                eprintln!("system audio arrived as {} Hz x{}, not as configured", buffer.sample_rate, buffer.channels);
+                failure = Some("System audio arrived in an unexpected format.".to_string());
+                break;
+            }
             Err(RecvTimeoutError::Timeout) => filler.idle(session_ms(Instant::now())),
             Err(RecvTimeoutError::Disconnected) => break,
         };
@@ -316,8 +333,9 @@ fn run_system_audio(session_start: Instant, shared: Arc<Shared>, sink: Sender<Au
                 if sink.send(chunk).is_err() { break; }
             }
             Ok(None) => {}
-            Err(_) => break,
+            Err(error) => { failure = Some(format!("System audio couldn't be converted: {error}")); break; }
         }
     }
+    if let Some(reason) = failure { shared.ended.lock().unwrap_or_else(PoisonError::into_inner).push((Source::Them, reason)); }
     drop(stream);
 }
