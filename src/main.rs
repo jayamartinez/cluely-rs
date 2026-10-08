@@ -3,9 +3,22 @@
 use cluely_rs::{assets, hotkeys, input, overlay};
 use gpui::{App, AppContext, Application, Bounds, WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, point, px, size};
 
+#[cfg(target_os = "macos")]
+gpui::actions!(cluely_rs, [Quit]);
+
+/// The app menu, so CluelyRS can be quit with ⌘Q or from the menu bar like any Mac app.
+#[cfg(target_os = "macos")]
+fn app_menu(cx: &mut App) {
+    cx.on_action(|_: &Quit, cx| cx.quit());
+    cx.bind_keys([gpui::KeyBinding::new("cmd-q", Quit, None)]);
+    cx.set_menus(vec![gpui::Menu { name: "CluelyRS".into(), items: vec![gpui::MenuItem::action("Quit CluelyRS", Quit)] }]);
+}
+
 fn main() {
     Application::new().with_assets(assets::Assets).run(|cx: &mut App| {
         input::bind_keys(cx);
+        #[cfg(target_os = "macos")]
+        app_menu(cx);
         // Hotkeys must be created on this (the GPUI main) thread so its message loop serves them.
         let (hotkeys, presses) = match hotkeys::Hotkeys::new() {
             Ok(pair) => pair,
