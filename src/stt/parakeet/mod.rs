@@ -7,6 +7,7 @@ pub mod session;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, Weak};
+use std::time::Duration;
 
 use crate::audio::AudioChunk;
 use crate::models::ModelFile;
@@ -24,6 +25,19 @@ pub const MODEL: ModelFile = ModelFile {
 /// Inference threads shared by all Parakeet streams. Chosen by `examples/parakeet_bench.rs`;
 /// see the benchmark notes in PATCHES.md.
 pub const DEFAULT_THREADS: usize = 4;
+
+/// How long [`shutdown`] waits for running streams to finish.
+pub const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Frees parakeet.cpp's shared backend before the process exits; required with Metal, where ggml
+/// aborts during exit otherwise (PATCHES.md). Call after telling everything that transcribes to
+/// stop: it waits up to [`SHUTDOWN_TIMEOUT`] for the last model and stream to be dropped, and
+/// later model loads fail. Safe if no model was ever loaded, and if called twice.
+pub fn shutdown() {
+    if let Err(models) = ffi::shutdown_backend(SHUTDOWN_TIMEOUT) {
+        eprintln!("parakeet.cpp: {models} model(s) still in use at exit; its backend was not freed");
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct ParakeetConfig {

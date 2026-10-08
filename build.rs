@@ -1,5 +1,5 @@
 //! Builds parakeet.cpp (pinned submodule) as static libraries and links them, plus the small
-//! thread-count shim in `native/`. See PATCHES.md for what is changed relative to upstream.
+//! shim in `native/`. See PATCHES.md for what is changed relative to upstream.
 
 use std::env;
 use std::path::{Path, PathBuf};
@@ -7,7 +7,7 @@ use std::process::Command;
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-changed=native/parakeet_threads.cpp");
+    println!("cargo:rerun-if-changed=native/parakeet_shim.cpp");
     println!("cargo:rerun-if-env-changed=CLUELYRS_NINJA");
 
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
@@ -83,7 +83,7 @@ fn main() {
 
     cc::Build::new()
         .cpp(true)
-        .file("native/parakeet_threads.cpp")
+        .file("native/parakeet_shim.cpp")
         .flag_if_supported("/std:c++17")
         .compile("cluelyrs_parakeet_shim");
 }

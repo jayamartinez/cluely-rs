@@ -27,6 +27,13 @@ use cluely_rs::stt::{EventKind, EventSink, Generation, StreamingAsr};
 const BLOCK: usize = 320; // 20 ms, the size capture delivers
 
 fn main() -> anyhow::Result<()> {
+    let result = run();
+    // Every model is gone once run returns; free parakeet.cpp's backend before exit (PATCHES.md).
+    parakeet::shutdown();
+    result
+}
+
+fn run() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) == Some("download") { return download(); }
     let (Some(wav), Some(mode)) = (args.first(), args.get(1)) else {
@@ -58,7 +65,8 @@ fn sweep(model_path: &Path, pcm: &[f32], threads: &[usize]) -> anyhow::Result<()
         let (rtf1, p95_1) = decode_all(&model, pcm)?;
         let runs: Vec<_> = (0..2).map(|_| { let model = Arc::clone(&model); let pcm = pcm.to_vec();
             std::thread::spawn(move || decode_all(&model, &pcm)) }).collect();
-        let results: Vec<(f64, f64)> = runs.into_iter().map(|h| h.join().unwrap()).collect::<anyhow::Result<_>>()?;
+        // Join both before looking at errors, so no stream outlives this function.
+        let results: Vec<(f64, f64)> = runs.into_iter().map(|h| h.join().unwrap()).collect::<Vec<_>>().into_iter().collect::<anyhow::Result<_>>()?;
         let rtf2 = results.iter().map(|r| r.0).fold(0.0, f64::max);
         let p95_2 = results.iter().map(|r| r.1).fold(0.0, f64::max);
         println!("{n:7} | {rtf1:13.3}  {p95_1:7.1} ms | {rtf2:21.3}  {p95_2:7.1} ms");
@@ -170,7 +178,7 @@ fn realtime(model_path: &Path, pcm: &[f32], threads: usize, seconds: f64) -> any
         }
         peak_mb = peak_mb.max(working_set_mb());
     }
-    let late: Vec<f64> = feeders.into_iter().map(|h| h.join().unwrap()).collect::<anyhow::Result<_>>()?;
+    let late: Vec<f64> = feeders.into_iter().map(|h| h.join().unwrap()).collect::<Vec<_>>().into_iter().collect::<anyhow::Result<_>>()?;
     let wall = start.elapsed().as_secs_f64();
     println!("\n{seconds:.0}s of Me + Them at real-time pace, {threads} threads");
     for source in [Source::Me, Source::Them] {

@@ -26,7 +26,7 @@ use std::sync::Mutex;
 
 use anyhow::{Context, bail};
 use cluely_rs::audio::Source;
-use cluely_rs::stt::parakeet::ParakeetRealtime;
+use cluely_rs::stt::parakeet::{self, ParakeetRealtime};
 use cluely_rs::stt::{EventKind, Generation, StreamingAsr, TranscriptEvent};
 use cluely_rs::transcript::endpoint::{EndpointConfig, Reason};
 use cluely_rs::transcript::replay::{self, Recognized, Scores, Timeline};
@@ -37,6 +37,13 @@ struct Config { name: String, endpoint: EndpointConfig, text_lag: Option<f64> }
 struct File { path: PathBuf, source: Source, pcm: Vec<f32>, segments: Vec<(f64, f64)>, recognized: Recognized }
 
 fn main() -> anyhow::Result<()> {
+    let result = run();
+    // Every model is gone once run returns; free parakeet.cpp's backend before exit (PATCHES.md).
+    parakeet::shutdown();
+    result
+}
+
+fn run() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let value = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned();
     let values = |flag: &str| args.windows(2).filter(|w| w[0] == flag).map(|w| w[1].clone()).collect::<Vec<_>>();

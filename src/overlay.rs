@@ -195,6 +195,11 @@ impl Overlay {
             if this.update(cx, |this, cx| if this.live_since.is_some() { cx.notify() }).is_err() { break; }
         }).detach();
 
+        // Every quit (⌘Q, the menu, Settings › About, a quit Apple Event) passes here: stop
+        // transcribing and free parakeet.cpp's Metal backend before exit, or ggml aborts.
+        #[cfg(target_os = "macos")]
+        cx.on_app_quit(|this, _| { this.stop_listening(); crate::stt::parakeet::shutdown(); async {} }).detach();
+
         let archive = Archive::default_location();
         if let Some(archive) = &archive {
             // A previous run that was killed mid-session leaves an unfinished record.
