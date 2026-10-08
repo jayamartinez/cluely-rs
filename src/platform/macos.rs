@@ -7,14 +7,15 @@
 use std::path::Path;
 use std::process::Command;
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 
+use block2::RcBlock;
 use dispatch2::DispatchQueue;
 use gpui::{Pixels, Size, Window};
 use objc2::MainThreadMarker;
 use objc2::rc::Retained;
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationOptions, NSApplicationActivationPolicy, NSEvent, NSEventModifierFlags, NSRunningApplication, NSScreen, NSView, NSWindow, NSWindowCollectionBehavior,
+    NSAnimatablePropertyContainer, NSAnimationContext, NSApplication, NSApplicationActivationOptions, NSApplicationActivationPolicy, NSEvent, NSEventModifierFlags, NSRunningApplication, NSScreen, NSView, NSWindow, NSWindowCollectionBehavior,
     NSWindowSharingType, NSWindowStyleMask, NSWorkspace,
 };
 use objc2_foundation::{NSPoint, NSRect, NSSize};
@@ -208,12 +209,50 @@ pub fn return_focus(previous: PreviousFocus) {
     }
 }
 
-pub fn is_visible(window: NativeWindow) -> bool { window.get().isVisible() }
+/// Whether the overlay was last shown rather than hidden. A hide keeps the window on screen until its
+/// fade ends, so the window's own visibility would lag a quick second toggle.
+static SHOWN: AtomicBool = AtomicBool::new(true);
+/// Bumped by every show and hide, so a hide whose fade ends after the overlay was shown again leaves it.
+static VISIBILITY_GENERATION: AtomicU64 = AtomicU64::new(0);
+const FADE_SECONDS: f64 = 0.14;
+/// Showing, the overlay settles this far down into place as it fades in.
+const POP_DISTANCE: f64 = 8.0;
 
-/// Show without activating CluelyRS, so the app the user is working in keeps focus.
+pub fn is_visible(window: NativeWindow) -> bool { window.get().isVisible() && SHOWN.load(Ordering::Relaxed) }
+
+/// Show without activating CluelyRS, so the app the user is working in keeps focus. Showing pops in
+/// (a fade while settling into place); hiding fades out.
 pub fn set_visible(window: NativeWindow, visible: bool) {
-    let window = window.get();
-    if visible { window.orderFrontRegardless() } else { window.orderOut(None) }
+    let generation = VISIBILITY_GENERATION.fetch_add(1, Ordering::Relaxed) + 1;
+    SHOWN.store(visible, Ordering::Relaxed);
+    let native = window.get();
+    if visible {
+        let rest = native.frame().origin;
+        if !native.isVisible() {
+            native.setAlphaValue(0.0);
+            native.setFrameOrigin(NSPoint::new(rest.x, rest.y + POP_DISTANCE));
+        }
+        native.orderFrontRegardless();
+        let changes = RcBlock::new(move |context: NonNull<NSAnimationContext>| {
+            unsafe { context.as_ref() }.setDuration(FADE_SECONDS);
+            let animator = window.get().animator();
+            animator.setAlphaValue(1.0);
+            animator.setFrameOrigin(rest);
+        });
+        NSAnimationContext::runAnimationGroup(&changes);
+    } else {
+        let changes = RcBlock::new(move |context: NonNull<NSAnimationContext>| {
+            unsafe { context.as_ref() }.setDuration(FADE_SECONDS);
+            window.get().animator().setAlphaValue(0.0);
+        });
+        let done = RcBlock::new(move || {
+            if VISIBILITY_GENERATION.load(Ordering::Relaxed) != generation { return; }
+            let native = window.get();
+            native.orderOut(None);
+            native.setAlphaValue(1.0);
+        });
+        NSAnimationContext::runAnimationGroup_completionHandler(&changes, Some(&done));
+    }
 }
 
 /// Show or hide CluelyRS in the Dock and ⌘Tab. Hidden, it is an accessory app: no Dock icon and

@@ -33,6 +33,7 @@ windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dw
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # The overlay's NSWindow: level, click-through, focus, capture exclusion and resizing.
+block2 = "0.6"
 dispatch2 = "0.3"
 objc2 = "0.6"
 objc2-app-kit = "0.3"
