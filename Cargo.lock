@@ -975,6 +975,7 @@ dependencies = [
  "anyhow",
  "audioadapter-buffers",
  "base64 0.22.1",
+ "block2",
  "cc",
  "chrono",
  "cmake",

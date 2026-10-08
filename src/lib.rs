@@ -9,6 +9,7 @@ pub mod assets;
 pub mod audio;
 pub mod capture;
 pub mod chat;
+#[cfg(not(target_os = "macos"))]
 pub mod composer;
 pub mod claude_cli;
 pub mod codex;
@@ -31,6 +32,7 @@ pub mod settings_view;
 pub mod settings_window;
 pub mod stt;
 pub mod theme;
+pub mod toggles;
 pub mod transcript;
 pub mod transcript_view;
 pub mod ui;

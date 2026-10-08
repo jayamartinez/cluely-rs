@@ -7,14 +7,15 @@
 use std::path::Path;
 use std::process::Command;
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 
+use block2::RcBlock;
 use dispatch2::DispatchQueue;
 use gpui::{Pixels, Size, Window};
 use objc2::MainThreadMarker;
 use objc2::rc::Retained;
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationOptions, NSApplicationActivationPolicy, NSEvent, NSEventModifierFlags, NSRunningApplication, NSScreen, NSView, NSWindow, NSWindowCollectionBehavior,
+    NSAnimatablePropertyContainer, NSAnimationContext, NSApplication, NSApplicationActivationOptions, NSApplicationActivationPolicy, NSEvent, NSEventModifierFlags, NSRunningApplication, NSScreen, NSView, NSWindow, NSWindowCollectionBehavior,
     NSWindowSharingType, NSWindowStyleMask, NSWorkspace,
 };
 use objc2_foundation::{NSPoint, NSRect, NSSize};
@@ -23,10 +24,13 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 /// The overlay's own window. `native_window` keeps a strong reference for the rest of the
 /// process, so the pointer stays valid.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct NativeWindow(NonNull<NSWindow>);
+pub struct NativeWindow { window: NonNull<NSWindow>, view: NonNull<NSView> }
 
 impl NativeWindow {
-    fn get(&self) -> &NSWindow { unsafe { self.0.as_ref() } }
+    fn get(&self) -> &NSWindow { unsafe { self.window.as_ref() } }
+
+    /// GPUI's view, which must be the first responder for key presses to reach GPUI.
+    fn view(&self) -> &NSView { unsafe { self.view.as_ref() } }
 }
 
 /// The app that was frontmost before the overlay took the keyboard, and the overlay itself.
@@ -38,9 +42,10 @@ pub type Shape = (i32, i32, i32, i32, i32);
 
 pub fn native_window(window: &Window) -> Option<NativeWindow> {
     let RawWindowHandle::AppKit(handle) = HasWindowHandle::window_handle(window).ok()?.as_raw() else { return None };
-    // GPUI's content view, alive as long as its window; only its window is read.
-    let view: &NSView = unsafe { handle.ns_view.cast().as_ref() };
-    NonNull::new(Retained::into_raw(view.window()?)).map(NativeWindow)
+    // GPUI's view, alive as long as its window, which is retained here for the rest of the process.
+    let view = handle.ns_view.cast::<NSView>();
+    let window = NonNull::new(Retained::into_raw(unsafe { view.as_ref() }.window()?))?;
+    Some(NativeWindow { window, view })
 }
 
 /// Keep the overlay out of screen shares, recordings and screenshots: the window server leaves
@@ -53,9 +58,12 @@ pub fn set_capture_hidden(window: NativeWindow, hidden: bool) -> std::io::Result
 /// GPUI's panel is titled, so macOS draws a hairline border and a shadow around its transparent
 /// rectangle. Make it borderless (still non-activating) and drop the shadow.
 pub fn remove_frame(window: NativeWindow) {
-    let window = window.get();
-    window.setStyleMask(NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel);
-    window.setHasShadow(false);
+    let native = window.get();
+    native.setStyleMask(NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel);
+    native.setHasShadow(false);
+    // Changing the style mask rebuilds the frame and leaves the window itself as first responder,
+    // so key presses would never reach GPUI (the text box would show a caret but take no typing).
+    native.makeFirstResponder(Some(window.view()));
 }
 
 /// GPUI already floats the panel above other apps' windows. Also keep it in place through Mission
@@ -169,13 +177,21 @@ pub fn cursor_in_window(window: NativeWindow) -> Option<(i32, i32)> {
     Some((x.round() as i32, y.round() as i32))
 }
 
-/// Give the overlay the keyboard, returning the app that had it. The panel is non-activating, so it
-/// becomes the key window without bringing CluelyRS forward. Allowed because it follows a hotkey
+/// Give the overlay the keyboard, returning the app that had it. Allowed because it follows a hotkey
 /// press or a click.
 pub fn take_focus(window: NativeWindow) -> Option<PreviousFocus> {
     let own = std::process::id() as i32;
     let previous = NSWorkspace::sharedWorkspace().frontmostApplication().map(|app| app.processIdentifier()).filter(|pid| *pid != own);
+    // Keyboard input goes to the active app, so activate CluelyRS (as SetForegroundWindow does on
+    // Windows) before making the panel key. Activating first also keeps GPUI from seeing a key
+    // window in an inactive app, which it handles by resigning key status under a lock (a deadlock).
+    if let Some(mtm) = MainThreadMarker::new() {
+        // `activate()` exists only from macOS 14.
+        #[allow(deprecated)]
+        NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
+    }
     window.get().makeKeyAndOrderFront(None);
+    window.get().makeFirstResponder(Some(window.view()));
     previous.map(|pid| PreviousFocus { pid, overlay: window })
 }
 
@@ -193,12 +209,52 @@ pub fn return_focus(previous: PreviousFocus) {
     }
 }
 
-pub fn is_visible(window: NativeWindow) -> bool { window.get().isVisible() }
+/// Whether the overlay was last shown rather than hidden. A hide keeps the window on screen until its
+/// fade ends, so the window's own visibility would lag a quick second toggle.
+static SHOWN: AtomicBool = AtomicBool::new(true);
+/// Bumped by every show and hide, so a hide whose fade ends after the overlay was shown again leaves it.
+static VISIBILITY_GENERATION: AtomicU64 = AtomicU64::new(0);
+const FADE_SECONDS: f64 = 0.14;
+/// Showing, the overlay settles this far down into place as it fades in.
+const POP_DISTANCE: f64 = 8.0;
 
-/// Show without activating CluelyRS, so the app the user is working in keeps focus.
+pub fn is_visible(window: NativeWindow) -> bool { window.get().isVisible() && SHOWN.load(Ordering::Relaxed) }
+
+/// Show without activating CluelyRS, so the app the user is working in keeps focus. Showing pops in
+/// (a fade while settling into place); hiding fades out.
 pub fn set_visible(window: NativeWindow, visible: bool) {
-    let window = window.get();
-    if visible { window.orderFrontRegardless() } else { window.orderOut(None) }
+    let generation = VISIBILITY_GENERATION.fetch_add(1, Ordering::Relaxed) + 1;
+    SHOWN.store(visible, Ordering::Relaxed);
+    let native = window.get();
+    if visible {
+        let rest = native.frame();
+        if !native.isVisible() {
+            native.setAlphaValue(0.0);
+            native.setFrame_display(NSRect::new(NSPoint::new(rest.origin.x, rest.origin.y + POP_DISTANCE), rest.size), false);
+        }
+        native.orderFrontRegardless();
+        // Only the frame as a whole animates (setFrame), not the origin alone, so the overlay always
+        // ends exactly where it was.
+        let changes = RcBlock::new(move |context: NonNull<NSAnimationContext>| {
+            unsafe { context.as_ref() }.setDuration(FADE_SECONDS);
+            let animator = window.get().animator();
+            animator.setAlphaValue(1.0);
+            animator.setFrame_display(rest, true);
+        });
+        NSAnimationContext::runAnimationGroup(&changes);
+    } else {
+        let changes = RcBlock::new(move |context: NonNull<NSAnimationContext>| {
+            unsafe { context.as_ref() }.setDuration(FADE_SECONDS);
+            window.get().animator().setAlphaValue(0.0);
+        });
+        let done = RcBlock::new(move || {
+            if VISIBILITY_GENERATION.load(Ordering::Relaxed) != generation { return; }
+            let native = window.get();
+            native.orderOut(None);
+            native.setAlphaValue(1.0);
+        });
+        NSAnimationContext::runAnimationGroup_completionHandler(&changes, Some(&done));
+    }
 }
 
 /// Show or hide CluelyRS in the Dock and ⌘Tab. Hidden, it is an accessory app: no Dock icon and

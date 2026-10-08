@@ -6,11 +6,12 @@
 //! events, Windows key bindings, and dependency-free grapheme boundaries.
 
 use std::ops::Range;
+use std::time::Duration;
 
 use gpui::{
     App, Bounds, ClipboardItem, ContentMask, Context, CursorStyle, ElementId, ElementInputHandler, Entity,
     EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, KeyBinding, LayoutId, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, ShapedLine, SharedString, Style, TextRun,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, ShapedLine, SharedString, Style, Task, TextRun,
     UTF16Selection, UnderlineStyle, Window, actions, div, fill, point, prelude::*, px, relative, size,
 };
 
@@ -42,6 +43,9 @@ pub struct TextInput {
     last_bounds: Option<Bounds<Pixels>>,
     scroll_x: Pixels,
     is_selecting: bool,
+    /// The caret blinks while the box has focus; this is whether it is drawn right now.
+    cursor_visible: bool,
+    blink: Option<Task<()>>,
 }
 
 impl EventEmitter<InputEvent> for TextInput {}
@@ -51,6 +55,9 @@ impl Focusable for TextInput {
         self.focus_handle.clone()
     }
 }
+
+/// How long the caret stays shown, then hidden, while it blinks (the macOS and Windows default).
+const BLINK_INTERVAL: Duration = Duration::from_millis(530);
 
 /// Register key bindings once at startup (context "TextInput").
 pub fn bind_keys(cx: &mut App) {
@@ -86,7 +93,28 @@ impl TextInput {
             last_bounds: None,
             scroll_x: px(0.0),
             is_selecting: false,
+            cursor_visible: true,
+            blink: None,
         }
+    }
+
+    /// Typing or moving the caret shows it and restarts the blink, so it never vanishes mid-edit.
+    fn show_cursor(&mut self) {
+        self.cursor_visible = true;
+        self.blink = None;
+    }
+
+    /// Blink while focused; stop (with the caret shown) once focus leaves.
+    fn keep_blinking(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.focus_handle.is_focused(window) {
+            self.show_cursor();
+            return;
+        }
+        if self.blink.is_some() { return; }
+        self.blink = Some(cx.spawn_in(window, async move |this, cx| loop {
+            cx.background_executor().timer(BLINK_INTERVAL).await;
+            if this.update(cx, |this, cx| { this.cursor_visible = !this.cursor_visible; cx.notify(); }).is_err() { break; }
+        }));
     }
 
     /// Render the text as bullets (for API keys). Copy and cut are disabled while masked.
@@ -216,6 +244,7 @@ impl TextInput {
     }
 
     fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        self.show_cursor();
         self.selected_range = offset..offset;
         self.selection_reversed = false;
         cx.notify()
@@ -252,6 +281,7 @@ impl TextInput {
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        self.show_cursor();
         if self.selection_reversed {
             self.selected_range.start = offset
         } else {
@@ -327,6 +357,7 @@ impl EntityInputHandler for TextInput {
     }
 
     fn replace_text_in_range(&mut self, range_utf16: Option<Range<usize>>, new_text: &str, _: &mut Window, cx: &mut Context<Self>) {
+        self.show_cursor();
         let range = range_utf16
             .as_ref()
             .map(|range_utf16| self.range_from_utf16(range_utf16))
@@ -345,6 +376,7 @@ impl EntityInputHandler for TextInput {
     }
 
     fn replace_and_mark_text_in_range(&mut self, range_utf16: Option<Range<usize>>, new_text: &str, new_selected_range_utf16: Option<Range<usize>>, _window: &mut Window, cx: &mut Context<Self>) {
+        self.show_cursor();
         let range = range_utf16
             .as_ref()
             .map(|range_utf16| self.range_from_utf16(range_utf16))
@@ -481,7 +513,7 @@ impl Element for TextElement {
         window.handle_input(&focus_handle, ElementInputHandler::new(bounds, self.input.clone()), cx);
         let Some(line) = prepaint.line.take() else { return };
         let scroll_x = prepaint.scroll_x;
-        let focused = focus_handle.is_focused(window);
+        let focused = focus_handle.is_focused(window) && self.input.read(cx).cursor_visible;
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
             if let Some(selection) = prepaint.selection.take() {
                 window.paint_quad(selection)
@@ -502,7 +534,8 @@ impl Element for TextElement {
 }
 
 impl Render for TextInput {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.keep_blinking(window, cx);
         div()
             .flex()
             .w_full()
