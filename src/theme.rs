@@ -20,5 +20,12 @@ pub fn bubble_border() -> Rgba { rgb(0x2d4c85) }
 pub fn bubble() -> Rgba { rgb(0x0e1a33) }
 pub fn ok() -> Rgba { rgb(0x7dd3a0) }
 
+#[cfg(not(target_os = "macos"))]
 pub const FONT: &str = "Segoe UI";
+#[cfg(not(target_os = "macos"))]
 pub const MONO: &str = "Cascadia Mono";
+// The system fonts (SF Pro and SF Mono); Segoe UI and Cascadia Mono are Windows fonts.
+#[cfg(target_os = "macos")]
+pub const FONT: &str = ".SystemUIFont";
+#[cfg(target_os = "macos")]
+pub const MONO: &str = ".SF NS Mono";
