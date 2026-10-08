@@ -100,6 +100,8 @@ pub struct Overlay {
     /// The macOS Settings window's provider → key → model form.
     #[cfg(target_os = "macos")]
     pub(crate) model_ui: crate::settings_view::ModelUi,
+    /// A saved key shown on request for a few seconds (`settings_view::reveal`).
+    pub(crate) key_reveal: crate::settings_view::KeyReveal,
     /// Answers for the Live session: warm provider, one request at a time, stale replies dropped.
     reasoning: Option<ReasoningSession>,
     /// Decides when to prepare an answer ahead of time (`reasoning::speculation`).
@@ -249,6 +251,7 @@ impl Overlay {
             recorder: None, shape: Rc::default(), hits: Hits::default(), composer, key_input, model_input, base_url_input,
             #[cfg(target_os = "macos")]
             model_ui,
+            key_reveal: Default::default(),
             key_notice: None, loaded_models: Vec::new(), models_loading: false, reasoning: None, planner: Planner::new(false, Budget::default()), prepared_shot: PreparedShot::default(), answer_action: "Assist", speculation_attempt: 0,
             metrics: None, next_turn: 0, catching_mouse: true, return_focus: None,
             codex: crate::codex::CodexClient::new(), codex_status: None, claude_status: None, signing_in: false,
@@ -269,6 +272,10 @@ impl Overlay {
         change(&mut self.store.value);
         if self.store.value == previous { return; }
         self.store.save();
+        // A shown saved key belongs to one provider, and only while Settings is hidden from capture.
+        if previous.hide_from_capture != self.store.value.hide_from_capture || previous.api_provider != self.store.value.api_provider {
+            self.key_reveal.hide();
+        }
         if let Some(native) = self.native && previous.hide_from_capture != self.store.value.hide_from_capture {
             apply_capture_setting(native, &self.store.value);
         }
@@ -318,8 +325,9 @@ impl Overlay {
     /// Refresh what a settings tab shows (accounts, devices, history size) as it opens.
     pub(crate) fn prepare_tab(&mut self, tab: Tab, window: &mut Window, cx: &mut Context<Self>) {
         self.open_picker = None;
-        // A key shown while typing is hidden again whenever a tab opens.
+        // A key shown while typing, or a saved key shown on request, is hidden again whenever a tab opens.
         self.key_input.update(cx, |input, cx| input.set_revealed(false, cx));
+        self.key_reveal.hide();
         if tab == Tab::Model { self.refresh_subscriptions(window, cx); }
         #[cfg(target_os = "macos")]
         if tab == Tab::Model { self.ensure_models(true, window, cx); }
@@ -376,6 +384,7 @@ impl Overlay {
         self.collapse = None;
         self.open_picker = None;
         self.reveal_accounts = false;
+        self.key_reveal.hide();
         self.hotkeys.set_panel_open(false);
         self.fit(window);
         cx.notify();
@@ -819,6 +828,7 @@ impl Overlay {
     }
 
     pub fn remove_key(&mut self, cx: &mut Context<Self>) {
+        self.key_reveal.hide();
         let provider = self.key_target();
         self.key_notice = Some(match crate::secrets::remove(&provider) { Ok(()) => "Key removed.".into(), Err(_) => "No saved key to remove.".into() });
         cx.notify();
@@ -866,6 +876,7 @@ impl Overlay {
     fn toggle_visible(&mut self) {
         let Some(native) = self.native else { return };
         let visible = !platform::is_visible(native);
+        if !visible { self.key_reveal.hide(); }
         platform::set_visible(native, visible);
         self.hotkeys.set_overlay_visible(visible);
         // A hidden panel must not keep claiming Esc.
@@ -1114,10 +1125,15 @@ fn enclosing<'a>(shapes: impl Iterator<Item = &'a platform::Shape>, radius: i32)
     })
 }
 
-pub(crate) fn apply_capture_setting(native: NativeWindow, settings: &Settings) {
+/// Whether the overlay and Settings are kept out of screen captures right now.
+pub(crate) fn capture_excluded(settings: &Settings) -> bool {
     // CLUELYRS_ALLOW_CAPTURE=1 is a development switch for taking screenshots of the overlay.
     let dev_override = std::env::var_os("CLUELYRS_ALLOW_CAPTURE").is_some_and(|value| value == "1");
-    if let Err(error) = platform::set_capture_hidden(native, settings.hide_from_capture && !dev_override) {
+    settings.hide_from_capture && !dev_override
+}
+
+pub(crate) fn apply_capture_setting(native: NativeWindow, settings: &Settings) {
+    if let Err(error) = platform::set_capture_hidden(native, capture_excluded(settings)) {
         eprintln!("capture exclusion unavailable: {error}");
     }
 }

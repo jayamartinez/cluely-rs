@@ -11,6 +11,7 @@ use gpui::{
     SharedString, Styled, Transformation, Window, deferred, div, percentage, prelude::*, px, rgb,
 };
 
+use super::reveal::revealed_text;
 use super::{Picker, answer_early, button, key_eye, listen, switch};
 use crate::input::{InputEvent, TextInput};
 use crate::overlay::Overlay;
@@ -208,19 +209,36 @@ impl Overlay {
         let column = div().flex().flex_col().gap(px(6.0));
         let saved = crate::secrets::hint(preset.id);
         if let Some(hint) = saved.as_ref().filter(|_| !self.model_ui.key_editing) {
-            let field = div().flex_1().min_w_0().flex().items_center().gap(px(8.0)).h(px(36.0)).px(px(10.0)).rounded(px(9.0))
-                .bg(rgb(0x121316)).border_1().border_color(rgb(0x23262a))
+            let revealed = self.revealed_key(preset.id);
+            let shown: gpui::AnyElement = match revealed {
+                Some(key) => revealed_text(key).into_any_element(),
+                None => div().flex_1().min_w_0().font_family(theme::MONO).text_size(px(12.0)).text_color(theme::body()).child(hint.clone()).into_any_element(),
+            };
+            let field = div().flex_1().min_w_0().flex().items_center().gap(px(8.0)).h(px(36.0)).pl(px(10.0)).pr(px(5.0)).rounded(px(9.0)).border_1()
+                .when(revealed.is_some(), |field| field.bg(theme::field()).border_color(theme::accent()))
+                .when(revealed.is_none(), |field| field.bg(rgb(0x121316)).border_color(rgb(0x23262a)))
                 .child(div().text_size(px(12.0)).font_weight(FontWeight::BOLD).text_color(theme::ok()).child("✓"))
-                .child(div().font_family(theme::MONO).text_size(px(12.0)).text_color(theme::body()).child(hint.clone()));
+                .child(shown)
+                .child(self.saved_key_eye(preset.id, cx));
+            let status = match (self.reveal_countdown(false), self.reveal_unavailable()) {
+                (Some(countdown), _) => countdown,
+                (None, Some(reason)) => div().text_color(theme::muted()).child(reason),
+                (None, None) => div().text_color(theme::muted()).child("In your Keychain"),
+            };
             let key = self.key_input.clone();
-            let edit = listen(cx, |this, _: &MouseDownEvent, _, cx| { this.model_ui.key_editing = true; this.key_notice = None; cx.notify(); });
+            let edit = listen(cx, |this, _: &MouseDownEvent, _, cx| {
+                this.key_reveal.hide();
+                this.model_ui.key_editing = true;
+                this.key_notice = None;
+                cx.notify();
+            });
             let replace = button("replace-key", "Replace…", false).on_mouse_down(MouseButton::Left, move |event, window, cx| {
                 edit(event, window, cx);
                 window.focus(&key.focus_handle(cx));
             });
             return column.child(div().flex().items_center().gap(px(6.0)).child(field).child(replace))
                 .child(div().flex().gap(px(10.0)).text_size(px(11.0))
-                    .child(div().text_color(theme::muted()).child("In your Keychain"))
+                    .child(status)
                     .child(div().id("remove-key").cursor_pointer().text_color(rgb(0xffb4a8))
                         .on_mouse_down(MouseButton::Left, listen(cx, |this, _, _, cx| this.remove_key_and_reset(cx))).child("Remove")));
         }

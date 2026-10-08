@@ -92,6 +92,7 @@ pub fn open(overlay: &mut Overlay, tab: Tab, cx: &mut Context<Overlay>) {
 fn closed(overlay: &Entity<Overlay>, cx: &mut App) {
     overlay.update(cx, |overlay, _| {
         overlay.settings_window = None;
+        overlay.key_reveal.hide();
         overlay.update_dock();
     });
 }

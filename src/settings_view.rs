@@ -16,10 +16,12 @@ use crate::theme;
 use crate::transcript_view::model_size_label;
 use crate::ui;
 
+mod reveal;
 #[cfg(target_os = "macos")]
 mod model_form;
 #[cfg(target_os = "macos")]
 pub(crate) use model_form::ModelUi;
+pub(crate) use reveal::KeyReveal;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Tab { #[default] Model, Listening, Modes, Keys, Window, History }
@@ -426,16 +428,21 @@ impl Overlay {
         let mut top = div().flex().gap(px(12.0)).child(provider);
         if preset.needs_key {
             let saved = crate::secrets::hint(preset.id);
-            let mut status = div().flex().items_center().gap(px(12.0)).text_size(px(12.0)).text_color(theme::muted())
-                .child(match &saved { Some(hint) => format!("Saved key {hint}"), None => "No key saved".to_string() });
-            if saved.is_some() {
-                status = status.child(div().id("remove-key").cursor_pointer().text_color(gpui::rgb(0xffb4a8))
-                    .on_mouse_down(MouseButton::Left, listen(cx, |this, _, _, cx| this.remove_key(cx))).child("Remove"));
-            }
-            if !preset.key_page.is_empty() {
-                let page = preset.key_page;
-                status = status.child(div().id("key-page").cursor_pointer().text_color(theme::accent_soft())
-                    .on_mouse_down(MouseButton::Left, listen(cx, move |_, _, _, cx| cx.open_url(page))).child("Get a key ↗"));
+            let mut status = div().flex().items_center().gap(px(12.0)).text_size(px(12.0)).text_color(theme::muted());
+            if let Some(key) = self.revealed_key(preset.id) {
+                status = status.gap(px(10.0)).child(reveal::revealed_text(key)).child(self.saved_key_eye(preset.id, cx)).children(self.reveal_countdown(true));
+            } else {
+                status = status.child(match &saved { Some(hint) => format!("Saved key {hint}"), None => "No key saved".to_string() });
+                if saved.is_some() {
+                    status = status.child(self.saved_key_eye(preset.id, cx))
+                        .child(div().id("remove-key").cursor_pointer().text_color(gpui::rgb(0xffb4a8))
+                            .on_mouse_down(MouseButton::Left, listen(cx, |this, _, _, cx| this.remove_key(cx))).child("Remove"));
+                }
+                if !preset.key_page.is_empty() {
+                    let page = preset.key_page;
+                    status = status.child(div().id("key-page").cursor_pointer().text_color(theme::accent_soft())
+                        .on_mouse_down(MouseButton::Left, listen(cx, move |_, _, _, cx| cx.open_url(page))).child("Get a key ↗"));
+                }
             }
             top = top.child(field("API key", div().flex().flex_col().gap(px(6.0))
                 .child(div().flex().items_center().gap(px(8.0))
