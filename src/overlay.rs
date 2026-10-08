@@ -266,11 +266,12 @@ impl Overlay {
         }
     }
 
-    /// In the Dock while "Show in Dock" is on, and while the Settings window is open so the menu bar
-    /// (Settings…, Quit) is CluelyRS's own.
+    /// In the Dock only while "Show in Dock" is on. CluelyRS stays out of it while Settings is open
+    /// too: tools that quit apps whose last window closes (and so would quit CluelyRS when Settings
+    /// closes) leave apps outside the Dock alone. Settings handles ⌘W and ⌘Q itself.
     #[cfg(target_os = "macos")]
     pub(crate) fn update_dock(&self) {
-        platform::set_in_dock(self.store.value.show_in_dock || self.settings_window.is_some());
+        platform::set_in_dock(self.store.value.show_in_dock);
     }
 
     /// Refresh what a settings tab shows (accounts, devices, history size) as it opens.

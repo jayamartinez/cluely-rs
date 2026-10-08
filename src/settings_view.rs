@@ -118,7 +118,7 @@ fn dock_section(s: &Settings, cx: &mut Context<Overlay>) -> Div {
             switch("show-in-dock", s.show_in_dock, |s, v| s.show_in_dock = v, cx)))
         .child(div().flex().gap(px(8.0)).text_size(px(12.0)).line_height(px(16.0)).text_color(theme::muted())
             .child(div().pt(px(1.0)).child(ui::icon("icons/info.svg", 13.0, theme::muted())))
-            .child(div().flex_1().min_w_0().child("When hidden, CluelyRS isn't in the Dock or ⌘Tab; quit from Settings › About, or the menu bar while Settings is open.")))
+            .child(div().flex_1().min_w_0().child("When hidden, CluelyRS isn't in the Dock or ⌘Tab; quit from Settings › About, or with ⌘Q while Settings is open.")))
 }
 
 fn button(id: &'static str, label: impl Into<SharedString>, primary: bool) -> gpui::Stateful<Div> {
