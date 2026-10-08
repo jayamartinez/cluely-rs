@@ -24,8 +24,9 @@ pub fn ok() -> Rgba { rgb(0x7dd3a0) }
 pub const FONT: &str = "Segoe UI";
 #[cfg(not(target_os = "macos"))]
 pub const MONO: &str = "Cascadia Mono";
-// The system fonts (SF Pro and SF Mono); Segoe UI and Cascadia Mono are Windows fonts.
+// SF Pro, and Menlo for monospace (SF Mono isn't installed as a font family apps can name).
+// Segoe UI and Cascadia Mono are Windows fonts.
 #[cfg(target_os = "macos")]
 pub const FONT: &str = ".SystemUIFont";
 #[cfg(target_os = "macos")]
-pub const MONO: &str = ".SF NS Mono";
+pub const MONO: &str = "Menlo";

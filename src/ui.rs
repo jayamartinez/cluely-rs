@@ -1,13 +1,30 @@
 //! Small styled building blocks shared by the overlay and settings.
 
-use gpui::{Div, ElementId, FontWeight, IntoElement, ParentElement, SharedString, Styled, div, prelude::*, px, rgb};
+use gpui::{Div, ElementId, FontWeight, IntoElement, ParentElement, Rgba, SharedString, Styled, div, prelude::*, px, rgb};
 
 use crate::theme;
 
+#[cfg(not(target_os = "macos"))]
 pub fn keycap(label: impl Into<SharedString>) -> impl IntoElement {
     div().font_family(theme::MONO).text_size(px(11.0)).text_color(theme::muted())
         .px(px(5.0)).py(px(1.0)).border_1().border_color(theme::keycap_border()).rounded(px(5.0))
         .child(label.into())
+}
+
+#[cfg(target_os = "macos")]
+pub fn keycap(label: impl Into<SharedString>) -> impl IntoElement {
+    div().px(px(5.0)).py(px(1.0)).border_1().border_color(theme::keycap_border()).rounded(px(5.0))
+        .child(keys(&label.into(), 11.0, theme::muted()))
+}
+
+/// A shortcut's keys as text. Windows writes them as words in the mono font ("Ctrl Shift ↵");
+/// macOS draws each symbol on its own in the system font, evenly spaced as in its menus.
+pub fn keys(label: &str, size: f32, color: Rgba) -> Div {
+    #[cfg(not(target_os = "macos"))]
+    return div().font_family(theme::MONO).text_size(px(size)).text_color(color).child(SharedString::from(label.to_string()));
+    #[cfg(target_os = "macos")]
+    div().flex().items_center().gap(px(3.0)).font_family(theme::FONT).text_size(px(size + 1.0)).text_color(color)
+        .children(label.split(' ').map(|key| div().child(SharedString::from(key.to_string()))))
 }
 
 /// A keycap for a chord, with Shift and Space drawn as icons: "Ctrl ⇧ ␣".
