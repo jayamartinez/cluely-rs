@@ -89,6 +89,7 @@ impl Overlay {
         self.listening = None;
         self.listening_status = None;
         self.provisional = Default::default();
+        self.levels.clear();
     }
 
     /// Live is ending: keep whatever each source was still saying, as the archive's last lines.
@@ -118,6 +119,10 @@ impl Overlay {
         if epoch != self.listening_epoch || self.listening.is_none() { return; }
         match message {
             Message::Status(status) => self.listening_status = Some(status),
+            Message::Level { me, them } => {
+                if self.levels.len() == crate::overlay::LEVEL_HISTORY { self.levels.pop_front(); }
+                self.levels.push_back(me.max(them));
+            }
             Message::Transcript(update) => {
                 let steps = self.plan(&update);
                 self.apply_update(update);

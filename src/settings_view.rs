@@ -28,8 +28,7 @@ impl Tab {
 
 /// The dropdowns in Settings; at most one is open.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-/// `Composer` is the model switcher in the Live panel's composer bar.
-pub enum Picker { CodexModel, ClaudeModel, AnswerStyle, ApiProvider, ApiModel, SttProvider, Mic, Desktop, Composer }
+pub enum Picker { CodexModel, ClaudeModel, AnswerStyle, ApiProvider, ApiModel, SttProvider, Mic, Desktop }
 
 /// Like `cx.listener`, but the handler always gets the overlay's own window. On macOS the settings
 /// are shown in their own window, and handlers resize the overlay and start work tied to its
@@ -181,10 +180,10 @@ impl Overlay {
             .child(ui::icon("icons/close.svg", 12.0, theme::body()));
         let header = ui::panel_header().child(tabs).child(close);
         let body = self.settings_body(tab, cx);
-        let mut panel = div().relative().w(px(560.0)).flex().flex_col().rounded(px(18.0)).bg(theme::glass())
+        let mut panel = div().relative().w(px(crate::overlay::CARD_WIDTH)).flex().flex_col().rounded(px(18.0)).bg(theme::glass())
             .border_1().border_color(theme::hairline()).overflow_hidden()
             .child(header)
-            .child(div().id("settings-body").flex().flex_col().px(px(18.0)).pt(px(14.0)).pb(px(20.0)).max_h(px(652.0)).overflow_y_scroll().child(body));
+            .child(div().id("settings-body").flex().flex_col().px(px(18.0)).pt(px(14.0)).pb(px(20.0)).max_h(px(620.0)).overflow_y_scroll().child(body));
         if let Some(warning) = self.store.warning {
             panel = panel.child(div().px(px(18.0)).pb(px(12.0)).text_size(px(12.0)).text_color(gpui::rgb(0xffb4a8)).child(warning));
         }
@@ -432,13 +431,20 @@ impl Overlay {
                 .child(div().text_size(px(12.0)).text_color(theme::muted()).child(if s.stt_provider == SttProvider::Deepgram { "Sent to Deepgram, while Live is on" } else { "On this PC, while Live is on" })))
             .child(switch("transcribe", s.transcribe, |s, v| s.transcribe = v, cx));
         let devices = self.devices.clone().unwrap_or_default();
+        let default_label = |default: Option<&String>| match default {
+            // macOS captures all system audio rather than a device, so that one option is named plainly.
+            #[cfg(target_os = "macos")]
+            Some(name) if name == crate::audio::capture::SYSTEM_AUDIO => name.clone(),
+            Some(name) => format!("Default · {name}"),
+            None => "Default".to_string(),
+        };
         let device_options = |names: &[String], default: Option<&String>| {
-            let mut options = vec![(String::new(), match default { Some(name) => format!("Default · {name}"), None => "Default".to_string() })];
+            let mut options = vec![(String::new(), default_label(default))];
             options.extend(names.iter().map(|name| (name.clone(), name.clone())));
             options
         };
         let value = |chosen: &str, default: Option<&String>| if chosen.is_empty() {
-            match default { Some(name) => format!("Default · {name}"), None => if self.devices_loading { "Loading devices…".into() } else { "Default".into() } }
+            match default { Some(_) => default_label(default), None => if self.devices_loading { "Loading devices…".into() } else { "Default".into() } }
         } else { chosen.to_string() };
         let device_column = |label: &'static str, name: &'static str, on: bool, set_on: fn(&mut Settings, bool), picker: Picker, chosen: &str,
             names: &[String], default: Option<&String>, set: fn(&mut Settings, String), cx: &mut Context<Self>| {
@@ -507,8 +513,8 @@ impl Overlay {
                 .on_mouse_down(MouseButton::Left, listen(cx, |this, _, window, cx| this.download_model(window, cx)))
                 .into_any_element()
         };
-        let mut row = div().flex().flex_col().gap(px(6.0))
-            .child(div().flex().items_center().gap(px(12.0)).px(px(12.0)).py(px(10.0)).rounded(px(12.0)).border_1().border_color(theme::hairline())
+        let card = div().flex().flex_col().rounded(px(12.0)).border_1().border_color(theme::hairline())
+            .child(div().flex().items_center().gap(px(12.0)).px(px(12.0)).py(px(10.0))
                 .child(div().flex().flex_col().gap(px(1.0)).flex_1().min_w_0()
                     .child(div().text_size(px(13.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child("Parakeet Realtime · English"))
                     .child(div().id("model-license").cursor_pointer().text_size(px(12.0)).text_color(theme::muted()).truncate()
@@ -516,10 +522,32 @@ impl Overlay {
                         .on_mouse_down(MouseButton::Left, listen(cx, |_, _, _, cx| cx.open_url(MODEL.license_url)))
                         .child(format!("{} · NVIDIA Open Model License", model_size_label(&MODEL)))))
                 .child(trailing));
+        #[cfg(target_os = "macos")]
+        let card = card.child(self.gpu_row(cx));
+        let mut row = div().flex().flex_col().gap(px(6.0)).child(card);
         if let Some(notice) = self.model_notice.clone() {
             row = row.child(div().text_size(px(12.0)).text_color(theme::accent_soft()).child(notice));
         }
         row
+    }
+
+    /// macOS: Parakeet on the GPU (Metal), on by default, with a note when it had to use the CPU.
+    #[cfg(target_os = "macos")]
+    fn gpu_row(&self, cx: &mut Context<Self>) -> Div {
+        let on = self.store.value.use_gpu;
+        let note = if on && crate::stt::parakeet::gpu_unavailable() {
+            div().text_color(theme::accent_soft()).child("The GPU couldn't be used, so transcription is running on the CPU.")
+        } else {
+            div().text_color(theme::muted()).child("Transcribes with a fraction of the CPU. Off runs on the processor.")
+        };
+        div().flex().items_center().gap(px(12.0)).px(px(12.0)).py(px(10.0)).border_t_1().border_color(theme::divider())
+            .child(div().flex().flex_col().gap(px(1.0)).flex_1().min_w_0()
+                .child(div().flex().items_center().gap(px(8.0))
+                    .child(div().text_size(px(13.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child("Use GPU (Metal)"))
+                    .child(div().px(px(7.0)).py(px(1.0)).rounded_full().bg(theme::bubble()).border_1().border_color(theme::bubble_border())
+                        .text_size(px(11.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::accent_soft()).child("Recommended")))
+                .child(note.text_size(px(12.0))))
+            .child(switch("use-gpu", on, |s, v| s.use_gpu = v, cx))
     }
 
     /// Enumerate audio devices off the UI thread for the Listening tab's pickers.

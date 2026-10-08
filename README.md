@@ -63,8 +63,11 @@ answers when speed matters less.
 on this PC with NVIDIA Parakeet Realtime (English). The Live panel shows the last two lines and what each side is
 saying right now; words the recognizer may still change are muted and italic, and a blue **?** marks a likely question.
 The model (176 MB) downloads from Settings the first time, verified against a pinned checksum. Each source has its own
-toggle and device picker (the system default unless you choose one). Turn **Transcribe
-conversations** off to keep Live to the screen and typed questions.
+toggle and device picker (the system default unless you choose one). On macOS (13 or later), desktop audio is everything
+the system plays, captured with ScreenCaptureKit, so its picker has the single option **System audio**; it needs the
+Screen Recording permission (System Settings → Privacy & Security → Screen & System Audio Recording), and without it the
+Live panel says so while the microphone keeps working. Turn **Transcribe conversations** off to keep Live to the screen
+and typed questions.
 
 **Deepgram** (optional): choose it under *Transcribe with* and save a Deepgram API key (kept in Windows Credential
 Manager or the macOS Keychain). Live audio is then streamed to Deepgram's Nova-3 instead of being transcribed on

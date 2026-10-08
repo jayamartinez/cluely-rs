@@ -12,7 +12,7 @@ use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use crate::audio::{AudioCapture, AudioChunk, Devices, Source};
 use crate::metrics::{self, LatencyRecorder};
 use crate::settings::SttProvider;
-use crate::stt::parakeet::ParakeetRealtime;
+use crate::stt::parakeet::{ParakeetConfig, ParakeetRealtime};
 use crate::stt::{Availability, StreamingAsr, Transcriber};
 use crate::transcript::endpoint::EndpointConfig;
 use crate::transcript::live::{LiveTranscript, Update};
@@ -35,6 +35,39 @@ pub enum Status {
 pub enum Message {
     Status(Status),
     Transcript(Update),
+    /// How loud each source is right now, 0..=1 (see [`LevelMeter`]), about 25 times a second.
+    Level { me: f32, them: f32 },
+}
+
+/// Audio levels for the Live waveform: the loudest chunk of each source over every
+/// [`LevelMeter::INTERVAL_MS`] of audio, on a decibel scale shaped for speech. Measured on the audio
+/// clock, so the UI gets about 25 updates a second however the chunks arrive.
+#[derive(Default)]
+pub struct LevelMeter {
+    peak: [f32; 2],
+    next_ms: Option<f64>,
+}
+
+impl LevelMeter {
+    pub const INTERVAL_MS: f64 = 40.0;
+
+    /// The levels (Me, Them) once a full interval of audio has been observed.
+    pub fn observe(&mut self, chunk: &AudioChunk) -> Option<(f32, f32)> {
+        let slot = match chunk.source { Source::Me => 0, Source::Them => 1 };
+        self.peak[slot] = self.peak[slot].max(chunk.rms());
+        let end = chunk.end_ms();
+        let due = *self.next_ms.get_or_insert(end + Self::INTERVAL_MS);
+        if end < due { return None; }
+        self.next_ms = Some(end + Self::INTERVAL_MS);
+        let [me, them] = std::mem::take(&mut self.peak).map(level);
+        Some((me, them))
+    }
+}
+
+/// An RMS level as 0..=1: -54 dBFS (a quiet room) and below is 0, -12 dBFS (loud speech) and above is 1.
+pub fn level(rms: f32) -> f32 {
+    if rms <= 0.0 { return 0.0; }
+    ((20.0 * rms.log10() + 54.0) / 42.0).clamp(0.0, 1.0)
 }
 
 pub enum Command { Stop }
@@ -42,7 +75,7 @@ pub enum Command { Stop }
 /// The transcription provider Live uses, from Settings → Listening.
 pub fn provider(settings: &crate::settings::Settings) -> Arc<dyn StreamingAsr> {
     match settings.stt_provider {
-        SttProvider::Parakeet => Arc::new(ParakeetRealtime::default()),
+        SttProvider::Parakeet => Arc::new(ParakeetRealtime::new(ParakeetConfig { use_gpu: settings.use_gpu, ..ParakeetConfig::default() })),
         SttProvider::Deepgram => Arc::new(crate::stt::deepgram::Deepgram::from_store()),
     }
 }
@@ -107,7 +140,7 @@ impl Listening {
             let opened: Vec<Source> = capture.opened.iter().map(|info| info.source).collect();
             let live = LiveTranscript::new(EndpointConfig::default(), metrics.as_ref().map(|metrics| metrics.recorder.clone()));
             let mut dump = metrics.as_ref().and_then(|metrics| AudioDump::create(&metrics.stem, &opened).ok());
-            run(provider, audio, &opened, failures, live, &inbox, &out, dump.as_mut());
+            run_watching(provider, audio, &opened, failures, live, &inbox, &out, dump.as_mut(), &|| capture.take_ended());
             capture.stop();
             if let Some(dump) = dump && let Err(error) = dump.finish() { eprintln!("audio export failed: {error}"); }
         }).ok();
@@ -129,23 +162,36 @@ impl Drop for Listening {
 /// updates, and stop on command or when the audio ends. Device-free, so tests can drive it.
 #[allow(clippy::too_many_arguments)]
 pub fn run(provider: Arc<dyn StreamingAsr>, audio: Receiver<AudioChunk>, sources: &[Source], failures: Vec<(Source, String)>,
-    mut live: LiveTranscript, commands: &Receiver<Command>, out: &UnboundedSender<Message>, mut dump: Option<&mut AudioDump>) {
+    live: LiveTranscript, commands: &Receiver<Command>, out: &UnboundedSender<Message>, dump: Option<&mut AudioDump>) {
+    run_watching(provider, audio, sources, failures, live, commands, out, dump, &Vec::new);
+}
+
+/// `run`, also reporting sources whose capture ends mid-session: `ended` returns each once, with
+/// why, and the status then lists it as unavailable (or fails when nothing is left to hear).
+#[allow(clippy::too_many_arguments)]
+fn run_watching(provider: Arc<dyn StreamingAsr>, audio: Receiver<AudioChunk>, sources: &[Source], mut failures: Vec<(Source, String)>,
+    mut live: LiveTranscript, commands: &Receiver<Command>, out: &UnboundedSender<Message>, mut dump: Option<&mut AudioDump>,
+    ended: &dyn Fn() -> Vec<(Source, String)>) {
     let (events, inbox) = channel();
     let mut transcriber = Transcriber::new(events);
     match transcriber.start(provider.clone(), sources) {
         Ok(generation) => { let caps = provider.capabilities(); live.set_generation(generation, caps.id); live.set_text_lag(caps.text_lag_ms); }
         Err(error) => { let _ = out.unbounded_send(Message::Status(Status::Failed(error.to_string()))); return; }
     }
-    let _ = out.unbounded_send(Message::Status(Status::Listening { sources: sources.to_vec(), failures }));
+    let mut heard = sources.to_vec();
+    let _ = out.unbounded_send(Message::Status(Status::Listening { sources: heard.clone(), failures: failures.clone() }));
     let send = |updates: Vec<Update>| updates.into_iter().all(|update| out.unbounded_send(Message::Transcript(update)).is_ok());
+    let mut meter = LevelMeter::default();
     loop {
         if commands.try_recv().is_ok() { break; }
         match audio.recv_timeout(POLL) {
             Ok(chunk) => {
                 if let Some(dump) = dump.as_deref_mut() { dump.write(&chunk); }
                 let updates = live.on_audio(&chunk);
+                let levels = meter.observe(&chunk);
                 transcriber.feed(chunk);
                 if !send(updates) { break; }
+                if let Some((me, them)) = levels && out.unbounded_send(Message::Level { me, them }).is_err() { break; }
             }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
@@ -156,6 +202,17 @@ pub fn run(provider: Arc<dyn StreamingAsr>, audio: Receiver<AudioChunk>, sources
         let updates: Vec<Update> = inbox.try_iter().flat_map(|event| live.on_event(&event)).collect();
         for (source, ms) in positions { live.set_recognized_until(source, ms); }
         if !send(updates) { break; }
+        let lost = ended();
+        if !lost.is_empty() {
+            heard.retain(|source| !lost.iter().any(|(gone, _)| gone == source));
+            failures.extend(lost);
+            let status = if heard.is_empty() {
+                Status::Failed(failures.iter().map(|(source, error)| format!("{} unavailable: {error}", source.label())).collect::<Vec<_>>().join(" · "))
+            } else {
+                Status::Listening { sources: heard.clone(), failures: failures.clone() }
+            };
+            if out.unbounded_send(Message::Status(status)).is_err() { break; }
+        }
     }
     // Flush the recognizers, apply their last events, then commit anything still in progress.
     transcriber.stop();
@@ -275,6 +332,26 @@ mod tests {
     }
 
     #[test]
+    fn levels_come_once_per_interval_of_audio_with_each_source_at_its_loudest() {
+        let mut meter = LevelMeter::default();
+        let chunk = |source, start_ms: f64, rms: f32| AudioChunk { source, start_ms, samples: vec![rms; 160] };
+        // 10 ms chunks from both sources: nothing until 40 ms of audio has gone by.
+        let mut levels = Vec::new();
+        for i in 0..8 {
+            let t = i as f64 * 10.0;
+            levels.extend(meter.observe(&chunk(Source::Me, t, if i == 1 { 0.25 } else { 0.001 })));
+            levels.extend(meter.observe(&chunk(Source::Them, t, 0.02)));
+        }
+        assert_eq!(levels.len(), 1, "{levels:?}");
+        let (me, them) = levels[0];
+        assert!((me - 1.0).abs() < 0.01 && them > 0.3 && them < 0.6, "{levels:?}");
+        assert_eq!(level(0.0), 0.0);
+        assert_eq!(level(0.001), 0.0);
+        assert_eq!(level(1.0), 1.0);
+        assert!(level(0.05) > level(0.02));
+    }
+
+    #[test]
     fn stopping_mid_utterance_commits_the_text_in_progress() {
         let provider = Arc::new(ScriptedAsr::new(vec![Step::partial(Source::Me, 100.0, "i was saying")]));
         let (chunks, audio) = channel();
@@ -302,6 +379,30 @@ mod tests {
         assert!(matches!(&messages[..], [Message::Status(Status::Failed(reason))] if reason.contains("isn't installed")), "{messages:?}");
         assert!(not_ready(&Availability::NeedsModel { download_bytes: 1 }).unwrap().contains("Settings"));
         assert!(not_ready(&Availability::Ready).is_none());
+    }
+
+    #[test]
+    fn a_source_whose_capture_ends_is_reported_unavailable_and_failure_follows_when_none_is_left() {
+        let run_until_lost = |sources: Vec<Source>, lost: Vec<(Source, String)>| {
+            let (_chunks, audio) = channel::<AudioChunk>();
+            let (commands, inbox) = channel();
+            let (out, messages) = unbounded();
+            let pending = std::sync::Mutex::new(Some(lost));
+            let worker = std::thread::spawn(move || {
+                let ended = || pending.lock().unwrap().take().unwrap_or_default();
+                run_watching(Arc::new(ScriptedAsr::new(vec![])), audio, &sources, Vec::new(), LiveTranscript::new(EndpointConfig::default(), None),
+                    &inbox, &out, None, &ended);
+            });
+            std::thread::sleep(Duration::from_millis(100));
+            commands.send(Command::Stop).unwrap();
+            worker.join().unwrap();
+            drain(messages).into_iter().filter_map(|m| match m { Message::Status(status) => Some(status), _ => None }).collect::<Vec<_>>()
+        };
+        let statuses = run_until_lost(Source::ALL.to_vec(), vec![(Source::Them, "Screen Recording is off.".into())]);
+        assert_eq!(statuses.last(), Some(&Status::Listening { sources: vec![Source::Me], failures: vec![(Source::Them, "Screen Recording is off.".into())] }));
+        assert_eq!(statuses.len(), 2, "{statuses:?}");
+        let statuses = run_until_lost(vec![Source::Them], vec![(Source::Them, "System audio stopped.".into())]);
+        assert_eq!(statuses.last(), Some(&Status::Failed("Them unavailable: System audio stopped.".into())));
     }
 
     #[test]

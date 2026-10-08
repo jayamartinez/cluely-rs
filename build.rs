@@ -1,5 +1,5 @@
 //! Builds parakeet.cpp (pinned submodule) as static libraries and links them, plus the small
-//! thread-count shim in `native/`. See PATCHES.md for what is changed relative to upstream.
+//! shim in `native/`. See PATCHES.md for what is changed relative to upstream.
 
 use std::env;
 use std::path::{Path, PathBuf};
@@ -7,7 +7,7 @@ use std::process::Command;
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-changed=native/parakeet_threads.cpp");
+    println!("cargo:rerun-if-changed=native/parakeet_shim.cpp");
     println!("cargo:rerun-if-env-changed=CLUELYRS_NINJA");
 
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
@@ -17,6 +17,12 @@ fn main() {
             "parakeet.cpp sources are missing. Run:\n  git submodule update --init third_party/parakeet.cpp\n  \
              git -C third_party/parakeet.cpp submodule update --init third_party/ggml"
         );
+    }
+
+    // ScreenCaptureKit (macOS desktop audio) is weak-linked so CluelyRS still launches on macOS
+    // before 12.3, which doesn't have it; desktop audio checks the OS version before touching it.
+    if env::var("CARGO_CFG_TARGET_OS").is_ok_and(|os| os == "macos") {
+        println!("cargo:rustc-link-arg=-Wl,-weak_framework,ScreenCaptureKit");
     }
 
     let msvc = env::var("CARGO_CFG_TARGET_ENV").is_ok_and(|env| env == "msvc");
@@ -47,10 +53,14 @@ fn main() {
             .cxxflag("/Dftello=_ftelli64");
     }
     if apple {
-        // Streaming decodes run on the CPU backend, never ggml's BLAS backend, so don't build it.
-        // Accelerate stays on (upstream's default): ggml-cpu uses it for vector math. Metal is off
-        // for now (PATCHES.md), set explicitly so a value cached by an earlier configure can't win.
-        config.define("GGML_BLAS", "OFF").define("PARAKEET_GGML_METAL", "OFF");
+        // Streams decode on Metal (about a ninth of the CPU's load at similar latency; PATCHES.md),
+        // with the CPU as fallback (PARAKEET_DEVICE=cpu), and never on ggml's BLAS backend, so it
+        // isn't built. Accelerate stays on (upstream's default): ggml-cpu uses it for vector math.
+        // The Metal shaders are embedded in the binary, so nothing has to ship beside it. All set
+        // explicitly so values cached by an earlier configure can't win.
+        config.define("GGML_BLAS", "OFF")
+            .define("PARAKEET_GGML_METAL", "ON")
+            .define("GGML_METAL_EMBED_LIBRARY", "ON");
     }
     config.build_target("parakeet");
     // Upstream applies its in-tree ggml patches (one is a CPU matmul speedup) with bash at
@@ -70,21 +80,27 @@ fn main() {
     let out = config.build();
 
     let file_name = |lib: &str| if msvc { format!("{lib}.lib") } else { format!("lib{lib}.a") };
-    let mut dirs: Vec<PathBuf> = ["parakeet", "ggml", "ggml-base", "ggml-cpu"].iter()
+    // Link order: each library before the ones it depends on.
+    let libs: &[&str] = if apple { &["parakeet", "ggml", "ggml-metal", "ggml-cpu", "ggml-base"] } else { &["parakeet", "ggml", "ggml-cpu", "ggml-base"] };
+    let mut dirs: Vec<PathBuf> = libs.iter()
         .map(|lib| find_file(&out.join("build"), &file_name(lib)).unwrap_or_else(|| panic!("{} was not produced by the parakeet.cpp build", file_name(lib))))
         .filter_map(|path| path.parent().map(Path::to_path_buf))
         .collect();
     dirs.sort();
     dirs.dedup();
     for dir in dirs { println!("cargo:rustc-link-search=native={}", dir.display()); }
-    for lib in ["parakeet", "ggml", "ggml-cpu", "ggml-base"] { println!("cargo:rustc-link-lib=static={lib}"); }
+    for lib in libs { println!("cargo:rustc-link-lib=static={lib}"); }
     if msvc { println!("cargo:rustc-link-lib=advapi32"); }
-    if apple { println!("cargo:rustc-link-lib=framework=Accelerate"); }
+    if apple {
+        for framework in ["Accelerate", "Foundation", "Metal", "MetalKit"] { println!("cargo:rustc-link-lib=framework={framework}"); }
+    }
 
     cc::Build::new()
         .cpp(true)
-        .file("native/parakeet_threads.cpp")
+        .file("native/parakeet_shim.cpp")
+        .include(source.join("src"))
         .flag_if_supported("/std:c++17")
+        .flag_if_supported("-std=c++17")
         .compile("cluelyrs_parakeet_shim");
 }
 
