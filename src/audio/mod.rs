@@ -3,6 +3,8 @@
 
 pub mod capture;
 pub mod frame;
+#[cfg(any(target_os = "macos", test))]
+pub mod gaps;
 pub mod normalize;
 
 pub use capture::{AudioCapture, DeviceList, Devices, SourceInfo, list_devices};

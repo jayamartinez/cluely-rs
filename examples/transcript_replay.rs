@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, bail};
 use cluely_rs::audio::{AudioChunk, Source};
 use cluely_rs::listening::{self, Message, Status};
-use cluely_rs::stt::parakeet::ParakeetRealtime;
+use cluely_rs::stt::parakeet::{self, ParakeetRealtime};
 use cluely_rs::stt::{StreamingAsr, deepgram};
 use cluely_rs::transcript::endpoint::EndpointConfig;
 use cluely_rs::transcript::live::{LiveTranscript, Update};
@@ -29,6 +29,13 @@ use cluely_rs::transcript::live::{LiveTranscript, Update};
 const BLOCK: usize = 320; // 20 ms
 
 fn main() -> anyhow::Result<()> {
+    let result = run();
+    // Every model is gone once run returns; free parakeet.cpp's backend before exit (PATCHES.md).
+    parakeet::shutdown();
+    result
+}
+
+fn run() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) == Some("--store-key") {
         let key = std::env::var("DEEPGRAM_API_KEY").context("set DEEPGRAM_API_KEY in the environment first")?;

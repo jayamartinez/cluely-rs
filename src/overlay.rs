@@ -196,6 +196,11 @@ impl Overlay {
             if this.update(cx, |this, cx| if this.live_since.is_some() { cx.notify() }).is_err() { break; }
         }).detach();
 
+        // Every quit (⌘Q, the menu, Settings › About, a quit Apple Event) passes here: stop
+        // transcribing and free parakeet.cpp's Metal backend before exit, or ggml aborts.
+        #[cfg(target_os = "macos")]
+        cx.on_app_quit(|this, _| { this.stop_listening(); crate::stt::parakeet::shutdown(); async {} }).detach();
+
         let archive = Archive::default_location();
         if let Some(archive) = &archive {
             // A previous run that was killed mid-session leaves an unfinished record.
@@ -266,7 +271,7 @@ impl Overlay {
         }
         let now = &self.store.value;
         if previous.transcribe != now.transcribe || previous.stt_provider != now.stt_provider || previous.listen_mic != now.listen_mic || previous.listen_desktop != now.listen_desktop
-            || previous.mic_device != now.mic_device || previous.desktop_device != now.desktop_device {
+            || previous.mic_device != now.mic_device || previous.desktop_device != now.desktop_device || previous.use_gpu != now.use_gpu {
             self.restart_listening_if_live(window, cx);
         }
         cx.notify();

@@ -65,6 +65,9 @@ pub struct Settings {
     /// Transcribe the Live session's audio on this PC. Off keeps Live to the screen and typed questions.
     pub transcribe: bool,
     pub stt_provider: SttProvider,
+    /// macOS: run Parakeet on the GPU (Metal), which takes far less CPU. Off runs it on the CPU.
+    /// `PARAKEET_DEVICE` overrides it; Windows ignores it.
+    pub use_gpu: bool,
     pub listen_mic: bool,
     pub listen_desktop: bool,
     /// Device names from `audio::list_devices`; empty means the system default.
@@ -93,7 +96,7 @@ impl Default for Settings {
             provider: Provider::default(), claude_model: ClaudeModel::default(), claude_models: BTreeMap::new(), codex_model: String::new(),
             api_provider: "anthropic".into(), api_models: BTreeMap::new(), custom_base_url: String::new(),
             answer_style: AnswerStyle::default(), smart_mode: false, speculative_answers: false, auto_answer: false, transcribe: true, stt_provider: SttProvider::default(),
-            listen_mic: true, listen_desktop: true,
+            use_gpu: true, listen_mic: true, listen_desktop: true,
             mic_device: String::new(), desktop_device: String::new(),
             hide_from_capture: true, screen_on_send: true, start_live_on_launch: false, show_in_dock: false,
             save_sessions: true, save_screenshots: true, keep_sessions: Retention::default(), mode: None,
@@ -167,6 +170,7 @@ mod tests {
         assert!(!partial.smart_mode, "answers default to the fastest reasoning");
         assert!(!partial.speculative_answers && !partial.auto_answer, "speculative answers are opt-in");
         assert!(partial.transcribe);
+        assert!(partial.use_gpu, "the GPU is on unless turned off");
         assert_eq!(partial.sources(), Source::ALL);
         assert_eq!(Settings { listen_mic: false, ..Settings::default() }.sources(), [Source::Them]);
         assert_eq!(partial.devices(), crate::audio::Devices::default());
