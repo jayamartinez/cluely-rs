@@ -116,11 +116,10 @@ impl ClaudeCli {
     pub fn prepare(spare: &mut Option<Spare>, system: &str, model: Option<&str>, effort: Effort) -> Result<(), String> {
         let model = validate_model(model)?;
         if system.chars().count() > MAX_SYSTEM { return Err("The assistant instructions are too large.".into()); }
-        let args = stream_args(system, model, effort);
+        let exe = resolve_executable()?;
+        let args = fit_command_line(&exe, stream_args(system, model, effort), COMMAND_LINE_LIMIT, prompt_dir().as_deref())?;
         if spare.as_mut().is_some_and(|ready| ready.usable_for(&args)) { return Ok(()); }
         *spare = None;
-        let exe = resolve_executable()?;
-        check_command_line(&exe, &args, COMMAND_LINE_LIMIT)?;
         *spare = Some(Spare { running: Some(launch(&exe, &args, true, true)?), args, started: Instant::now() });
         Ok(())
     }
@@ -135,9 +134,8 @@ impl ClaudeCli {
         if req.system.chars().count() > MAX_SYSTEM {
             return Err("The assistant instructions are too large.".into());
         }
-        let args = stream_args(&req.system, model, req.effort);
         let exe = resolve_executable()?;
-        check_command_line(&exe, &args, COMMAND_LINE_LIMIT)?;
+        let args = fit_command_line(&exe, stream_args(&req.system, model, req.effort), COMMAND_LINE_LIMIT, prompt_dir().as_deref())?;
         let mut line = serde_json::to_string(&fold_history(&req.messages)).map_err(|_| INPUT_INVALID.to_string())?;
         line.push('\n');
         if cancel.load(Ordering::SeqCst) {
@@ -283,6 +281,52 @@ fn check_command_line(exe: &Path, args: &[String], limit: usize) -> Result<(), S
         return Err("The assistant instructions are too long for the Claude Code command line.".into());
     }
     Ok(())
+}
+
+/// Prompt files older than this are deleted when another is written. Far longer than any
+/// process waits before reading its own (the CLI reads it at startup).
+const PROMPT_FILE_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Where instructions too long for the command line are written for the CLI to read.
+fn prompt_dir() -> Option<PathBuf> { dirs::data_local_dir().map(|dir| dir.join("CluelyRS").join("prompts")) }
+
+/// `args` as they are when they fit within `limit`. Otherwise (long instructions, such as a mode
+/// with files, against Windows' ~32k-character command line) the instructions are written to a
+/// file in `dir`, named by their hash so the same instructions always give the same arguments,
+/// and passed with `--system-prompt-file`.
+fn fit_command_line(exe: &Path, mut args: Vec<String>, limit: usize, dir: Option<&Path>) -> Result<Vec<String>, String> {
+    if command_line_len(exe, &args) <= limit { return Ok(args); }
+    let (Some(at), Some(dir)) = (args.iter().position(|arg| arg == "--system-prompt"), dir) else {
+        check_command_line(exe, &args, limit)?;
+        return Ok(args);
+    };
+    let path = write_prompt_file(dir, &args[at + 1]).map_err(|_| "The assistant instructions could not be saved for Claude Code.".to_string())?;
+    args[at] = "--system-prompt-file".into();
+    args[at + 1] = path.to_string_lossy().into_owned();
+    check_command_line(exe, &args, limit)?;
+    Ok(args)
+}
+
+fn write_prompt_file(dir: &Path, system: &str) -> std::io::Result<PathBuf> {
+    use sha2::{Digest, Sha256};
+    std::fs::create_dir_all(dir)?;
+    let name = format!("{}.txt", Sha256::digest(system.as_bytes()).iter().take(16).map(|byte| format!("{byte:02x}")).collect::<String>());
+    for entry in std::fs::read_dir(dir)?.flatten() {
+        let old = entry.metadata().and_then(|meta| meta.modified()).ok().and_then(|modified| modified.elapsed().ok()).is_some_and(|age| age > PROMPT_FILE_MAX_AGE);
+        if old && entry.file_name() != name.as_str() { let _ = std::fs::remove_file(entry.path()); }
+    }
+    let path = dir.join(&name);
+    let temporary = dir.join(format!("{name}.tmp"));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    // The instructions can hold the user's files: readable by the user only.
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut file = options.open(&temporary)?;
+    file.write_all(system.as_bytes())?;
+    file.sync_all()?;
+    std::fs::rename(&temporary, &path)?;
+    Ok(path)
 }
 
 const ALLOWED_ENV: &[&str] = &[
@@ -928,6 +972,30 @@ mod tests {
         assert_eq!(escaped, plain + 2);
         // Non-BMP characters take two UTF-16 units.
         assert_eq!(command_line_len(exe, &["\u{1F600}".into()]), command_line_len(exe, &["ab".into()]));
+    }
+
+    #[test]
+    fn instructions_too_long_for_the_command_line_go_through_a_file() {
+        let exe = Path::new(r"C:\Users\me\.local\bin\claude.exe");
+        let dir = std::env::temp_dir().join(format!("cluelyrs-claude-prompts-{}", std::process::id()));
+        let short = stream_args("Be brief.", Some("sonnet"), Effort::Fast);
+        assert_eq!(fit_command_line(exe, short.clone(), 30_000, Some(&dir)).unwrap(), short, "short instructions stay inline");
+        assert!(!dir.exists());
+
+        let system = format!("Be brief.\n{}", "résumé ".repeat(6_000));
+        let fitted = fit_command_line(exe, stream_args(&system, Some("sonnet"), Effort::Fast), 30_000, Some(&dir)).unwrap();
+        assert!(!fitted.contains(&"--system-prompt".to_string()) && !fitted.contains(&system));
+        let at = fitted.iter().position(|arg| arg == "--system-prompt-file").unwrap();
+        let path = PathBuf::from(&fitted[at + 1]);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), system);
+        assert_eq!(fitted[..at], stream_args(&system, Some("sonnet"), Effort::Fast)[..at], "the other flags are unchanged");
+        // The same instructions give the same arguments, so a spare started with them is reused.
+        assert_eq!(fit_command_line(exe, stream_args(&system, Some("sonnet"), Effort::Fast), 30_000, Some(&dir)).unwrap(), fitted);
+        #[cfg(unix)]
+        assert_eq!(std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(&path).unwrap().permissions()) & 0o777, 0o600);
+        // Without a folder to write to, the old error stands.
+        assert!(fit_command_line(exe, stream_args(&system, None, Effort::Fast), 30_000, None).unwrap_err().contains("too long"));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// A spare is only used for a request with exactly its arguments, while it's still running,
