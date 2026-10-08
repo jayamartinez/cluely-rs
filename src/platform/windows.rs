@@ -4,7 +4,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use gpui::Window;
+use gpui::{Pixels, Size, Window};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::Graphics::Dwm::{
@@ -64,6 +64,9 @@ pub fn remove_frame(hwnd: HWND) {
 pub fn set_topmost(hwnd: HWND) -> windows::core::Result<()> {
     unsafe { SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE | windows::Win32::UI::WindowsAndMessaging::SWP_NOMOVE) }
 }
+
+/// Resize the window to `size`, keeping its top-left corner.
+pub fn resize(window: &mut Window, _hwnd: Option<HWND>, size: Size<Pixels>) { window.resize(size); }
 
 /// Move by a physical-pixel delta, clamped to the work area of the window's monitor.
 pub fn move_by(hwnd: HWND, dx: i32, dy: i32) -> windows::core::Result<()> {

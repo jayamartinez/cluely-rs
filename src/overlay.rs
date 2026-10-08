@@ -270,7 +270,7 @@ impl Overlay {
     /// Size the window to its content state; transparent area outside the content still takes clicks.
     fn fit(&self, window: &mut Window) {
         let height = if self.settings_tab.is_some() { SETTINGS_HEIGHT } else if self.live_since.is_some() { LIVE_HEIGHT } else { IDLE_HEIGHT };
-        window.resize(size(px(WIDTH), px(height)));
+        platform::resize(window, self.native, size(px(WIDTH), px(height)));
     }
 
     fn handle(&mut self, action: Action, window: &mut Window, cx: &mut Context<Self>) {

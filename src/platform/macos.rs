@@ -1,54 +1,205 @@
-//! macOS. Folders open in Finder. The overlay's native window behaviour (level, click-through,
-//! focus, capture exclusion, keyboard-driven movement) is not implemented yet: `native_window`
-//! returns `None`, so the overlay runs as a plain GPUI window and the window functions below
-//! are unreachable.
+//! macOS window behaviour GPUI does not expose: capture exclusion, a borderless panel, click-through,
+//! keyboard-driven movement and focus hand-off. GPUI already opens the overlay (`WindowKind::PopUp`)
+//! as a non-activating NSPanel at the pop-up menu level that joins every Space, including full-screen
+//! apps; this adds the rest of what the Windows overlay does. Everything here runs on the main thread,
+//! where GPUI runs the overlay.
 
 use std::path::Path;
 use std::process::Command;
+use std::ptr::NonNull;
+use std::sync::atomic::{AtomicU8, Ordering};
 
-use gpui::Window;
+use dispatch2::DispatchQueue;
+use gpui::{Pixels, Size, Window};
+use objc2::MainThreadMarker;
+use objc2::rc::Retained;
+use objc2_app_kit::{
+    NSApplicationActivationOptions, NSEvent, NSEventModifierFlags, NSRunningApplication, NSScreen, NSView, NSWindow, NSWindowCollectionBehavior,
+    NSWindowSharingType, NSWindowStyleMask, NSWorkspace,
+};
+use objc2_foundation::{NSPoint, NSRect, NSSize};
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
-/// The overlay's own window. No values exist until macOS window handling is implemented.
+/// The overlay's own window. `native_window` keeps a strong reference for the rest of the
+/// process, so the pointer stays valid.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum NativeWindow {}
-/// The app that had the keyboard before the overlay took it.
+pub struct NativeWindow(NonNull<NSWindow>);
+
+impl NativeWindow {
+    fn get(&self) -> &NSWindow { unsafe { self.0.as_ref() } }
+}
+
+/// The app that was frontmost before the overlay took the keyboard, and the overlay itself.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PreviousFocus {}
+pub struct PreviousFocus { pid: i32, overlay: NativeWindow }
 
 /// A rounded rectangle in physical pixels relative to the window: left, top, right, bottom, radius.
 pub type Shape = (i32, i32, i32, i32, i32);
 
-pub fn native_window(_window: &Window) -> Option<NativeWindow> { None }
+pub fn native_window(window: &Window) -> Option<NativeWindow> {
+    let RawWindowHandle::AppKit(handle) = HasWindowHandle::window_handle(window).ok()?.as_raw() else { return None };
+    // GPUI's content view, alive as long as its window; only its window is read.
+    let view: &NSView = unsafe { handle.ns_view.cast().as_ref() };
+    NonNull::new(Retained::into_raw(view.window()?)).map(NativeWindow)
+}
 
-pub fn set_capture_hidden(window: NativeWindow, _hidden: bool) -> std::io::Result<()> { match window {} }
+/// Keep the overlay out of screen shares, recordings and screenshots: the window server leaves
+/// windows that don't allow sharing out of captures (see README for what that covers).
+pub fn set_capture_hidden(window: NativeWindow, hidden: bool) -> std::io::Result<()> {
+    window.get().setSharingType(if hidden { NSWindowSharingType::None } else { NSWindowSharingType::ReadOnly });
+    Ok(())
+}
 
-pub fn remove_frame(window: NativeWindow) { match window {} }
+/// GPUI's panel is titled, so macOS draws a hairline border and a shadow around its transparent
+/// rectangle. Make it borderless (still non-activating) and drop the shadow.
+pub fn remove_frame(window: NativeWindow) {
+    let window = window.get();
+    window.setStyleMask(NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel);
+    window.setHasShadow(false);
+}
 
-pub fn set_topmost(window: NativeWindow) -> std::io::Result<()> { match window {} }
+/// GPUI already floats the panel above other apps' windows. Also keep it in place through Mission
+/// Control and out of ⌘` window cycling, as the Windows overlay stays out of Alt+Tab.
+pub fn set_topmost(window: NativeWindow) -> std::io::Result<()> {
+    let window = window.get();
+    window.setCollectionBehavior(window.collectionBehavior() | NSWindowCollectionBehavior::Stationary | NSWindowCollectionBehavior::IgnoresCycle);
+    Ok(())
+}
 
-pub fn move_by(window: NativeWindow, _dx: i32, _dy: i32) -> std::io::Result<()> { match window {} }
+/// Resize to `size` (logical pixels, which are points here) keeping the top edge in place, as on
+/// Windows. GPUI's resize keeps AppKit's bottom-left origin, so a taller overlay would grow upward
+/// off the screen. Like GPUI's, the resize runs on the next turn of the main queue, so AppKit's
+/// resize notifications never re-enter GPUI mid-update.
+pub fn resize(window: &mut Window, native: Option<NativeWindow>, size: Size<Pixels>) {
+    let Some(native) = native else { window.resize(size); return };
+    struct OnMainQueue(NativeWindow);
+    // The main queue runs on the main thread, where the window is used.
+    unsafe impl Send for OnMainQueue {}
+    impl OnMainQueue { fn window(&self) -> &NSWindow { self.0.get() } }
+    let target = OnMainQueue(native);
+    let (width, height) = (f64::from(f32::from(size.width)), f64::from(f32::from(size.height)));
+    DispatchQueue::main().exec_async(move || {
+        let window = target.window();
+        let frame = window.frame();
+        let top = frame.origin.y + frame.size.height;
+        window.setFrame_display(NSRect::new(NSPoint::new(frame.origin.x, top - height), NSSize::new(width, height)), true);
+    });
+}
 
-pub fn held_direction(_with_shift: bool) -> Option<(i32, i32)> { None }
+/// Move by a physical-pixel delta (y down, as on Windows), clamped to the visible frame of the
+/// window's screen (below the menu bar, beside the Dock).
+pub fn move_by(window: NativeWindow, dx: i32, dy: i32) -> std::io::Result<()> {
+    let window = window.get();
+    let scale = window.backingScaleFactor();
+    let frame = window.frame();
+    // AppKit's y axis points up.
+    let (mut x, mut y) = (frame.origin.x + dx as f64 / scale, frame.origin.y - dy as f64 / scale);
+    if let Some(screen) = window.screen() {
+        let work = screen.visibleFrame();
+        x = x.clamp(work.origin.x, (work.origin.x + work.size.width - frame.size.width).max(work.origin.x));
+        y = y.clamp(work.origin.y, (work.origin.y + work.size.height - frame.size.height).max(work.origin.y));
+    }
+    window.setFrameOrigin(NSPoint::new(x, y));
+    Ok(())
+}
 
-pub fn left_button_down() -> bool { false }
+/// The arrows of the move and scroll shortcuts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Arrow { Up, Down, Left, Right }
 
-pub fn set_shape(window: NativeWindow, _shapes: &[Shape]) { match window {} }
+/// Arrows currently held as part of a move or scroll shortcut (one bit per `Arrow`), recorded from
+/// the shortcuts' own press and release events. Reading the live keyboard state instead would need
+/// the Input Monitoring permission.
+static HELD_ARROWS: AtomicU8 = AtomicU8::new(0);
 
-pub fn center(window: NativeWindow) -> Option<(i32, i32)> { match window {} }
+pub fn set_arrow_held(arrow: Arrow, held: bool) {
+    let bit = 1 << arrow as u8;
+    if held { HELD_ARROWS.fetch_or(bit, Ordering::Relaxed); } else { HELD_ARROWS.fetch_and(!bit, Ordering::Relaxed); }
+}
 
-pub fn enable_passthrough(window: NativeWindow) { match window {} }
+/// Arrow direction currently held with Control+Option (and Shift exactly when `with_shift`), or
+/// `None` once the chord is released. Global hotkeys fire once per press, so held movement polls
+/// instead of waiting for repeats: the modifiers from AppKit, the arrows from `set_arrow_held`.
+pub fn held_direction(with_shift: bool) -> Option<(i32, i32)> {
+    let flags = NSEvent::modifierFlags_class();
+    if !flags.contains(NSEventModifierFlags::Control) || !flags.contains(NSEventModifierFlags::Option) {
+        // A release that arrives after the modifiers are let go can be lost, so start clean.
+        HELD_ARROWS.store(0, Ordering::Relaxed);
+        return None;
+    }
+    if flags.contains(NSEventModifierFlags::Shift) != with_shift { return None; }
+    let held = |arrow: Arrow| HELD_ARROWS.load(Ordering::Relaxed) & (1 << arrow as u8) != 0;
+    let axis = |negative, positive| held(positive) as i32 - held(negative) as i32;
+    let direction = (axis(Arrow::Left, Arrow::Right), axis(Arrow::Up, Arrow::Down));
+    (direction != (0, 0)).then_some(direction)
+}
 
-pub fn set_mouse_passthrough(window: NativeWindow, _on: bool) { match window {} }
+/// Whether the left mouse button is held right now, wherever the pointer is.
+pub fn left_button_down() -> bool { NSEvent::pressedMouseButtons() & 1 != 0 }
 
-pub fn cursor_in_window(window: NativeWindow) -> Option<(i32, i32)> { match window {} }
+/// macOS has no window regions. Outside the drawn shapes the borderless panel is transparent, and
+/// whether clicks reach the overlay is decided per cursor position by `set_mouse_passthrough`.
+pub fn set_shape(_window: NativeWindow, _shapes: &[Shape]) {}
 
-pub fn take_focus(window: NativeWindow) -> Option<PreviousFocus> { match window {} }
+/// Centre of the window in CoreGraphics global coordinates (points, origin at the top-left of the
+/// main display), which is how the screenshot code picks a monitor.
+pub fn center(window: NativeWindow) -> Option<(i32, i32)> {
+    let main = NSScreen::screens(MainThreadMarker::new()?).firstObject()?.frame();
+    let frame = window.get().frame();
+    let x = frame.origin.x + frame.size.width / 2.0;
+    let y = main.size.height - (frame.origin.y + frame.size.height / 2.0);
+    Some((x.round() as i32, y.round() as i32))
+}
 
-pub fn return_focus(previous: PreviousFocus) { match previous {} }
+/// Nothing to prepare: any window can ignore mouse events.
+pub fn enable_passthrough(_window: NativeWindow) {}
 
-pub fn is_visible(window: NativeWindow) -> bool { match window {} }
+/// While on, mouse input goes to whatever is underneath the overlay.
+pub fn set_mouse_passthrough(window: NativeWindow, on: bool) {
+    let window = window.get();
+    if window.ignoresMouseEvents() != on { window.setIgnoresMouseEvents(on); }
+}
 
-pub fn set_visible(window: NativeWindow, _visible: bool) { match window {} }
+/// Cursor position relative to the window's top-left, in physical pixels.
+pub fn cursor_in_window(window: NativeWindow) -> Option<(i32, i32)> {
+    let window = window.get();
+    let (scale, frame, cursor) = (window.backingScaleFactor(), window.frame(), NSEvent::mouseLocation());
+    let x = (cursor.x - frame.origin.x) * scale;
+    let y = (frame.origin.y + frame.size.height - cursor.y) * scale;
+    Some((x.round() as i32, y.round() as i32))
+}
+
+/// Give the overlay the keyboard, returning the app that had it. The panel is non-activating, so it
+/// becomes the key window without bringing CluelyRS forward. Allowed because it follows a hotkey
+/// press or a click.
+pub fn take_focus(window: NativeWindow) -> Option<PreviousFocus> {
+    let own = std::process::id() as i32;
+    let previous = NSWorkspace::sharedWorkspace().frontmostApplication().map(|app| app.processIdentifier()).filter(|pid| *pid != own);
+    window.get().makeKeyAndOrderFront(None);
+    previous.map(|pid| PreviousFocus { pid, overlay: window })
+}
+
+/// Hand the keyboard back to the app `take_focus` returned. That app usually stayed frontmost, so
+/// the overlay also gives up key status: ordering it out and straight back in leaves it visible but
+/// no longer key.
+pub fn return_focus(previous: PreviousFocus) {
+    let overlay = previous.overlay.get();
+    if overlay.isKeyWindow() {
+        overlay.orderOut(None);
+        overlay.orderFrontRegardless();
+    }
+    if let Some(app) = NSRunningApplication::runningApplicationWithProcessIdentifier(previous.pid) {
+        app.activateWithOptions(NSApplicationActivationOptions::empty());
+    }
+}
+
+pub fn is_visible(window: NativeWindow) -> bool { window.get().isVisible() }
+
+/// Show without activating CluelyRS, so the app the user is working in keeps focus.
+pub fn set_visible(window: NativeWindow, visible: bool) {
+    let window = window.get();
+    if visible { window.orderFrontRegardless() } else { window.orderOut(None) }
+}
 
 /// Open a folder in Finder.
 pub fn open_folder(path: &Path) -> std::io::Result<()> { Command::new("open").arg(path).spawn().map(drop) }
