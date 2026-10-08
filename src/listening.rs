@@ -35,6 +35,39 @@ pub enum Status {
 pub enum Message {
     Status(Status),
     Transcript(Update),
+    /// How loud each source is right now, 0..=1 (see [`LevelMeter`]), about 25 times a second.
+    Level { me: f32, them: f32 },
+}
+
+/// Audio levels for the Live waveform: the loudest chunk of each source over every
+/// [`LevelMeter::INTERVAL_MS`] of audio, on a decibel scale shaped for speech. Measured on the audio
+/// clock, so the UI gets about 25 updates a second however the chunks arrive.
+#[derive(Default)]
+pub struct LevelMeter {
+    peak: [f32; 2],
+    next_ms: Option<f64>,
+}
+
+impl LevelMeter {
+    pub const INTERVAL_MS: f64 = 40.0;
+
+    /// The levels (Me, Them) once a full interval of audio has been observed.
+    pub fn observe(&mut self, chunk: &AudioChunk) -> Option<(f32, f32)> {
+        let slot = match chunk.source { Source::Me => 0, Source::Them => 1 };
+        self.peak[slot] = self.peak[slot].max(chunk.rms());
+        let end = chunk.end_ms();
+        let due = *self.next_ms.get_or_insert(end + Self::INTERVAL_MS);
+        if end < due { return None; }
+        self.next_ms = Some(end + Self::INTERVAL_MS);
+        let [me, them] = std::mem::take(&mut self.peak).map(level);
+        Some((me, them))
+    }
+}
+
+/// An RMS level as 0..=1: -54 dBFS (a quiet room) and below is 0, -12 dBFS (loud speech) and above is 1.
+pub fn level(rms: f32) -> f32 {
+    if rms <= 0.0 { return 0.0; }
+    ((20.0 * rms.log10() + 54.0) / 42.0).clamp(0.0, 1.0)
 }
 
 pub enum Command { Stop }
@@ -138,14 +171,17 @@ pub fn run(provider: Arc<dyn StreamingAsr>, audio: Receiver<AudioChunk>, sources
     }
     let _ = out.unbounded_send(Message::Status(Status::Listening { sources: sources.to_vec(), failures }));
     let send = |updates: Vec<Update>| updates.into_iter().all(|update| out.unbounded_send(Message::Transcript(update)).is_ok());
+    let mut meter = LevelMeter::default();
     loop {
         if commands.try_recv().is_ok() { break; }
         match audio.recv_timeout(POLL) {
             Ok(chunk) => {
                 if let Some(dump) = dump.as_deref_mut() { dump.write(&chunk); }
                 let updates = live.on_audio(&chunk);
+                let levels = meter.observe(&chunk);
                 transcriber.feed(chunk);
                 if !send(updates) { break; }
+                if let Some((me, them)) = levels && out.unbounded_send(Message::Level { me, them }).is_err() { break; }
             }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
@@ -272,6 +308,26 @@ mod tests {
         assert!(committed.contains(&(Source::Me, "let me think", Reason::Silence)) || committed.contains(&(Source::Me, "let me think", Reason::MaxSilence)), "{committed:?}");
         let them = messages.iter().find_map(|m| match m { Message::Transcript(Update::Committed { utterance, .. }) if utterance.source == Source::Them => Some(utterance.clone()), _ => None }).unwrap();
         assert!(them.start_ms <= 200.0 && them.end_ms >= 600.0, "{them:?}");
+    }
+
+    #[test]
+    fn levels_come_once_per_interval_of_audio_with_each_source_at_its_loudest() {
+        let mut meter = LevelMeter::default();
+        let chunk = |source, start_ms: f64, rms: f32| AudioChunk { source, start_ms, samples: vec![rms; 160] };
+        // 10 ms chunks from both sources: nothing until 40 ms of audio has gone by.
+        let mut levels = Vec::new();
+        for i in 0..8 {
+            let t = i as f64 * 10.0;
+            levels.extend(meter.observe(&chunk(Source::Me, t, if i == 1 { 0.25 } else { 0.001 })));
+            levels.extend(meter.observe(&chunk(Source::Them, t, 0.02)));
+        }
+        assert_eq!(levels.len(), 1, "{levels:?}");
+        let (me, them) = levels[0];
+        assert!((me - 1.0).abs() < 0.01 && them > 0.3 && them < 0.6, "{levels:?}");
+        assert_eq!(level(0.0), 0.0);
+        assert_eq!(level(0.001), 0.0);
+        assert_eq!(level(1.0), 1.0);
+        assert!(level(0.05) > level(0.02));
     }
 
     #[test]

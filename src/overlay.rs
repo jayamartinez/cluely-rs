@@ -137,6 +137,8 @@ pub struct Overlay {
     pub(crate) transcript: Vec<TranscriptLine>,
     /// What each source is still saying: Me, then Them.
     pub(crate) provisional: [Option<ProvisionalLine>; 2],
+    /// The last few audio levels (the louder of Me and Them), newest last, for the Live waveform.
+    pub(crate) levels: std::collections::VecDeque<f32>,
     pub(crate) model_installed: bool,
     pub(crate) model_download: Option<Download>,
     /// Feedback under the model row in Settings → Listening.
@@ -231,7 +233,7 @@ impl Overlay {
             metrics: None, next_turn: 0, catching_mouse: true, return_focus: None,
             codex: crate::codex::CodexClient::new(), codex_status: None, claude_status: None, signing_in: false,
             motion: None, live_since: None, turns: Vec::new(), scroll: ScrollHandle::new(),
-            listening: None, listening_status: None, listening_epoch: 0, transcript: Vec::new(), provisional: Default::default(),
+            listening: None, listening_status: None, listening_epoch: 0, transcript: Vec::new(), provisional: Default::default(), levels: Default::default(),
             model_installed: false, model_download: None, model_notice: None,
             open_picker: None, reveal_accounts: false, devices: None, devices_loading: false, archive_bytes: None, picker_face: Rc::default(), toggle_hover: None,
             collapse: None, settings_height: Rc::default() };
@@ -941,6 +943,8 @@ fn idle_hint(text: &'static str) -> impl IntoElement {
 
 mod card;
 pub(crate) use card::CARD_WIDTH;
+/// How many audio levels the Live waveform keeps (one per bar from the middle out).
+pub(crate) const LEVEL_HISTORY: usize = 3;
 
 /// What Start does, under the idle card.
 #[cfg(target_os = "macos")]

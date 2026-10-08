@@ -78,6 +78,7 @@ fn main() -> anyhow::Result<()> {
         let wall = start.elapsed().as_secs_f64() * 1000.0;
         match message {
             Message::Status(Status::Failed(reason)) => { println!("  failed: {reason}"); break; }
+            Message::Level { .. } => {}
             Message::Status(status) => println!("  {wall:7.0}  status {status:?}"),
             Message::Transcript(Update::Provisional { stable, unstable, .. }) => println!("  {wall:7.0}  partial   [{stable}] {unstable}"),
             Message::Transcript(Update::QuestionLikely { score, .. }) => println!("  {wall:7.0}  question? {score:.2}"),

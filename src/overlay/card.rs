@@ -89,10 +89,13 @@ impl Overlay {
     fn toolbar(&self, live: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let icon_button = |id: &'static str| div().id(id).flex().flex_none().items_center().justify_center().h(px(32.0)).rounded(px(8.0))
             .cursor_pointer().hover(|button| button.bg(rgba(HOVER)));
-        // The waveform starts and stops Live; while live it is blue with the elapsed time beside it.
+        // The waveform starts and stops Live; while live it is blue, moves with what is heard and has the
+        // elapsed time beside it.
+        let bars: gpui::AnyElement = if live && !self.levels.is_empty() { self.level_bars().into_any_element() }
+            else { ui::icon("icons/tab-listening.svg", 18.0, if live { theme::accent_soft() } else { rgb(ICON_OFF) }).into_any_element() };
         let wave = icon_button("live").gap(px(6.0)).px(px(9.0))
             .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, window, cx| this.set_live(!live, window, cx)))
-            .child(ui::icon("icons/tab-listening.svg", 18.0, if live { theme::accent_soft() } else { rgb(ICON_OFF) }))
+            .child(bars)
             .when(live, |wave| wave.child(div().font_family(theme::MONO).text_size(px(12.0)).text_color(theme::accent_soft()).child(self.elapsed())));
         let middle = div().flex().items_center().gap(px(6.0))
             .child(self.toggle_button(Toggle::ScreenOnSend, cx))
@@ -117,6 +120,23 @@ impl Overlay {
             .child(middle)
             .child(div().flex_1().flex().items_center().justify_end().gap(px(2.0)).child(sessions).child(settings))
             .child(self.hits.mark())
+    }
+}
+
+impl Overlay {
+    /// The waveform icon's five bars (same size and spacing as `tab-listening.svg`), driven by the
+    /// last levels: the newest in the middle, older ones outwards, scaled by the icon's diamond so
+    /// silence reads as a small, flat version of the icon.
+    fn level_bars(&self) -> impl IntoElement {
+        const SHAPE: [f32; 5] = [0.45, 0.75, 1.0, 0.75, 0.45];
+        let newest = self.levels.len() - 1;
+        let at = |age: usize| self.levels.get(newest.saturating_sub(age)).copied().unwrap_or(0.0);
+        // Whole-pixel bars and gaps, so every bar renders at the same width.
+        div().size(px(18.0)).flex().items_center().justify_center().gap(px(1.0))
+            .children(SHAPE.iter().enumerate().map(|(index, scale)| {
+                let level = at(index.abs_diff(2));
+                div().w(px(2.0)).h(px((3.0 + 13.0 * scale * level).round())).rounded_full().bg(theme::accent_soft())
+            }))
     }
 }
 
