@@ -18,7 +18,7 @@ how upstream ships, and how to undo each one.
 
 ### 1. Inference thread count (shim)
 
-- **What:** `native/parakeet_threads.cpp` exports `cluelyrs_parakeet_set_threads(int)`. It is a one-line C wrapper over
+- **What:** `native/parakeet_shim.cpp` exports `cluelyrs_parakeet_set_threads(int)`. It is a one-line C wrapper over
   parakeet.cpp's existing internal `pk::set_num_threads`, which upstream's own CLI uses for `--threads`. No upstream file
   is modified.
 - **Why:** v0.6.0 decodes streams with a hard-coded default of 8 threads (`kDefaultThreads` in `src/ggml_graph.cpp`). Its
@@ -27,7 +27,8 @@ how upstream ships, and how to undo each one.
   how much of the machine transcription takes.
 - **CluelyRS default:** 4 threads, shared by all streams (`stt::parakeet::DEFAULT_THREADS`). See the measurements below.
 - **To remove:** when upstream exposes thread configuration in its C API, call that from `stt::parakeet::ffi::set_threads`.
-  Then delete `native/parakeet_threads.cpp` and the `cc::Build` block in `build.rs`. If the shim stops linking after a
+  Then delete its export from `native/parakeet_shim.cpp` (and the file and the `cc::Build` block in `build.rs` once
+  section 4's export is gone too). If the shim stops linking after a
   version bump (for example because `pk::set_num_threads` was renamed), check upstream for an equivalent before
   restoring it.
 
@@ -50,13 +51,14 @@ and `advapi32` below are MSVC-only; macOS differences are listed after them.
   `third_party/parakeet.cpp/third_party/ggml`, so `.gitmodules` sets `ignore = dirty` for the submodule.
 - **macOS (Apple clang):** no compiler flags are needed. CMake finds the system bash, so upstream's ggml patches apply as
   they do on Windows. `GGML_NATIVE=OFF` builds for the macOS arm64 baseline, which every Apple silicon Mac supports.
-  `GGML_BLAS=OFF`: streaming decodes run on ggml's CPU backend, never its BLAS backend. Accelerate stays on (upstream's
+  `GGML_BLAS=OFF`: streaming decodes run on Metal or ggml's CPU backend, never its BLAS backend. Accelerate stays on (upstream's
   default) and is linked, because ggml-cpu uses it for vector math.
-- **macOS, Metal off:** parakeet.cpp's Metal backend (`PARAKEET_GGML_METAL`) is left off, as upstream ships it. On an M1 it
-  decodes slightly slower than the CPU, but uses about a ninth of the CPU (measurements below). It can't be turned on by
-  itself: parakeet.cpp keeps a process-wide backend that still holds Metal buffers at exit, and ggml then aborts in
-  `ggml_metal_rsets_free` ("you haven't deallocated all Metal resources before exiting"). Enabling it needs upstream's
-  `pk::shutdown_backend()` exported through the shim and called after the models are dropped, before the process exits.
+- **macOS, Metal on:** `PARAKEET_GGML_METAL=ON` (upstream ships it off) with `GGML_METAL_EMBED_LIBRARY=ON`, so the
+  Metal shaders are compiled into the binary and nothing has to ship beside it. `ggml-metal` and the Foundation, Metal and
+  MetalKit frameworks are linked. On an M1, streams decode at about the CPU's latency with a fraction of its CPU time
+  (measurements below). parakeet.cpp picks the GPU by itself; `PARAKEET_DEVICE=cpu` still forces the CPU backend. Metal
+  needs the backend shutdown in section 4. To undo, set `PARAKEET_GGML_METAL` back to `OFF` and drop `ggml-metal`, the
+  three frameworks and `GGML_METAL_EMBED_LIBRARY`; the shutdown can stay, it is harmless on the CPU.
 
 ### 3. Stream reset after each utterance (provider behaviour)
 
@@ -69,6 +71,24 @@ and `advapi32` below are MSVC-only; macOS differences are listed after them.
   between identical passes.
 - **To remove:** when a parakeet.cpp release keeps EOU detection on long streams, set `MAX_STREAM_MS` to infinity and
   stop resetting on events in `Session::feed_decoder`. Then rerun `parakeet_bench long` to confirm.
+
+### 4. Backend shutdown before exit (shim, macOS)
+
+- **What:** `native/parakeet_shim.cpp` also exports `cluelyrs_parakeet_shutdown_backend()`, a C wrapper over
+  parakeet.cpp's internal `pk::shutdown_backend`, which upstream's CLI and server call before returning from `main`.
+  `stt::parakeet::ffi` counts models from before they load until after they are freed (a stream keeps its model alive).
+  `stt::parakeet::shutdown()` waits up to 3 s for the last one, then frees the backend; from then on model loads fail,
+  so nothing can bring the backend back. It is safe with no model loaded and when called twice. If models are still
+  alive after 3 s, it leaves the backend alone (freeing it under them would be a use-after-free) and logs that.
+- **Where it runs:** on every macOS quit (⌘Q, the app menu, Settings › About › Quit, a quit Apple Event, logout): all of
+  them reach GPUI's `on_app_quit`, where the overlay first stops listening and then calls `stt::parakeet::shutdown()`.
+  The `parakeet_bench`, `transcript_replay` and `endpoint_eval` examples call it after `run` returns, once every model,
+  stream and worker thread is gone. Windows keeps its quit path unchanged; the examples call it there too, harmlessly.
+- **Why:** parakeet.cpp keeps a process-wide compute backend (`g_backend` in `src/ggml_graph.cpp`) that holds Metal
+  buffers. Left to static destructors at exit, ggml aborts in `ggml_metal_rsets_free` ("you haven't deallocated all
+  Metal resources before exiting").
+- **To remove:** when upstream's C API frees the backend itself (for example with the last context), call that from
+  `ffi::shutdown_backend`, or drop the call if nothing is needed, and delete the export from the shim.
 
 ### Measurements
 
@@ -119,13 +139,31 @@ Numbers are not comparable with the Windows table, because the voice and the mac
 | 4 | 0.187 | 0.368 | 57.7 ms |
 | 8 | 0.591 | 1.367 | 199.5 ms |
 
-**Real time, Me and Them together, 4 threads, 60 s.** `PARAKEET_DEVICE=cpu` forced the CPU in a Metal build.
+**Real time, Me and Them together, 4 threads, 60 s.** `PARAKEET_DEVICE=cpu` forced the CPU in a Metal build. The first
+run is the original measurement, from before Metal was enabled. The second is this build (embedded shaders, backend freed
+at exit), under `/usr/bin/time -l`, while another build may have been compiling on the machine. Latency is the worse of Me
+and Them.
 
 | Backend | CPU (cores) | EOU latency p50 / p95 | Peak resident memory |
 |---|---|---|---|
-| CPU | 1.18 | ~172 / ~205 ms | 210 MB |
-| Metal | 0.13 | ~183 / ~193 ms | 249 MB |
+| CPU, first run | 1.18 | ~172 / ~205 ms | 210 MB |
+| Metal, first run | 0.13 | ~183 / ~193 ms | 249 MB |
+| CPU, second run | 1.65 | ~189 / ~231 ms | 223 MB |
+| Metal, second run | 0.10 | ~169 / ~188 ms | 409 MB |
 
-In the Metal build's sweep, one stream ran at an RTF of 0.222 and two at 0.415 each (4 threads), against 0.187 and 0.368 on
-the CPU.
+The second run's memory is the process's peak as `time` reports it; sampled while streaming, it was 251 MB on Metal and
+212 MB on the CPU. Both second runs exited with 0; the Metal one logged `ggml_metal_free: deallocating` and left no crash
+report.
 
+**Thread sweep, second run.** `parakeet_bench <wav> sweep --threads 2,4`; RTF per stream.
+
+| Backend, threads | RTF, 1 stream | RTF, 2 streams | p95 per-block decode, 2 streams |
+|---|---|---|---|
+| Metal, 2 | 0.144 | 0.241 | 38.0 ms |
+| Metal, 4 | 0.124 | 0.254 | 40.4 ms |
+| CPU, 2 | 0.243 | 0.435 | 68.5 ms |
+| CPU, 4 | 0.289 | 0.516 | 83.3 ms |
+
+On Metal the thread count matters little. The very first Metal run after the
+build took about 13 s to start decoding while macOS compiled the shaders. Later runs, including one from a copy of the
+binary at another path, started at once.
