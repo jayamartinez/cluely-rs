@@ -1,8 +1,10 @@
 //! Text from the files a mode holds: PDF, DOCX, TXT and Markdown. Each file is read once, when
 //! it's added; only the extracted text is kept and sent.
 
-use std::io::Read;
-use std::path::Path;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -35,13 +37,14 @@ impl FileKind {
 }
 
 /// Why a file couldn't be added.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FileError {
     Unsupported,
     TooLarge,
     LimitReached,
     NoText,
     Unreadable,
+    TimedOut,
 }
 
 impl std::fmt::Display for FileError {
@@ -52,12 +55,13 @@ impl std::fmt::Display for FileError {
             Self::LimitReached => "Limit reached: a mode holds up to 5 files.",
             Self::NoText => "No text found. Scanned PDFs need a text layer.",
             Self::Unreadable => "This file couldn't be read.",
+            Self::TimedOut => "Reading this file took too long. It may be damaged.",
         })
     }
 }
 
 /// A file read and turned into text, ready to be added to a mode.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Extracted {
     /// The file's own name, for display.
     pub name: String,
@@ -83,6 +87,67 @@ pub fn extract(path: &Path, room: u64) -> Result<Extracted, FileError> {
     if text.trim().is_empty() { return Err(FileError::NoText); }
     let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
     Ok(Extracted { name, kind, bytes, pages, text })
+}
+
+/// The argument that makes the app read one file and exit instead of starting (see [`child_main`]).
+pub const CHILD_FLAG: &str = "--cluelyrs-read-mode-file";
+/// A file not read by then is given up on, and its reader stopped.
+pub const READ_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Like [`extract`], but in a separate process that is stopped after [`READ_TIMEOUT`]: a damaged
+/// or hostile PDF can make the parser loop or overflow its stack, which neither a thread nor
+/// `catch_unwind` can contain. The process is this app run with [`CHILD_FLAG`]. Blocks.
+pub fn extract_isolated(path: &Path, room: u64) -> Result<Extracted, FileError> {
+    FileKind::from_path(path).ok_or(FileError::Unsupported)?;
+    if std::fs::metadata(path).map_err(|_| FileError::Unreadable)?.len() > room { return Err(FileError::TooLarge); }
+    let exe = std::env::current_exe().map_err(|_| FileError::Unreadable)?;
+    let mut command = Command::new(exe);
+    command.arg(CHILD_FLAG).arg(path).arg(room.to_string());
+    run_reader(command, READ_TIMEOUT)
+}
+
+/// When this process was started by [`extract_isolated`], read the file, print the result as
+/// JSON and return the exit code; otherwise `None`. Call first thing in `main`.
+pub fn child_main() -> Option<i32> {
+    let mut args = std::env::args_os().skip(1);
+    if args.next()? != CHILD_FLAG { return None; }
+    let path = PathBuf::from(args.next()?);
+    let room = args.next().and_then(|room| room.to_str()?.parse().ok()).unwrap_or(MAX_MODE_BYTES);
+    let json = serde_json::to_vec(&extract(&path, room)).unwrap_or_default();
+    let mut out = std::io::stdout().lock();
+    Some(if out.write_all(&json).and_then(|_| out.flush()).is_ok() { 0 } else { 1 })
+}
+
+/// Run a reader process and take its JSON result, killing it at `timeout`.
+fn run_reader(mut command: Command, timeout: Duration) -> Result<Extracted, FileError> {
+    command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+    #[cfg(windows)]
+    std::os::windows::process::CommandExt::creation_flags(&mut command, 0x0800_0000); // CREATE_NO_WINDOW
+    let mut child = command.spawn().map_err(|_| FileError::Unreadable)?;
+    let mut stdout = child.stdout.take().ok_or(FileError::Unreadable)?;
+    // Read concurrently so a large result can't block the child on a full pipe.
+    let reader = std::thread::spawn(move || {
+        let mut out = Vec::new();
+        let _ = (&mut stdout).take(MAX_TEXT_BYTES as u64 * 7 + 65_536).read_to_end(&mut out);
+        out
+    });
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let out = reader.join().unwrap_or_default();
+                if !status.success() { return Err(FileError::Unreadable); }
+                return serde_json::from_slice::<Result<Extracted, FileError>>(&out).map_err(|_| FileError::Unreadable)?;
+            }
+            Ok(None) if started.elapsed() >= timeout => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(FileError::TimedOut);
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+            Err(_) => return Err(FileError::Unreadable),
+        }
+    }
 }
 
 /// Plain text in UTF-8 or UTF-16 (with a byte-order mark); invalid bytes become U+FFFD.
@@ -362,6 +427,21 @@ pub(crate) mod tests {
         for offset in offsets { out.extend(format!("{offset:010} 00000 n \n").as_bytes()); }
         out.extend(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objects.len() + 1).as_bytes());
         out
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_reader_process_result_is_taken_and_a_stuck_reader_is_stopped() {
+        let shell = |script: &str| { let mut command = Command::new("/bin/sh"); command.arg("-c").arg(script); command };
+        let ok = serde_json::to_string(&Ok::<_, FileError>(Extracted { name: "a.md".into(), kind: FileKind::Md, bytes: 3, pages: None, text: "abc".into() })).unwrap();
+        let read = run_reader(shell(&format!("printf '%s' '{ok}'")), Duration::from_secs(5)).unwrap();
+        assert_eq!((read.name.as_str(), read.text.as_str()), ("a.md", "abc"));
+        assert_eq!(run_reader(shell("printf '%s' '{\"Err\":\"NoText\"}'"), Duration::from_secs(5)), Err(FileError::NoText));
+        assert_eq!(run_reader(shell("kill -SEGV $$"), Duration::from_secs(5)), Err(FileError::Unreadable), "a crashed reader");
+        assert_eq!(run_reader(shell("printf garbage"), Duration::from_secs(5)), Err(FileError::Unreadable));
+        let started = Instant::now();
+        assert_eq!(run_reader(shell("sleep 30"), Duration::from_millis(300)), Err(FileError::TimedOut));
+        assert!(started.elapsed() < Duration::from_secs(5), "stopped at the time limit");
     }
 
     pub(crate) fn tempdir(name: &str) -> std::path::PathBuf {

@@ -1,6 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use cluely_rs::{assets, hotkeys, input, overlay, text_area};
+use cluely_rs::{assets, hotkeys, input, modes, overlay, text_area};
 use gpui::{App, AppContext, Application, Bounds, WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, point, px, size};
 
 #[cfg(target_os = "macos")]
@@ -20,6 +20,8 @@ fn app_menu(cx: &mut App) {
 }
 
 fn main() {
+    // Started only to read a file added to a mode (in its own process, so a bad file can't hang the app).
+    if let Some(code) = modes::extract::child_main() { std::process::exit(code); }
     Application::new().with_assets(assets::Assets).run(|cx: &mut App| {
         input::bind_keys(cx);
         text_area::bind_keys(cx);
