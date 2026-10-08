@@ -11,10 +11,11 @@ use crate::settings_view::Tab;
 use crate::toggles::{Toggle, ToggleStyle};
 use crate::{theme, ui};
 
-/// The card behind the conversation and the toolbar.
-const CARD: u32 = 0x121315;
+/// The card behind the conversation and the toolbar, translucent so the desktop shows faintly through
+/// it, like the Windows overlay's glass.
+const CARD: u32 = 0x121315cc;
 /// The text box row, lighter than the rest of the card.
-const INPUT_ROW: u32 = 0x2e3034;
+const INPUT_ROW: u32 = 0x2e3034cc;
 const EDGE: u32 = 0xffffff14;
 /// The return button while there is nothing to send.
 const RETURN_IDLE: u32 = 0x43464b;
@@ -27,13 +28,15 @@ const THREAD_MAX_HEIGHT: f32 = 344.0;
 impl Overlay {
     pub(super) fn mac_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let live = self.live_since.is_some();
+        // Each section paints its own translucent background, so none is stacked on another and the
+        // whole card stays equally see-through.
         let mut card = div().id("bar").relative().w(px(WIDTH - 40.0)).flex().flex_col().rounded(px(20.0))
-            .bg(rgb(CARD)).border_1().border_color(rgba(EDGE));
+            .border_1().border_color(rgba(EDGE));
         if live {
             let (ticker, thread, actions) = self.live_parts(cx);
-            card = card.child(ticker);
-            if !self.turns.is_empty() { card = card.child(thread.flex_none().max_h(px(THREAD_MAX_HEIGHT))); }
-            card = card.child(actions);
+            let mut conversation = div().flex().flex_col().bg(rgba(CARD)).rounded_t(px(19.0)).child(ticker);
+            if !self.turns.is_empty() { conversation = conversation.child(thread.flex_none().max_h(px(THREAD_MAX_HEIGHT))); }
+            card = card.child(conversation.child(actions));
         }
         card.child(self.input_row(live, cx)).child(self.toolbar(live, cx))
     }
@@ -47,7 +50,7 @@ impl Overlay {
             .child(ui::icon("icons/return.svg", 14.0, if ready { theme::accent_ink() } else { theme::body() }));
         // Idle, the text box is the top of the card; during Live a hairline separates it from the
         // conversation above.
-        div().relative().flex().items_center().gap(px(10.0)).h(px(54.0)).pl(px(18.0)).pr(px(11.0)).bg(rgb(INPUT_ROW))
+        div().relative().flex().items_center().gap(px(10.0)).h(px(54.0)).pl(px(18.0)).pr(px(11.0)).bg(rgba(INPUT_ROW))
             .when(!live, |row| row.rounded_t(px(19.0)))
             .when(live, |row| row.border_t_1().border_color(rgba(EDGE)))
             .child(div().id("composer-input").flex_1().min_w_0().cursor_text()
@@ -78,7 +81,7 @@ impl Overlay {
         let settings = icon_button("settings").w(px(32.0))
             .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| this.open_settings(Tab::default(), window, cx)))
             .child(ui::icon("icons/gear.svg", 17.0, theme::muted()));
-        div().flex().items_center().gap(px(6.0)).h(px(46.0)).pl(px(16.0)).pr(px(10.0))
+        div().flex().items_center().gap(px(6.0)).h(px(46.0)).pl(px(16.0)).pr(px(10.0)).bg(rgba(CARD)).rounded_b(px(19.0))
             // Dragging the toolbar's background moves the overlay, as the pill does on Windows.
             .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())
             .child(div().flex_1().flex().items_center().child(ui::mark(22.0)))
