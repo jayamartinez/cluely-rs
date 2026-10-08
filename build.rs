@@ -19,6 +19,9 @@ fn main() {
         );
     }
 
+    let msvc = env::var("CARGO_CFG_TARGET_ENV").is_ok_and(|env| env == "msvc");
+    let apple = env::var("CARGO_CFG_TARGET_OS").is_ok_and(|os| os == "macos");
+
     let mut config = cmake::Config::new(&source);
     // Always optimize: a debug ggml is far too slow for real-time inference, even in dev builds.
     config.profile("Release")
@@ -28,25 +31,37 @@ fn main() {
         .define("PARAKEET_BUILD_SERVER", "OFF")
         .define("PARAKEET_WITH_CED", "OFF")
         .define("PARAKEET_WITH_VOICEDETECT", "OFF")
-        // Portable x86-64 (AVX2/FMA/F16C) rather than tuned to the build machine.
+        // Portable rather than tuned to the build machine: x86-64 with AVX2/FMA/F16C on Windows,
+        // the macOS arm64 baseline (every Apple silicon Mac) on macOS.
         .define("GGML_NATIVE", "OFF")
         // MSVC's OpenMP runtime spins idle threads between decodes: ~5x the CPU of ggml's own
         // thread pool for two live streams, with no latency benefit (PATCHES.md).
-        .define("GGML_OPENMP", "OFF")
+        .define("GGML_OPENMP", "OFF");
+    if msvc {
         // Setting flags replaces CMake's MSVC defaults, so restore them (exceptions and RTTI matter:
         // parakeet.cpp reports load errors with C++ exceptions).
-        .cflag("/DWIN32 /D_WINDOWS")
-        .cxxflag("/DWIN32 /D_WINDOWS /GR /EHsc")
-        // Upstream v0.6.0 uses POSIX fseeko/ftello, which MSVC spells _fseeki64/_ftelli64.
-        .cxxflag("/Dfseeko=_fseeki64")
-        .cxxflag("/Dftello=_ftelli64")
-        .build_target("parakeet");
+        config.cflag("/DWIN32 /D_WINDOWS")
+            .cxxflag("/DWIN32 /D_WINDOWS /GR /EHsc")
+            // Upstream v0.6.0 uses POSIX fseeko/ftello, which MSVC spells _fseeki64/_ftelli64.
+            .cxxflag("/Dfseeko=_fseeki64")
+            .cxxflag("/Dftello=_ftelli64");
+    }
+    if apple {
+        // Streaming decodes run on the CPU backend, never ggml's BLAS backend, so don't build it.
+        // Accelerate stays on (upstream's default): ggml-cpu uses it for vector math. Metal is off
+        // for now (PATCHES.md), set explicitly so a value cached by an earlier configure can't win.
+        config.define("GGML_BLAS", "OFF").define("PARAKEET_GGML_METAL", "OFF");
+    }
+    config.build_target("parakeet");
     // Upstream applies its in-tree ggml patches (one is a CPU matmul speedup) with bash at
-    // configure time. Point it at Git's bash: a `bash` on PATH may be WSL's, which can't run
-    // against Windows paths. Without bash the build still works, just without that speedup.
-    match git_bash() {
-        Some(bash) => { config.define("BASH_EXECUTABLE", bash); }
-        None => println!("cargo:warning=Git bash not found; building parakeet.cpp without its ggml CPU patches (slower)"),
+    // configure time. On Windows, point it at Git's bash: a `bash` on PATH may be WSL's, which
+    // can't run against Windows paths. Elsewhere CMake finds the system bash itself. Without bash
+    // the build still works, just without that speedup.
+    if cfg!(windows) {
+        match git_bash() {
+            Some(bash) => { config.define("BASH_EXECUTABLE", bash); }
+            None => println!("cargo:warning=Git bash not found; building parakeet.cpp without its ggml CPU patches (slower)"),
+        }
     }
     if let Some(ninja) = find_ninja() {
         // Ninja avoids MSBuild's MAX_PATH failures on deep target directories.
@@ -54,15 +69,17 @@ fn main() {
     }
     let out = config.build();
 
-    let mut dirs: Vec<PathBuf> = ["parakeet.lib", "ggml.lib", "ggml-base.lib", "ggml-cpu.lib"].iter()
-        .map(|lib| find_file(&out.join("build"), lib).unwrap_or_else(|| panic!("{lib} was not produced by the parakeet.cpp build")))
+    let file_name = |lib: &str| if msvc { format!("{lib}.lib") } else { format!("lib{lib}.a") };
+    let mut dirs: Vec<PathBuf> = ["parakeet", "ggml", "ggml-base", "ggml-cpu"].iter()
+        .map(|lib| find_file(&out.join("build"), &file_name(lib)).unwrap_or_else(|| panic!("{} was not produced by the parakeet.cpp build", file_name(lib))))
         .filter_map(|path| path.parent().map(Path::to_path_buf))
         .collect();
     dirs.sort();
     dirs.dedup();
     for dir in dirs { println!("cargo:rustc-link-search=native={}", dir.display()); }
     for lib in ["parakeet", "ggml", "ggml-cpu", "ggml-base"] { println!("cargo:rustc-link-lib=static={lib}"); }
-    println!("cargo:rustc-link-lib=advapi32");
+    if msvc { println!("cargo:rustc-link-lib=advapi32"); }
+    if apple { println!("cargo:rustc-link-lib=framework=Accelerate"); }
 
     cc::Build::new()
         .cpp(true)
