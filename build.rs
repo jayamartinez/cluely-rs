@@ -19,6 +19,12 @@ fn main() {
         );
     }
 
+    // ScreenCaptureKit (macOS desktop audio) is weak-linked so CluelyRS still launches on macOS
+    // before 12.3, which doesn't have it; desktop audio checks the OS version before touching it.
+    if env::var("CARGO_CFG_TARGET_OS").is_ok_and(|os| os == "macos") {
+        println!("cargo:rustc-link-arg=-Wl,-weak_framework,ScreenCaptureKit");
+    }
+
     let msvc = env::var("CARGO_CFG_TARGET_ENV").is_ok_and(|env| env == "msvc");
     let apple = env::var("CARGO_CFG_TARGET_OS").is_ok_and(|os| os == "macos");
 

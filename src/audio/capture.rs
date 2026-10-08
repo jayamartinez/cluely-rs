@@ -6,9 +6,10 @@
 //! canonical chunks on. Nothing here ever runs on the UI thread.
 //!
 //! - `Source::Me` = default input device (microphone)
-//! - `Source::Them` = default output device opened for input, which WASAPI turns into loopback
+//! - `Source::Them` = default output device opened for input, which WASAPI turns into loopback;
+//!   on macOS, everything the system plays, from ScreenCaptureKit (`platform::SystemAudio`)
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{Sender, channel};
 use std::thread::JoinHandle;
@@ -41,6 +42,8 @@ struct Shared {
     levels: [AtomicU32; 2],
     /// Samples dropped because the worker fell behind, per source.
     dropped: [AtomicU64; 2],
+    /// Sources whose capture ended on its own mid-session, with why (user-facing), not yet taken.
+    ended: Mutex<Vec<(Source, String)>>,
 }
 
 pub struct AudioCapture {
@@ -60,7 +63,7 @@ impl AudioCapture {
 
     /// Like `start`, capturing from the chosen devices (system defaults where unset).
     pub fn start_with(sources: &[Source], devices: &Devices, sink: Sender<AudioChunk>) -> anyhow::Result<(Self, Vec<(Source, String)>)> {
-        let shared = Arc::new(Shared { stop: AtomicBool::new(false), levels: Default::default(), dropped: Default::default() });
+        let shared = Arc::new(Shared { stop: AtomicBool::new(false), levels: Default::default(), dropped: Default::default(), ended: Default::default() });
         let session_start = Instant::now();
         let mut capture = Self { shared, threads: Vec::new(), opened: Vec::new() };
         let mut failures = Vec::new();
@@ -85,6 +88,12 @@ impl AudioCapture {
 
     pub fn dropped_samples(&self, source: Source) -> u64 { self.shared.dropped[index(source)].load(Ordering::Relaxed) }
 
+    /// Sources whose capture has ended on its own since the last call, with why. Only macOS
+    /// system audio reports this so far; a WASAPI source that fails just goes quiet.
+    pub fn take_ended(&self) -> Vec<(Source, String)> {
+        std::mem::take(&mut *self.shared.ended.lock().unwrap_or_else(PoisonError::into_inner))
+    }
+
     pub fn stop(mut self) { self.shutdown(); }
 
     fn shutdown(&mut self) {
@@ -99,6 +108,8 @@ impl Drop for AudioCapture {
 
 fn run_source(source: Source, chosen: Option<String>, session_start: Instant, shared: Arc<Shared>, sink: Sender<AudioChunk>,
     ready: Sender<Result<SourceInfo, String>>) {
+    #[cfg(target_os = "macos")]
+    if source == Source::Them { return run_system_audio(session_start, shared, sink, ready); }
     let (device, config) = match open_device(source, chosen.as_deref()) {
         Ok(found) => found,
         Err(error) => { let _ = ready.send(Err(error)); return; }
@@ -188,6 +199,7 @@ fn names<I: Iterator<Item = cpal::Device>>(devices: Result<I, cpal::Error>) -> V
 
 /// Names of the microphones and playback devices on this PC, for the device pickers.
 /// Enumeration can take a moment; call it off the UI thread.
+#[cfg(not(target_os = "macos"))]
 pub fn list_devices() -> DeviceList {
     let host = cpal::default_host();
     DeviceList {
@@ -195,6 +207,19 @@ pub fn list_devices() -> DeviceList {
         playback: names(host.output_devices()),
         default_microphone: host.default_input_device().map(|device| device.to_string()),
         default_playback: host.default_output_device().map(|device| device.to_string()),
+    }
+}
+
+/// The microphones, for the device picker. Desktop audio on macOS is all system audio rather
+/// than a device, so its only option is `SYSTEM_AUDIO`. Call it off the UI thread.
+#[cfg(target_os = "macos")]
+pub fn list_devices() -> DeviceList {
+    let host = cpal::default_host();
+    DeviceList {
+        microphones: names(host.input_devices()),
+        playback: Vec::new(),
+        default_microphone: host.default_input_device().map(|device| device.to_string()),
+        default_playback: Some(SYSTEM_AUDIO.to_string()),
     }
 }
 
@@ -238,4 +263,79 @@ fn build_stream(device: &cpal::Device, format: SampleFormat, config: cpal::Strea
         SampleFormat::I32 => open::<i32>(device, config, push, on_error),
         other => Err(format!("Unsupported device sample format {other:?}.")),
     }
+}
+
+/// The desktop audio "device" on macOS: everything the system plays.
+#[cfg(target_os = "macos")]
+pub const SYSTEM_AUDIO: &str = "System audio";
+/// ScreenCaptureKit converts to the canonical format itself, so the normalizer only passes it on.
+#[cfg(target_os = "macos")]
+const SYSTEM_AUDIO_FORMAT: (u32, u16) = (super::SAMPLE_RATE, 1);
+/// ScreenCaptureKit may deliver nothing while nothing plays. How far system audio may trail the
+/// wall clock before the gap is filled with silence: above its delivery latency, so audio that is
+/// merely late is never mistaken for a pause.
+#[cfg(target_os = "macos")]
+const SYSTEM_AUDIO_SLACK_MS: f64 = 150.0;
+/// Buffers queued between ScreenCaptureKit and the worker before they are dropped (about 2 s).
+#[cfg(target_os = "macos")]
+const SYSTEM_AUDIO_QUEUE: usize = 200;
+
+/// `Source::Them` on macOS: the same contract as the WASAPI path (canonical chunks on the session
+/// clock, silence while nothing plays), from ScreenCaptureKit's timestamped buffers.
+#[cfg(target_os = "macos")]
+fn run_system_audio(session_start: Instant, shared: Arc<Shared>, sink: Sender<AudioChunk>, ready: Sender<Result<SourceInfo, String>>) {
+    use std::sync::mpsc::{RecvTimeoutError, TrySendError, sync_channel};
+
+    use super::gaps::GapFiller;
+    use crate::platform::{SystemAudio, SystemAudioEvent};
+
+    let slot = index(Source::Them);
+    let (rate, channels) = SYSTEM_AUDIO_FORMAT;
+    let session_ms = |at: Instant| at.saturating_duration_since(session_start).as_secs_f64() * 1000.0;
+    let (buffers, inbox) = sync_channel(SYSTEM_AUDIO_QUEUE);
+    let stopped = Arc::new(AtomicBool::new(false));
+    let (counters, ended) = (Arc::clone(&shared), stopped.clone());
+    let stream = SystemAudio::start(rate, channels, move |event| match event {
+        SystemAudioEvent::Audio(buffer) => if let Err(TrySendError::Full(buffer)) = buffers.try_send(buffer) {
+            counters.dropped[slot].fetch_add((buffer.samples.len() / buffer.channels.max(1) as usize) as u64, Ordering::Relaxed);
+        },
+        SystemAudioEvent::Stopped(reason) => {
+            counters.ended.lock().unwrap_or_else(PoisonError::into_inner).push((Source::Them, reason));
+            ended.store(true, Ordering::Relaxed);
+        }
+    });
+    let stream = match stream {
+        Ok(stream) => stream,
+        Err(error) => { let _ = ready.send(Err(error)); return; }
+    };
+    let mut filler = match GapFiller::new(Source::Them, rate, channels, session_ms(stream.started()), SYSTEM_AUDIO_SLACK_MS) {
+        Ok(filler) => filler,
+        Err(error) => { let _ = ready.send(Err(error.to_string())); return; }
+    };
+    let _ = ready.send(Ok(SourceInfo { source: Source::Them, device: SYSTEM_AUDIO.into(), sample_rate: rate, channels }));
+
+    // Why capture ended on its own, for the Live panel; stopping the session isn't reported.
+    let mut failure = None;
+    while !shared.stop.load(Ordering::Relaxed) && !stopped.load(Ordering::Relaxed) {
+        let placed = match inbox.recv_timeout(DRAIN_EVERY) {
+            Ok(buffer) if (buffer.sample_rate, buffer.channels) == SYSTEM_AUDIO_FORMAT => filler.push(session_ms(buffer.captured), &buffer.samples),
+            Ok(buffer) => {
+                eprintln!("system audio arrived as {} Hz x{}, not as configured", buffer.sample_rate, buffer.channels);
+                failure = Some("System audio arrived in an unexpected format.".to_string());
+                break;
+            }
+            Err(RecvTimeoutError::Timeout) => filler.idle(session_ms(Instant::now())),
+            Err(RecvTimeoutError::Disconnected) => break,
+        };
+        match placed {
+            Ok(Some(chunk)) => {
+                shared.levels[slot].store(chunk.rms().to_bits(), Ordering::Relaxed);
+                if sink.send(chunk).is_err() { break; }
+            }
+            Ok(None) => {}
+            Err(error) => { failure = Some(format!("System audio couldn't be converted: {error}")); break; }
+        }
+    }
+    if let Some(reason) = failure { shared.ended.lock().unwrap_or_else(PoisonError::into_inner).push((Source::Them, reason)); }
+    drop(stream);
 }

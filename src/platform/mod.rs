@@ -4,7 +4,8 @@
 //! OS only through this module.
 //!
 //! Each platform file provides the same items: `NativeWindow`, `PreviousFocus`, `Shape` and
-//! the functions `overlay` and `sessions_window` call.
+//! the functions `overlay` and `sessions_window` call. macOS also provides system audio capture
+//! (`SystemAudio`), which `audio::capture` uses where Windows has WASAPI loopback.
 
 #[cfg(windows)]
 mod windows;
@@ -15,3 +16,7 @@ pub use self::windows::*;
 mod macos;
 #[cfg(target_os = "macos")]
 pub use self::macos::*;
+#[cfg(target_os = "macos")]
+mod macos_system_audio;
+#[cfg(target_os = "macos")]
+pub use self::macos_system_audio::{SystemAudio, SystemAudioBuffer, SystemAudioEvent};

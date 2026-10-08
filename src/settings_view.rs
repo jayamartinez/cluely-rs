@@ -432,13 +432,20 @@ impl Overlay {
                 .child(div().text_size(px(12.0)).text_color(theme::muted()).child(if s.stt_provider == SttProvider::Deepgram { "Sent to Deepgram, while Live is on" } else { "On this PC, while Live is on" })))
             .child(switch("transcribe", s.transcribe, |s, v| s.transcribe = v, cx));
         let devices = self.devices.clone().unwrap_or_default();
+        let default_label = |default: Option<&String>| match default {
+            // macOS captures all system audio rather than a device, so that one option is named plainly.
+            #[cfg(target_os = "macos")]
+            Some(name) if name == crate::audio::capture::SYSTEM_AUDIO => name.clone(),
+            Some(name) => format!("Default · {name}"),
+            None => "Default".to_string(),
+        };
         let device_options = |names: &[String], default: Option<&String>| {
-            let mut options = vec![(String::new(), match default { Some(name) => format!("Default · {name}"), None => "Default".to_string() })];
+            let mut options = vec![(String::new(), default_label(default))];
             options.extend(names.iter().map(|name| (name.clone(), name.clone())));
             options
         };
         let value = |chosen: &str, default: Option<&String>| if chosen.is_empty() {
-            match default { Some(name) => format!("Default · {name}"), None => if self.devices_loading { "Loading devices…".into() } else { "Default".into() } }
+            match default { Some(_) => default_label(default), None => if self.devices_loading { "Loading devices…".into() } else { "Default".into() } }
         } else { chosen.to_string() };
         let device_column = |label: &'static str, name: &'static str, on: bool, set_on: fn(&mut Settings, bool), picker: Picker, chosen: &str,
             names: &[String], default: Option<&String>, set: fn(&mut Settings, String), cx: &mut Context<Self>| {
