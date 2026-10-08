@@ -7,16 +7,17 @@
 use std::path::Path;
 use std::process::Command;
 use std::ptr::NonNull;
+use std::sync::atomic::{AtomicU8, Ordering};
 
-use gpui::Window;
+use dispatch2::DispatchQueue;
+use gpui::{Pixels, Size, Window};
 use objc2::MainThreadMarker;
 use objc2::rc::Retained;
 use objc2_app_kit::{
-    NSApplicationActivationOptions, NSEvent, NSRunningApplication, NSScreen, NSView, NSWindow, NSWindowCollectionBehavior,
+    NSApplicationActivationOptions, NSEvent, NSEventModifierFlags, NSRunningApplication, NSScreen, NSView, NSWindow, NSWindowCollectionBehavior,
     NSWindowSharingType, NSWindowStyleMask, NSWorkspace,
 };
-use objc2_core_graphics::{CGEventFlags, CGEventSource, CGEventSourceStateID, CGMouseButton};
-use objc2_foundation::NSPoint;
+use objc2_foundation::{NSPoint, NSRect, NSSize};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 /// The overlay's own window. `native_window` keeps a strong reference for the rest of the
@@ -65,6 +66,26 @@ pub fn set_topmost(window: NativeWindow) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Resize to `size` (logical pixels, which are points here) keeping the top edge in place, as on
+/// Windows. GPUI's resize keeps AppKit's bottom-left origin, so a taller overlay would grow upward
+/// off the screen. Like GPUI's, the resize runs on the next turn of the main queue, so AppKit's
+/// resize notifications never re-enter GPUI mid-update.
+pub fn resize(window: &mut Window, native: Option<NativeWindow>, size: Size<Pixels>) {
+    let Some(native) = native else { window.resize(size); return };
+    struct OnMainQueue(NativeWindow);
+    // The main queue runs on the main thread, where the window is used.
+    unsafe impl Send for OnMainQueue {}
+    impl OnMainQueue { fn window(&self) -> &NSWindow { self.0.get() } }
+    let target = OnMainQueue(native);
+    let (width, height) = (f64::from(f32::from(size.width)), f64::from(f32::from(size.height)));
+    DispatchQueue::main().exec_async(move || {
+        let window = target.window();
+        let frame = window.frame();
+        let top = frame.origin.y + frame.size.height;
+        window.setFrame_display(NSRect::new(NSPoint::new(frame.origin.x, top - height), NSSize::new(width, height)), true);
+    });
+}
+
 /// Move by a physical-pixel delta (y down, as on Windows), clamped to the visible frame of the
 /// window's screen (below the menu bar, beside the Dock).
 pub fn move_by(window: NativeWindow, dx: i32, dy: i32) -> std::io::Result<()> {
@@ -82,27 +103,39 @@ pub fn move_by(window: NativeWindow, dx: i32, dy: i32) -> std::io::Result<()> {
     Ok(())
 }
 
-const LEFT_ARROW: u16 = 0x7B;
-const RIGHT_ARROW: u16 = 0x7C;
-const DOWN_ARROW: u16 = 0x7D;
-const UP_ARROW: u16 = 0x7E;
+/// The arrows of the move and scroll shortcuts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Arrow { Up, Down, Left, Right }
 
-fn down(key: u16) -> bool { CGEventSource::key_state(CGEventSourceStateID::CombinedSessionState, key) }
+/// Arrows currently held as part of a move or scroll shortcut (one bit per `Arrow`), recorded from
+/// the shortcuts' own press and release events. Reading the live keyboard state instead would need
+/// the Input Monitoring permission.
+static HELD_ARROWS: AtomicU8 = AtomicU8::new(0);
+
+pub fn set_arrow_held(arrow: Arrow, held: bool) {
+    let bit = 1 << arrow as u8;
+    if held { HELD_ARROWS.fetch_or(bit, Ordering::Relaxed); } else { HELD_ARROWS.fetch_and(!bit, Ordering::Relaxed); }
+}
 
 /// Arrow direction currently held with Control+Option (and Shift exactly when `with_shift`), or
 /// `None` once the chord is released. Global hotkeys fire once per press, so held movement polls
-/// the live keyboard state instead of waiting for repeats.
+/// instead of waiting for repeats: the modifiers from AppKit, the arrows from `set_arrow_held`.
 pub fn held_direction(with_shift: bool) -> Option<(i32, i32)> {
-    let flags = CGEventSource::flags_state(CGEventSourceStateID::CombinedSessionState);
-    if !flags.contains(CGEventFlags::MaskControl) || !flags.contains(CGEventFlags::MaskAlternate)
-        || flags.contains(CGEventFlags::MaskShift) != with_shift { return None; }
-    let axis = |negative, positive| down(positive) as i32 - down(negative) as i32;
-    let direction = (axis(LEFT_ARROW, RIGHT_ARROW), axis(UP_ARROW, DOWN_ARROW));
+    let flags = NSEvent::modifierFlags_class();
+    if !flags.contains(NSEventModifierFlags::Control) || !flags.contains(NSEventModifierFlags::Option) {
+        // A release that arrives after the modifiers are let go can be lost, so start clean.
+        HELD_ARROWS.store(0, Ordering::Relaxed);
+        return None;
+    }
+    if flags.contains(NSEventModifierFlags::Shift) != with_shift { return None; }
+    let held = |arrow: Arrow| HELD_ARROWS.load(Ordering::Relaxed) & (1 << arrow as u8) != 0;
+    let axis = |negative, positive| held(positive) as i32 - held(negative) as i32;
+    let direction = (axis(Arrow::Left, Arrow::Right), axis(Arrow::Up, Arrow::Down));
     (direction != (0, 0)).then_some(direction)
 }
 
 /// Whether the left mouse button is held right now, wherever the pointer is.
-pub fn left_button_down() -> bool { CGEventSource::button_state(CGEventSourceStateID::CombinedSessionState, CGMouseButton::Left) }
+pub fn left_button_down() -> bool { NSEvent::pressedMouseButtons() & 1 != 0 }
 
 /// macOS has no window regions. Outside the drawn shapes the borderless panel is transparent, and
 /// whether clicks reach the overlay is decided per cursor position by `set_mouse_passthrough`.

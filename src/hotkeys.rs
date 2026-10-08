@@ -38,6 +38,18 @@ impl Action {
     /// Ctrl+Enter sends messages in many apps, so Assist is only claimed during a Live session.
     pub fn only_while_live(self) -> bool { matches!(self, Self::Assist) }
 
+    #[cfg(target_os = "macos")]
+    fn arrow(self) -> Option<crate::platform::Arrow> {
+        use crate::platform::Arrow;
+        match self {
+            Self::MoveUp | Self::ScrollUp => Some(Arrow::Up),
+            Self::MoveDown | Self::ScrollDown => Some(Arrow::Down),
+            Self::MoveLeft => Some(Arrow::Left),
+            Self::MoveRight => Some(Arrow::Right),
+            _ => None,
+        }
+    }
+
     fn always(self) -> bool { !self.only_while_visible() && !self.only_while_panel() && !self.only_while_live() }
 }
 
@@ -77,6 +89,11 @@ impl Hotkeys {
         let (sender, receiver) = unbounded();
         let lookup = by_id.clone();
         GlobalHotKeyEvent::set_event_handler(Some(move |event: GlobalHotKeyEvent| {
+            // macOS tracks held movement from these events rather than the live keyboard state.
+            #[cfg(target_os = "macos")]
+            if let Some(arrow) = lookup.get(&event.id).and_then(|action| action.arrow()) {
+                crate::platform::set_arrow_held(arrow, event.state == HotKeyState::Pressed);
+            }
             if event.state == HotKeyState::Pressed && let Some(action) = lookup.get(&event.id) {
                 let _ = sender.unbounded_send(*action);
             }
