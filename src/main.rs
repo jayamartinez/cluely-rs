@@ -4,14 +4,19 @@ use cluely_rs::{assets, hotkeys, input, overlay};
 use gpui::{App, AppContext, Application, Bounds, WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, point, px, size};
 
 #[cfg(target_os = "macos")]
-gpui::actions!(cluely_rs, [Quit]);
+gpui::actions!(cluely_rs, [Quit, OpenSettings]);
 
-/// The app menu, so CluelyRS can be quit with ⌘Q or from the menu bar like any Mac app.
+/// The app menu, so Settings opens with ⌘, and CluelyRS quits with ⌘Q, like any Mac app.
 #[cfg(target_os = "macos")]
 fn app_menu(cx: &mut App) {
     cx.on_action(|_: &Quit, cx| cx.quit());
-    cx.bind_keys([gpui::KeyBinding::new("cmd-q", Quit, None)]);
-    cx.set_menus(vec![gpui::Menu { name: "CluelyRS".into(), items: vec![gpui::MenuItem::action("Quit CluelyRS", Quit)] }]);
+    cx.bind_keys([gpui::KeyBinding::new("cmd-q", Quit, None), gpui::KeyBinding::new("cmd-,", OpenSettings, None)]);
+    cluely_rs::settings_window::bind_keys(cx);
+    cx.set_menus(vec![gpui::Menu { name: "CluelyRS".into(), items: vec![
+        gpui::MenuItem::action("Settings…", OpenSettings),
+        gpui::MenuItem::separator(),
+        gpui::MenuItem::action("Quit CluelyRS", Quit),
+    ] }]);
 }
 
 fn main() {
@@ -42,7 +47,14 @@ fn main() {
             display_id: display.map(|display| display.id()),
             ..Default::default()
         };
-        if let Err(error) = cx.open_window(options, |window, cx| cx.new(|cx| overlay::Overlay::new(hotkeys, presses, window, cx))) {
+        let opened = cx.open_window(options, |window, cx| cx.new(|cx| overlay::Overlay::new(hotkeys, presses, window, cx)));
+        #[cfg(target_os = "macos")]
+        if let Ok(handle) = opened {
+            cx.on_action(move |_: &OpenSettings, cx| {
+                let _ = handle.update(cx, |overlay, window, cx| overlay.open_settings(Default::default(), window, cx));
+            });
+        }
+        if let Err(error) = opened {
             eprintln!("overlay window could not open: {error}");
             cx.quit();
         }

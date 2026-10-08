@@ -3,7 +3,7 @@
 //! (capture hiding) and listening options apply to the running session.
 
 
-use gpui::{Context, Div, Focusable, FontWeight, IntoElement, MouseButton, ParentElement, SharedString, Styled, Window, deferred, div, prelude::*, px};
+use gpui::{AnyElement, App, Context, Div, Focusable, FontWeight, IntoElement, MouseButton, ParentElement, SharedString, Styled, Window, deferred, div, prelude::*, px};
 
 use crate::archive::Retention;
 use crate::chat::SubscriptionStatus;
@@ -31,6 +31,22 @@ impl Tab {
 /// `Composer` is the model switcher in the Live panel's composer bar.
 pub enum Picker { CodexModel, ClaudeModel, AnswerStyle, ApiProvider, ApiModel, SttProvider, Mic, Desktop, Composer }
 
+/// Like `cx.listener`, but the handler always gets the overlay's own window. On macOS the settings
+/// are shown in their own window, and handlers resize the overlay and start work tied to its
+/// window. When the event comes from the overlay's window, this is exactly `cx.listener`.
+pub(crate) fn listen<E: ?Sized>(cx: &Context<Overlay>, f: impl Fn(&mut Overlay, &E, &mut Window, &mut Context<Overlay>) + 'static)
+    -> impl Fn(&E, &mut Window, &mut App) + 'static {
+    let this = cx.weak_entity();
+    move |event, window, cx| {
+        let Some(own) = this.upgrade().map(|overlay| overlay.read(cx).own_window) else { return };
+        if window.window_handle() == own {
+            this.update(cx, |this, cx| f(this, event, window, cx)).ok();
+        } else {
+            own.update(cx, |_, window, cx| this.update(cx, |this, cx| f(this, event, window, cx))).ok();
+        }
+    }
+}
+
 /// Taller lists scroll.
 pub(crate) const MENU_MAX_HEIGHT: f32 = 300.0;
 
@@ -52,7 +68,7 @@ fn choice<T: Copy + PartialEq + 'static>(
     let mut control = ui::segmented();
     for (index, (value, label)) in options.iter().copied().enumerate() {
         control = control.child(ui::segment((name, index), label, value == current)
-            .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, window, cx| this.update_settings(|s| set(s, value), window, cx))));
+            .on_mouse_down(MouseButton::Left, listen(cx, move |this, _, window, cx| this.update_settings(|s| set(s, value), window, cx))));
     }
     control
 }
@@ -64,7 +80,7 @@ fn field(label: &'static str, control: impl IntoElement) -> Div {
 /// A clickable switch bound to a boolean setting.
 fn switch(name: &'static str, on: bool, set: fn(&mut Settings, bool), cx: &mut Context<Overlay>) -> impl IntoElement {
     div().id(name).flex_none().cursor_pointer()
-        .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, window, cx| { cx.stop_propagation(); this.update_settings(|s| set(s, !on), window, cx) }))
+        .on_mouse_down(MouseButton::Left, listen(cx, move |this, _, window, cx| { cx.stop_propagation(); this.update_settings(|s| set(s, !on), window, cx) }))
         .child(ui::switch(on))
 }
 
@@ -146,20 +162,14 @@ impl Overlay {
             tabs = tabs.child(div().id(("tab", index)).cursor_pointer().pb(px(2.0)).text_size(px(13.0))
                 .when(selected, |label| label.font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).border_b_2().border_color(theme::accent()))
                 .when(!selected, |label| label.text_color(theme::muted()))
-                .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, window, cx| this.open_settings(item, window, cx)))
+                .on_mouse_down(MouseButton::Left, listen(cx, move |this, _, window, cx| this.open_settings(item, window, cx)))
                 .child(item.label()));
         }
         let close = ui::round_button("close-settings").size(px(28.0)).border_1().border_color(theme::hairline())
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| this.close_panels(window, cx)))
+            .on_mouse_down(MouseButton::Left, listen(cx, |this, _, window, cx| this.close_panels(window, cx)))
             .child(ui::icon("icons/close.svg", 12.0, theme::body()));
         let header = ui::panel_header().child(tabs).child(close);
-        let body = match tab {
-            Tab::Model => self.model_tab(cx).into_any_element(),
-            Tab::Listening => self.listening_tab(cx).into_any_element(),
-            Tab::Keys => self.keys_tab().into_any_element(),
-            Tab::Window => self.window_tab(cx).into_any_element(),
-            Tab::History => self.history_tab(cx).into_any_element(),
-        };
+        let body = self.settings_body(tab, cx);
         let mut panel = div().relative().w(px(560.0)).flex().flex_col().rounded(px(18.0)).bg(theme::glass())
             .border_1().border_color(theme::hairline()).overflow_hidden()
             .child(header)
@@ -168,6 +178,27 @@ impl Overlay {
             panel = panel.child(div().px(px(18.0)).pb(px(12.0)).text_size(px(12.0)).text_color(gpui::rgb(0xffb4a8)).child(warning));
         }
         panel.child(self.hits.mark())
+    }
+
+    /// One tab's contents, shared by the overlay's settings panel and the macOS Settings window.
+    pub(crate) fn settings_body(&self, tab: Tab, cx: &mut Context<Self>) -> AnyElement {
+        match tab {
+            Tab::Model => self.model_tab(cx).into_any_element(),
+            Tab::Listening => self.listening_tab(cx).into_any_element(),
+            Tab::Keys => self.keys_tab().into_any_element(),
+            Tab::Window => self.window_tab(cx).into_any_element(),
+            Tab::History => self.history_tab(cx).into_any_element(),
+        }
+    }
+
+    /// A tab's contents for the macOS Settings window. Its dropdowns record their areas in a
+    /// throwaway `Hits`: the overlay's own hit-testing must only see the overlay's controls.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn settings_window_body(&mut self, tab: Tab, cx: &mut Context<Self>) -> AnyElement {
+        let hits = std::mem::take(&mut self.hits);
+        let body = self.settings_body(tab, cx);
+        self.hits = hits;
+        body
     }
 
     pub(crate) fn toggle_picker(&mut self, picker: Picker, cx: &mut Context<Self>) {
@@ -184,7 +215,7 @@ impl Overlay {
         set: fn(&mut Settings, String), cx: &mut Context<Self>) -> Div {
         let open = self.open_picker == Some(picker);
         let mut face = ui::picker(("picker", picker as usize), value, open).relative()
-            .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| { cx.stop_propagation(); this.toggle_picker(picker, cx) }));
+            .on_mouse_down(MouseButton::Left, listen(cx, move |this, _, _, cx| { cx.stop_propagation(); this.toggle_picker(picker, cx) }));
         let mut wrapper = div().relative().w_full();
         if open {
             // The face records where it is, so the list's "click outside" ignores clicks on it
@@ -200,14 +231,14 @@ impl Overlay {
             }, |_, _, _, _| {}).absolute().top_0().left_0().size_full());
             let face_bounds = self.picker_face.clone();
             let mut list = ui::menu().id("menu").relative().w_full().max_h(px(MENU_MAX_HEIGHT)).overflow_y_scroll()
-                .on_mouse_down_out(cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                .on_mouse_down_out(listen(cx, move |this, event: &gpui::MouseDownEvent, _, cx| {
                     if face_bounds.get().is_some_and(|face| face.contains(&event.position)) { return; }
                     this.close_picker(cx);
                 }));
             for (index, (id, label)) in options.into_iter().enumerate() {
                 let chosen = id.clone();
                 list = list.child(ui::menu_item(("item", index), label, id == selected)
-                    .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, window, cx| {
+                    .on_mouse_down(MouseButton::Left, listen(cx, move |this, _, window, cx| {
                         cx.stop_propagation();
                         this.close_picker(cx);
                         let value = chosen.clone();
@@ -237,7 +268,7 @@ impl Overlay {
         for (index, (provider, title, detail)) in providers.into_iter().enumerate() {
             let selected = s.provider == provider;
             list = list.child(ui::row(("provider", index), title, detail, selected)
-                .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, window, cx| this.update_settings(|s| s.provider = provider, window, cx)))
+                .on_mouse_down(MouseButton::Left, listen(cx, move |this, _, window, cx| this.update_settings(|s| s.provider = provider, window, cx)))
                 .child(self.connection_badge(provider, index, cx)));
         }
         let choice = self.model_choice();
@@ -275,11 +306,11 @@ impl Overlay {
                 let mut badge = div().flex().items_center().gap(px(6.0));
                 if self.reveal_accounts && provider == Provider::Codex {
                     badge = badge.child(div().id(("sign-out", index)).cursor_pointer().text_size(px(12.0)).text_color(theme::muted()).hover(|t| t.text_color(theme::body()))
-                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| { cx.stop_propagation(); this.sign_out_codex(window, cx) }))
+                        .on_mouse_down(MouseButton::Left, listen(cx, |this, _, window, cx| { cx.stop_propagation(); this.sign_out_codex(window, cx) }))
                         .child("Sign out"));
                 }
                 badge.child(div().id(("account", index)).cursor_pointer().flex().items_center().gap(px(6.0))
-                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| { cx.stop_propagation(); this.reveal_accounts = !this.reveal_accounts; cx.notify(); }))
+                        .on_mouse_down(MouseButton::Left, listen(cx, |this, _, _, cx| { cx.stop_propagation(); this.reveal_accounts = !this.reveal_accounts; cx.notify(); }))
                         .child(div().font_family(theme::MONO).text_size(px(12.0)).text_color(theme::ok()).px(px(8.0)).py(px(3.0)).rounded(px(6.0)).bg(theme::raised()).child(shown))
                         .child(ui::icon(if self.reveal_accounts { "icons/eye-off.svg" } else { "icons/eye.svg" }, 14.0, theme::muted())))
                     .into_any_element()
@@ -287,7 +318,7 @@ impl Overlay {
             Some(st) if !st.installed => text("CLI not installed".into(), theme::muted()),
             Some(_) => div().id(("sign-in", index)).flex_none().px(px(10.0)).py(px(5.0)).rounded(px(8.0)).bg(theme::accent()).cursor_pointer()
                 .text_size(px(12.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::accent_ink())
-                .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, window, cx| { cx.stop_propagation(); this.sign_in(provider, window, cx) }))
+                .on_mouse_down(MouseButton::Left, listen(cx, move |this, _, window, cx| { cx.stop_propagation(); this.sign_in(provider, window, cx) }))
                 .child(if self.signing_in { "Waiting for browser…" } else { "Sign in" }).into_any_element(),
         }
     }
@@ -345,7 +376,7 @@ impl Overlay {
             let focus = input.clone();
             div().id(id).flex_1().min_w_0().px(px(10.0)).py(px(7.0)).rounded(px(9.0))
                 .bg(theme::field()).border_1().border_color(theme::hairline()).cursor_text()
-                .on_mouse_down(MouseButton::Left, cx.listener(move |_, _, window, cx| window.focus(&focus.focus_handle(cx))))
+                .on_mouse_down(MouseButton::Left, listen(cx, move |_, _, window, cx| window.focus(&focus.focus_handle(cx))))
                 .child(input)
         };
         let mut section = div().flex().flex_col().gap(px(16.0));
@@ -356,17 +387,17 @@ impl Overlay {
                 .child(match &saved { Some(hint) => format!("Saved key {hint}"), None => "No key saved".to_string() });
             if saved.is_some() {
                 status = status.child(div().id("remove-key").cursor_pointer().text_color(gpui::rgb(0xffb4a8))
-                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.remove_key(cx))).child("Remove"));
+                    .on_mouse_down(MouseButton::Left, listen(cx, |this, _, _, cx| this.remove_key(cx))).child("Remove"));
             }
             if !preset.key_page.is_empty() {
                 let page = preset.key_page;
                 status = status.child(div().id("key-page").cursor_pointer().text_color(theme::accent_soft())
-                    .on_mouse_down(MouseButton::Left, cx.listener(move |_, _, _, cx| cx.open_url(page))).child("Get a key ↗"));
+                    .on_mouse_down(MouseButton::Left, listen(cx, move |_, _, _, cx| cx.open_url(page))).child("Get a key ↗"));
             }
             top = top.child(field("API key", div().flex().flex_col().gap(px(6.0))
                 .child(div().flex().items_center().gap(px(8.0))
                     .child(input_box(self.key_input.clone(), "key-box"))
-                    .child(button("save-key", "Save", true).on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.save_key(cx)))))
+                    .child(button("save-key", "Save", true).on_mouse_down(MouseButton::Left, listen(cx, |this, _, _, cx| this.save_key(cx)))))
                 .child(status)));
         }
         section = section.child(top);
@@ -375,7 +406,7 @@ impl Overlay {
         }
         let mut model_row = div().flex().items_center().gap(px(8.0)).child(input_box(self.model_input.clone(), "model-box"))
             .child(button("load-models", if self.models_loading { "Loading…" } else { "Load models" }, false)
-                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| this.load_models(window, cx))));
+                .on_mouse_down(MouseButton::Left, listen(cx, |this, _, window, cx| this.load_models(window, cx))));
         if let Some(notice) = self.key_notice.clone() {
             model_row = model_row.child(div().text_size(px(12.0)).text_color(theme::accent_soft()).child(notice));
         }
@@ -431,17 +462,17 @@ impl Overlay {
             .child(match &saved { Some(hint) => format!("Saved key {hint}"), None => "No key saved".to_string() });
         if saved.is_some() {
             status = status.child(div().id("remove-key").cursor_pointer().text_color(gpui::rgb(0xffb4a8))
-                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.remove_key(cx))).child("Remove"));
+                .on_mouse_down(MouseButton::Left, listen(cx, |this, _, _, cx| this.remove_key(cx))).child("Remove"));
         }
         status = status.child(div().id("key-page").cursor_pointer().text_color(theme::accent_soft())
-            .on_mouse_down(MouseButton::Left, cx.listener(|_, _, _, cx| cx.open_url("https://console.deepgram.com/"))).child("Get a key ↗"));
+            .on_mouse_down(MouseButton::Left, listen(cx, |_, _, _, cx| cx.open_url("https://console.deepgram.com/"))).child("Get a key ↗"));
         let mut row = div().flex().flex_col().gap(px(6.0))
             .child(div().flex().items_center().gap(px(8.0))
                 .child(div().id("key-box").flex_1().min_w_0().px(px(10.0)).py(px(7.0)).rounded(px(9.0))
                     .bg(theme::field()).border_1().border_color(theme::hairline()).cursor_text()
-                    .on_mouse_down(MouseButton::Left, cx.listener(move |_, _, window, cx| window.focus(&focus.focus_handle(cx))))
+                    .on_mouse_down(MouseButton::Left, listen(cx, move |_, _, window, cx| window.focus(&focus.focus_handle(cx))))
                     .child(self.key_input.clone()))
-                .child(button("save-key", "Save", true).on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.save_key(cx)))))
+                .child(button("save-key", "Save", true).on_mouse_down(MouseButton::Left, listen(cx, |this, _, _, cx| this.save_key(cx)))))
             .child(status);
         if let Some(notice) = self.key_notice.clone() {
             row = row.child(div().text_size(px(12.0)).text_color(theme::accent_soft()).child(notice));
@@ -456,13 +487,13 @@ impl Overlay {
                 .child(div().w(px(120.0)).h(px(6.0)).rounded_full().bg(theme::hairline())
                     .child(div().h_full().rounded_full().bg(theme::accent()).w(px(120.0 * progress.clamp(0.0, 1.0) as f32))))
                 .child(div().w(px(36.0)).font_family(theme::MONO).text_size(px(11.0)).text_color(theme::muted()).child(format!("{:.0}%", progress * 100.0)))
-                .child(button("cancel-download", "Cancel", false).on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| { this.cancel_download(); cx.notify(); })))
+                .child(button("cancel-download", "Cancel", false).on_mouse_down(MouseButton::Left, listen(cx, |this, _, _, cx| { this.cancel_download(); cx.notify(); })))
                 .into_any_element()
         } else if self.model_installed {
             div().text_size(px(12.0)).text_color(theme::ok()).child("Installed").into_any_element()
         } else {
             button("download-model", format!("Download {}", model_size_label(&MODEL)), true)
-                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| this.download_model(window, cx)))
+                .on_mouse_down(MouseButton::Left, listen(cx, |this, _, window, cx| this.download_model(window, cx)))
                 .into_any_element()
         };
         let mut row = div().flex().flex_col().gap(px(6.0))
@@ -471,7 +502,7 @@ impl Overlay {
                     .child(div().text_size(px(13.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child("Parakeet Realtime · English"))
                     .child(div().id("model-license").cursor_pointer().text_size(px(12.0)).text_color(theme::muted()).truncate()
                         .hover(|t| t.text_color(theme::accent_soft()))
-                        .on_mouse_down(MouseButton::Left, cx.listener(|_, _, _, cx| cx.open_url(MODEL.license_url)))
+                        .on_mouse_down(MouseButton::Left, listen(cx, |_, _, _, cx| cx.open_url(MODEL.license_url)))
                         .child(format!("{} · NVIDIA Open Model License", model_size_label(&MODEL)))))
                 .child(trailing));
         if let Some(notice) = self.model_notice.clone() {
@@ -535,8 +566,8 @@ impl Overlay {
         }).unwrap_or_default();
         rows.child(div().flex().items_center().justify_between().pt(px(10.0))
             .child(div().flex().gap(px(8.0))
-                .child(button("view-history", "Open sessions", true).on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.open_sessions(cx))))
-                .child(button("open-archive", "Open folder", false).on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, _| this.reveal_archive()))))
+                .child(button("view-history", "Open sessions", true).on_mouse_down(MouseButton::Left, listen(cx, |this, _, _, cx| this.open_sessions(cx))))
+                .child(button("open-archive", "Open folder", false).on_mouse_down(MouseButton::Left, listen(cx, |this, _, _, _| this.reveal_archive()))))
             .child(div().text_size(px(12.0)).text_color(theme::muted()).child(size)))
     }
 
