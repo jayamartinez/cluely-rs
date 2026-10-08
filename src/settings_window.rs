@@ -3,6 +3,9 @@
 //! tabs' contents are the overlay's own settings (`settings_view`) drawn here; Windows keeps them in
 //! the overlay's panel.
 
+use std::cell::Cell;
+use std::rc::Rc;
+
 use gpui::{
     AnyElement, App, AppContext, Bounds, Context, Entity, FocusHandle, FontWeight, InteractiveElement, IntoElement, KeyBinding, MouseButton,
     ParentElement, Render, Styled, Subscription, TitlebarOptions, Window, WindowBounds, WindowKind, WindowOptions, div, point, prelude::*, px,
@@ -35,6 +38,14 @@ pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([KeyBinding::new("cmd-w", CloseSettings, Some("SettingsWindow"))]);
 }
 
+/// The window's width; its height follows the open tab.
+const WIDTH: f32 = 760.0;
+/// The shortest the window gets, and how much of the screen's height it leaves free at most.
+const MIN_HEIGHT: f32 = 420.0;
+const SCREEN_MARGIN: f32 = 120.0;
+/// The Modes page's window height (its columns scroll).
+const MODES_HEIGHT: f32 = 640.0;
+
 pub struct SettingsWindow {
     overlay: Entity<Overlay>,
     page: Page,
@@ -42,6 +53,8 @@ pub struct SettingsWindow {
     native: Option<NativeWindow>,
     /// The capture exclusion last applied, so it is only set when the setting changes.
     capture_hidden: Option<bool>,
+    /// The toolbar's and the tab's laid-out heights, so the window can fit the tab without scrolling.
+    heights: Rc<Cell<(f32, f32)>>,
     _overlay_changed: Subscription,
 }
 
@@ -59,7 +72,7 @@ pub fn open(overlay: &mut Overlay, tab: Tab, cx: &mut Context<Overlay>) {
             return;
         }
         let options = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(760.0), px(640.0)), cx))),
+            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(WIDTH), px(640.0)), cx))),
             titlebar: Some(TitlebarOptions { title: Some("Settings".into()), appears_transparent: true, traffic_light_position: Some(point(px(14.0), px(14.0))) }),
             kind: WindowKind::Normal,
             is_resizable: false,
@@ -93,7 +106,7 @@ impl SettingsWindow {
             true
         });
         let _overlay_changed = cx.observe(&overlay, |_, _, cx| cx.notify());
-        Self { overlay, page, focus, native: platform::native_window(window), capture_hidden: None, _overlay_changed }
+        Self { overlay, page, focus, native: platform::native_window(window), capture_hidden: None, heights: Rc::default(), _overlay_changed }
     }
 
     fn select(&mut self, page: Page, cx: &mut Context<Self>) {
@@ -105,6 +118,21 @@ impl SettingsWindow {
             let _ = own.update(cx, |_, window, cx| overlay.update(cx, |overlay, cx| overlay.prepare_tab(tab, window, cx)));
         }
         cx.notify();
+    }
+
+    /// Grow or shrink to show the whole tab, as Mac settings windows do, keeping the top edge in
+    /// place. A tab taller than the screen allows scrolls.
+    fn fit_to_tab(&self, window: &mut Window, cx: &App) {
+        let (toolbar, tab) = self.heights.get();
+        if toolbar <= 0.0 { return; }
+        // Modes lays out its own scrolling columns in the window it is given.
+        let tab = if self.page == Page::Settings(Tab::Modes) { MODES_HEIGHT - toolbar } else { tab };
+        if tab <= 0.0 { return; }
+        let screen = window.display(cx).map_or(f32::MAX, |display| f32::from(display.bounds().size.height) - SCREEN_MARGIN);
+        let wanted = (toolbar + tab).ceil().clamp(MIN_HEIGHT, screen.max(MIN_HEIGHT));
+        if (wanted - f32::from(window.viewport_size().height)).abs() > 1.0 {
+            platform::resize(window, self.native, size(px(WIDTH), px(wanted)));
+        }
     }
 
     /// Settings show accounts and keys, so while the overlay hides from screen capture, so do they.
@@ -158,16 +186,30 @@ impl Render for SettingsWindow {
             Page::Settings(tab) => self.overlay.update(cx, |overlay, cx| overlay.settings_window_body(tab, cx)),
             Page::About => self.about(),
         };
+        self.fit_to_tab(window, cx);
+        let heights = self.heights.clone();
+        let measure = move |toolbar: bool| {
+            let heights = heights.clone();
+            gpui::canvas(move |bounds, window, _| {
+                let (old_toolbar, old_tab) = heights.get();
+                let height = f32::from(bounds.size.height);
+                let new = if toolbar { (height, old_tab) } else { (old_toolbar, height) };
+                if new != (old_toolbar, old_tab) {
+                    heights.set(new);
+                    window.refresh();
+                }
+            }, |_, _, _, _| {}).absolute().top_0().left_0().size_full()
+        };
         div().size_full().flex().flex_col().bg(rgb(0x0f1012)).font_family(theme::FONT).text_color(theme::text())
             .key_context("SettingsWindow").track_focus(&self.focus)
             .on_action(cx.listener(|this, _: &CloseSettings, window, cx| {
                 closed(&this.overlay, cx);
                 window.remove_window();
             }))
-            .child(self.toolbar(title, cx))
+            .child(div().relative().child(self.toolbar(title, cx)).child(measure(true)))
             // Modes fills the window with its own scrolling columns; other pages are a centred column.
             .child(if self.page == Page::Settings(Tab::Modes) { div().id("settings-page").flex_1().min_h_0().flex().child(body) }
                 else { div().id("settings-page").flex_1().min_h_0().overflow_y_scroll()
-                    .child(div().w(px(600.0)).mx_auto().pt(px(22.0)).pb(px(28.0)).child(body)) })
+                    .child(div().relative().w(px(600.0)).mx_auto().pt(px(22.0)).pb(px(28.0)).child(body).child(measure(false))) })
     }
 }
