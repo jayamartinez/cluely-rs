@@ -11,7 +11,7 @@ use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 pub enum Action {
     Assist,
     Live,
-    /// Jump into the composer to type without clicking.
+    /// Jump into the composer to type without clicking; pressed while typing there, jump back out.
     Focus,
     Toggle,
     MoveUp,

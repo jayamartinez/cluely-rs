@@ -34,7 +34,7 @@ paths are deep, so in a long folder path run `git config --global core.longpaths
 | Shortcut | Action |
 |---|---|
 | `Ctrl Shift ↵` | Start / stop a Live session |
-| `Ctrl Shift Space` | Jump into the text box (Enter sends and returns you to your app; Esc returns without sending) |
+| `Ctrl Shift Space` | Jump into the text box; press again to return to your app, keeping what you typed (Enter sends and returns you to your app; Esc returns without sending) |
 | `Ctrl ↵` | Assist: answer from your screen and the conversation (only while Live) |
 | `Ctrl \` | Show / hide the overlay |
 | `Ctrl Alt ←↑↓→` | Move the overlay (hold to glide) |
