@@ -7,7 +7,7 @@ pub mod report;
 use std::path::PathBuf;
 
 pub use recorder::{Context, LatencyRecorder, Mark, SourceTag, Stage, export_enabled, read_jsonl};
-pub use report::{KEY_SPANS, Summary, durations, summarize};
+pub use report::{KEY_SPANS, Speculation, Summary, durations, speculation, summarize, what_if};
 
 /// Where exported metrics go: `%LOCALAPPDATA%\CluelyRS\metrics` (machine-local, never synced).
 pub fn metrics_dir() -> Option<PathBuf> {
