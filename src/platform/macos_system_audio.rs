@@ -113,6 +113,8 @@ impl SystemAudio {
             let filter = SCContentFilter::initWithDisplay_excludingWindows(SCContentFilter::alloc(), &display, &NSArray::new());
             let config = SCStreamConfiguration::new();
             config.setCapturesAudio(true);
+            // macOS attributes audio to the responsible app, so a development build run from a
+            // terminal also leaves out sounds started from that terminal (e.g. `afplay`).
             config.setExcludesCurrentProcessAudio(true);
             config.setSampleRate(sample_rate as isize);
             config.setChannelCount(channels as isize);
