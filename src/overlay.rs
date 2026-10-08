@@ -224,6 +224,8 @@ impl Overlay {
             model_installed: false, model_download: None, model_notice: None,
             open_picker: None, reveal_accounts: false, devices: None, devices_loading: false, archive_bytes: None, picker_face: Rc::default(), smart_hover: false };
         overlay.refresh_model_status();
+        #[cfg(target_os = "macos")]
+        overlay.update_dock();
         if start_live { overlay.set_live(true, window, cx); }
         overlay
     }
@@ -236,6 +238,8 @@ impl Overlay {
         if let Some(native) = self.native && previous.hide_from_capture != self.store.value.hide_from_capture {
             apply_capture_setting(native, &self.store.value);
         }
+        #[cfg(target_os = "macos")]
+        if previous.show_in_dock != self.store.value.show_in_dock { self.update_dock(); }
         if previous.api_provider != self.store.value.api_provider {
             // Each provider keeps its own model; show the one saved for the new provider.
             let model = self.store.value.api_model().to_string();
@@ -262,6 +266,14 @@ impl Overlay {
         }
     }
 
+    /// In the Dock only while "Show in Dock" is on. CluelyRS stays out of it while Settings is open
+    /// too: tools that quit apps whose last window closes (and so would quit CluelyRS when Settings
+    /// closes) leave apps outside the Dock alone. Settings handles ⌘W and ⌘Q itself.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn update_dock(&self) {
+        platform::set_in_dock(self.store.value.show_in_dock);
+    }
+
     /// Refresh what a settings tab shows (accounts, devices, history size) as it opens.
     pub(crate) fn prepare_tab(&mut self, tab: Tab, window: &mut Window, cx: &mut Context<Self>) {
         self.open_picker = None;
@@ -274,6 +286,19 @@ impl Overlay {
     pub fn open_sessions(&mut self, cx: &mut Context<Self>) {
         let Some(root) = self.archive.as_ref().map(|archive| archive.root().to_path_buf()) else { return };
         let _ = std::fs::create_dir_all(&root);
+        // On macOS, bring CluelyRS forward first: GPUI deadlocks when a window becomes key while its
+        // app isn't active (it resigns key status while holding the window's lock), and CluelyRS is
+        // usually not the active app. Done on the next turn, after this click, as for Settings.
+        #[cfg(target_os = "macos")]
+        {
+            let (overlay, mut handle, codex) = (cx.entity(), self.sessions_window, self.codex.clone());
+            cx.defer(move |cx| {
+                cx.activate(true);
+                sessions_window::open(&mut handle, root, codex, cx);
+                overlay.update(cx, |overlay, _| overlay.sessions_window = handle);
+            });
+        }
+        #[cfg(not(target_os = "macos"))]
         sessions_window::open(&mut self.sessions_window, root, self.codex.clone(), cx);
     }
 

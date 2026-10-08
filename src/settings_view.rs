@@ -110,6 +110,17 @@ fn answer_early(s: &Settings, cx: &mut Context<Overlay>) -> Div {
             switch("auto-answer", s.auto_answer, |s, v| s.auto_answer = v, cx)))
 }
 
+/// Settings → Window → Dock (macOS).
+fn dock_section(s: &Settings, cx: &mut Context<Overlay>) -> Div {
+    div().flex().flex_col().gap(px(12.0)).pt(px(16.0)).border_t_1().border_color(gpui::rgb(0x23262a))
+        .child(ui::section_label("DOCK"))
+        .child(switch_row("Show in Dock", "Off by default, like the Windows overlay staying out of the taskbar",
+            switch("show-in-dock", s.show_in_dock, |s, v| s.show_in_dock = v, cx)))
+        .child(div().flex().gap(px(8.0)).text_size(px(12.0)).line_height(px(16.0)).text_color(theme::muted())
+            .child(div().pt(px(1.0)).child(ui::icon("icons/info.svg", 13.0, theme::muted())))
+            .child(div().flex_1().min_w_0().child("When hidden, CluelyRS isn't in the Dock or ⌘Tab; quit from Settings › About, or with ⌘Q while Settings is open.")))
+}
+
 fn button(id: &'static str, label: impl Into<SharedString>, primary: bool) -> gpui::Stateful<Div> {
     let base = div().id(id).flex_none().px(px(12.0)).py(px(6.0)).rounded(px(9.0)).cursor_pointer().text_size(px(12.0)).font_weight(FontWeight::SEMIBOLD).child(label.into());
     if primary { base.bg(theme::accent()).text_color(theme::accent_ink()) } else { base.border_1().border_color(theme::hairline()).text_color(theme::body()) }
@@ -577,6 +588,7 @@ impl Overlay {
             .child(ui::setting_row("Hide from screen capture", switch("hide-capture", s.hide_from_capture, |s, v| s.hide_from_capture = v, cx)))
             .child(ui::setting_row("Attach a screenshot to every message", switch("screen-on-send", s.screen_on_send, |s, v| s.screen_on_send = v, cx)))
             .child(ui::setting_row("Start Live when the app opens", switch("live-on-launch", s.start_live_on_launch, |s, v| s.start_live_on_launch = v, cx)).border_b_0())
+            .when(cfg!(target_os = "macos"), |tab| tab.child(dock_section(s, cx)))
     }
 }
 

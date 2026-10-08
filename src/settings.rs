@@ -73,6 +73,9 @@ pub struct Settings {
     pub hide_from_capture: bool,
     pub screen_on_send: bool,
     pub start_live_on_launch: bool,
+    /// macOS: show CluelyRS in the Dock and ⌘Tab. Off keeps it out, as the Windows overlay stays
+    /// out of the taskbar.
+    pub show_in_dock: bool,
     /// Keep each Live session's transcript and answers in local history.
     pub save_sessions: bool,
     /// Also keep the screenshots attached to answers.
@@ -88,7 +91,7 @@ impl Default for Settings {
             answer_style: AnswerStyle::default(), smart_mode: false, speculative_answers: false, auto_answer: false, transcribe: true, stt_provider: SttProvider::default(),
             listen_mic: true, listen_desktop: true,
             mic_device: String::new(), desktop_device: String::new(),
-            hide_from_capture: true, screen_on_send: true, start_live_on_launch: false,
+            hide_from_capture: true, screen_on_send: true, start_live_on_launch: false, show_in_dock: false,
             save_sessions: true, save_screenshots: true, keep_sessions: Retention::default(),
         }
     }
