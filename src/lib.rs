@@ -30,6 +30,7 @@ pub mod settings_view;
 #[cfg(target_os = "macos")]
 pub mod settings_window;
 pub mod stt;
+pub mod text_area;
 pub mod theme;
 pub mod toggles;
 pub mod transcript;

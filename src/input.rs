@@ -36,6 +36,8 @@ pub struct TextInput {
     content: SharedString,
     placeholder: SharedString,
     masked: bool,
+    /// Text size and line height, in pixels.
+    text_size: (f32, f32),
     selected_range: Range<usize>,
     selection_reversed: bool,
     marked_range: Option<Range<usize>>,
@@ -86,6 +88,7 @@ impl TextInput {
             content: SharedString::default(),
             placeholder: placeholder.into(),
             masked: false,
+            text_size: (TEXT_SIZE, LINE_HEIGHT),
             selected_range: 0..0,
             selection_reversed: false,
             marked_range: None,
@@ -125,6 +128,12 @@ impl TextInput {
     pub fn set_placeholder(&mut self, placeholder: impl Into<SharedString>, cx: &mut Context<Self>) {
         self.placeholder = placeholder.into();
         cx.notify();
+    }
+
+    /// Larger or smaller text than the default 13 px on 20 px lines (a title being renamed).
+    pub fn with_text_size(mut self, size: f32, line_height: f32) -> Self {
+        self.text_size = (size, line_height);
+        self
     }
 
     pub fn masked(mut self, masked: bool) -> Self {
@@ -569,8 +578,8 @@ impl Render for TextInput {
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .font_family(theme::FONT)
-            .text_size(px(TEXT_SIZE))
-            .line_height(px(LINE_HEIGHT))
+            .text_size(px(self.text_size.0))
+            .line_height(px(self.text_size.1))
             .text_color(theme::text())
             .overflow_hidden()
             .child(TextElement { input: cx.entity() })
@@ -586,7 +595,7 @@ fn single_line(text: &str) -> String {
 }
 
 /// Converts a UTF-16 range inside `text` to a byte range (clamped to `text`).
-fn utf16_range_in(text: &str, range: &Range<usize>) -> Range<usize> {
+pub(crate) fn utf16_range_in(text: &str, range: &Range<usize>) -> Range<usize> {
     let to_utf8 = |target: usize| {
         let (mut utf8, mut utf16) = (0, 0);
         for ch in text.chars() {
@@ -666,11 +675,11 @@ fn cluster_starts(text: &str) -> Vec<usize> {
     starts
 }
 
-fn previous_boundary(text: &str, offset: usize) -> usize {
+pub(crate) fn previous_boundary(text: &str, offset: usize) -> usize {
     cluster_starts(text).into_iter().rev().find(|&index| index < offset).unwrap_or(0)
 }
 
-fn next_boundary(text: &str, offset: usize) -> usize {
+pub(crate) fn next_boundary(text: &str, offset: usize) -> usize {
     cluster_starts(text).into_iter().find(|&index| index > offset).unwrap_or(text.len())
 }
 

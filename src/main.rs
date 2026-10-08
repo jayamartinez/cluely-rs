@@ -1,6 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use cluely_rs::{assets, hotkeys, input, overlay};
+use cluely_rs::{assets, hotkeys, input, overlay, text_area};
 use gpui::{App, AppContext, Application, Bounds, WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, point, px, size};
 
 #[cfg(target_os = "macos")]
@@ -22,6 +22,7 @@ fn app_menu(cx: &mut App) {
 fn main() {
     Application::new().with_assets(assets::Assets).run(|cx: &mut App| {
         input::bind_keys(cx);
+        text_area::bind_keys(cx);
         #[cfg(target_os = "macos")]
         app_menu(cx);
         // Hotkeys must be created on this (the GPUI main) thread so its message loop serves them.
