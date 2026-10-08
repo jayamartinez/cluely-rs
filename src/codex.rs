@@ -1825,6 +1825,10 @@ impl CodexClient {
         };
         loop {
             if cancel.load(Ordering::Relaxed) {
+                // Cancelled before the server acknowledged the turn (a speculative answer replaced
+                // by a newer line): wait for the acknowledgement so the turn can be interrupted by
+                // id, rather than stopping the app-server and the session's warm thread with it.
+                if tracker.turn_id.is_none() && !tracker.finished { self.await_acknowledgement(&rx, start, started_at, &mut tracker); }
                 return Err(self.abort_turn(connection, &tracker, start, err(Kind::Cancelled)));
             }
             let elapsed = started_at.elapsed();
@@ -1845,6 +1849,24 @@ impl CodexClient {
                 Ok(TurnStep::Done(text)) => return Ok(text),
                 Ok(TurnStep::Continue) => {}
                 Err(error) => return Err(self.abort_turn(connection, &tracker, start, error)),
+            }
+        }
+    }
+
+    /// Reads the turn's events, showing nothing, until the server acknowledges it, the turn
+    /// ends, or the request limit since it was sent passes.
+    fn await_acknowledgement(&self, rx: &Receiver<Event>, start: u64, started_at: Instant, tracker: &mut TurnTracker) {
+        let mut hidden = |_: &str| {};
+        while tracker.turn_id.is_none() && !tracker.finished {
+            let Some(left) = self.limits.request.checked_sub(started_at.elapsed()) else { return };
+            match rx.recv_timeout(left.min(self.limits.poll)) {
+                Ok(Event::Response(id, outcome)) if id == start => match outcome {
+                    Ok(result) => { if tracker.on_started(&result, &mut hidden).is_err() { return; } }
+                    Err(_) => return,
+                },
+                Ok(Event::Notification(method, params)) => { if tracker.on_notification(&method, &params, &mut hidden).is_err() { return; } }
+                Ok(Event::Closed(_)) | Err(RecvTimeoutError::Disconnected) => return,
+                Ok(Event::Response(..)) | Err(RecvTimeoutError::Timeout) => {}
             }
         }
     }
@@ -2710,6 +2732,56 @@ pub(crate) mod tests {
         assert_eq!(interrupt["params"], json!({ "threadId": "thr_1", "turnId": "turn_1" }));
         assert_eq!(launcher.killed.load(Ordering::SeqCst), 0);
         assert_eq!(codex.stream(&request(), &AtomicBool::new(true), &mut |_| {}).unwrap_err(), "Cancelled.");
+    }
+
+    /// A speculative answer is cancelled the moment a newer line arrives, often before the
+    /// server has acknowledged its turn. That turn must be interrupted by id once the
+    /// acknowledgement comes, not by stopping the app-server: the next answer would pay for
+    /// starting it again and lose the session's warm thread.
+    #[test]
+    fn cancelling_before_the_turn_is_acknowledged_keeps_the_app_server_and_thread() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let base = server(chatgpt(), good_thread(), vec![delta("turn_1", "m", "late"), completed("completed")]);
+        let (flip, turns) = (cancel.clone(), AtomicUsize::new(0));
+        let launcher = Arc::new(FakeLauncher::new(move |message: &Value| {
+            // The first turn is cancelled while its acknowledgement is still on the way.
+            if message["method"] == "turn/start" && turns.fetch_add(1, Ordering::SeqCst) == 0 {
+                flip.store(true, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            base(message)
+        }));
+        let codex = client(&launcher);
+        let mut thread = None;
+        let mut shown = String::new();
+        let error = codex.stream_turn(&mut thread, &request(), &cancel, &mut |delta| shown.push_str(delta)).unwrap_err();
+        assert_eq!(error, "Cancelled.");
+        assert!(shown.is_empty(), "{shown}");
+        let interrupt = lock(&launcher.received).iter().find(|m| m["method"] == "turn/interrupt").cloned();
+        assert_eq!(interrupt.map(|m| m["params"].clone()), Some(json!({ "threadId": "thr_1", "turnId": "turn_1" })));
+        assert_eq!(launcher.killed.load(Ordering::SeqCst), 0);
+        // The same app-server and thread take the next turn.
+        codex.stream_turn(&mut thread, &request(), &AtomicBool::new(false), &mut |_| {}).unwrap();
+        assert_eq!(launcher.launches.load(Ordering::SeqCst), 1);
+        assert_eq!(methods(&launcher).iter().filter(|m| *m == "thread/start").count(), 1);
+    }
+
+    /// A turn that is never acknowledged may still be running somewhere, so cancelling it still
+    /// stops the process once the request limit has passed.
+    #[test]
+    fn cancelling_a_turn_that_is_never_acknowledged_stops_the_process() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let base = server(chatgpt(), good_thread(), vec![]);
+        let flip = cancel.clone();
+        let launcher = Arc::new(FakeLauncher::new(move |message: &Value| {
+            if message["method"] == "turn/start" { flip.store(true, Ordering::SeqCst); return vec![]; }
+            base(message)
+        }));
+        let codex = client(&launcher);
+        let error = codex.stream_turn(&mut None, &request(), &cancel, &mut |_| {}).unwrap_err();
+        assert_eq!(error, "Cancelled.");
+        assert!(!methods(&launcher).contains(&"turn/interrupt".to_string()));
+        assert!(launcher.killed.load(Ordering::SeqCst) >= 1);
     }
 
     #[test]

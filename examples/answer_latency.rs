@@ -11,6 +11,9 @@
 //!   cargo run --example answer_latency -- --list   # the Codex model list and default (no prompt sent)
 //!   cargo run --example answer_latency -- --speculate 1500   # a speculative answer starts when the
 //!       question is committed and Assist is pressed 1500 ms later: times press → first visible words
+//!       and the speculative answer's own start → first words
+//!   cargo run --example answer_latency -- --speculate 1500 --after-answer   # as in the app: one answer
+//!       on the session's thread first, then the speculative one on its own thread (TWO requests)
 //!
 //! Every run makes ONE real request through your ChatGPT/Claude subscription or API key and
 //! counts against its usage. Never run it automatically.
@@ -54,7 +57,8 @@ fn main() {
             Provider::ApiKey => { settings.api_models.insert(settings.api_provider.clone(), model.clone()); }
         }
     }
-    let mut session = ReasoningSession::new(CodexClient::new(), None);
+    let recorder = cluely_rs::metrics::LatencyRecorder::new(Instant::now());
+    let mut session = ReasoningSession::new(CodexClient::new(), Some(recorder.clone()));
     if args.iter().any(|a| a == "--warm") {
         prewarm(&session, &settings);
     }
@@ -81,6 +85,7 @@ fn main() {
             // The question was just committed: speculation starts on its own prepared thread or
             // process. The user presses Assist `press_after` ms later and the answer is claimed.
             prewarm_speculation(&session, &settings);
+            if args.iter().any(|a| a == "--after-answer") { answer_first(&mut session, &settings, &request); }
             let committed = Instant::now();
             session.speculate(&settings, request, 1).unwrap_or_else(|error| panic!("couldn't start: {error}"));
             std::thread::sleep(Duration::from_millis(press_after));
@@ -97,6 +102,7 @@ fn main() {
                         first.unwrap_or_default().as_secs_f64(), answer.split_whitespace().count(), answer.trim()),
                     Err(error) => println!("speculative answer failed: {error}"),
                 }
+                print_speculation_first_words(&recorder);
                 return;
             }
             (pressed, claimed.replies, first, claimed.text)
@@ -112,6 +118,7 @@ fn main() {
                         first.unwrap_or(total).as_secs_f64(), total.as_secs_f64(), answer.split_whitespace().count(), answer.trim()),
                     Err(error) => println!("failed after {:.2} s: {error}", total.as_secs_f64()),
                 }
+                print_speculation_first_words(&recorder);
                 for (alias, id) in cluely_rs::claude_cli::resolved_models() {
                     println!("claude model: {alias} -> {id} ({})", cluely_rs::claude_cli::model_label(&id));
                 }
@@ -138,6 +145,35 @@ fn prewarm(session: &ReasoningSession, settings: &cluely_rs::settings::Settings)
 }
 
 /// The speculation's own thread or process, prepared as when a question is first heard.
+/// One answer on the session's own thread, as a Live session would have had before.
+fn answer_first(session: &mut ReasoningSession, settings: &cluely_rs::settings::Settings, request: &Request) {
+    let earlier = Request { action: request.action.clone(), question: request.question.clone(), history: Vec::new(),
+        conversation: request.conversation.clone(), screenshot: request.screenshot.clone(), utterance: None };
+    let started = Instant::now();
+    let (_, mut replies) = session.ask(settings, earlier).unwrap_or_else(|error| panic!("couldn't start: {error}"));
+    let mut first = None;
+    while let Some(reply) = futures::executor::block_on(replies.next()) {
+        match reply.event {
+            Event::Delta(_) => { first.get_or_insert(started.elapsed()); }
+            Event::Done(result) => {
+                println!("earlier answer on the session's thread: first words {:.2} s ({})", first.unwrap_or_default().as_secs_f64(),
+                    if result.is_ok() { "done" } else { "failed" });
+                break;
+            }
+        }
+    }
+}
+
+/// The speculative answer's own time to first words, from its marks.
+fn print_speculation_first_words(recorder: &cluely_rs::metrics::LatencyRecorder) {
+    use cluely_rs::metrics::Stage;
+    let marks = recorder.snapshot();
+    let at = |stage| marks.iter().find(|m| m.stage == stage).map(|m| m.at_ms);
+    if let (Some(started), Some(first)) = (at(Stage::SpeculationStarted), at(Stage::SpeculationFirstToken)) {
+        println!("speculative answer: first words {:.2} s after it started", (first - started) / 1000.0);
+    }
+}
+
 fn prewarm_speculation(session: &ReasoningSession, settings: &cluely_rs::settings::Settings) {
     session.prewarm_speculation(settings);
     std::thread::sleep(Duration::from_millis(100));

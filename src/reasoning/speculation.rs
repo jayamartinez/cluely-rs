@@ -8,7 +8,8 @@
 //!    question is stable enough to answer.
 //! 3. **Speculative answers** (opt-in, off by default): a real request to the selected model,
 //!    using the user's subscription or API key, starts when the question is
-//!    committed, or earlier on a settled, finished-looking question, under a budget
+//!    committed, or earlier on a settled, finished-looking question (not on the ChatGPT
+//!    subscription, see [`Budget::early_start_for`]), under a budget
 //!    ([`Planner`]). Pressing Assist shows it at once if the conversation still matches
 //!    ([`context_key`]); otherwise it is cancelled and a fresh answer starts.
 //!
@@ -21,7 +22,7 @@ use std::time::{Duration, Instant};
 
 use super::context::Line;
 use crate::audio::Source;
-use crate::settings::Settings;
+use crate::settings::{Provider, Settings};
 use crate::transcript::intent::assess;
 use crate::transcript::live::QUESTION_THRESHOLD;
 use crate::transcript::state::UtteranceId;
@@ -67,6 +68,14 @@ pub struct Budget {
 
 impl Default for Budget {
     fn default() -> Self { Self { per_minute: 4, early_start: true, max_age: Duration::from_secs(90) } }
+}
+
+impl Budget {
+    /// Whether `provider` starts early. Not on the ChatGPT subscription: an early start is the one
+    /// most often overtaken by more speech and interrupted, and on Codex the turn after an
+    /// interrupted one has sometimes taken 14–16 s to its first words instead of 2–3 s
+    /// (server-side; measured in #16). Waiting for the commit costs little head start.
+    pub fn early_start_for(provider: Provider) -> bool { provider != Provider::Codex }
 }
 
 /// What the planner wants done.
@@ -252,6 +261,17 @@ mod tests {
         let (mut planner, now) = (Planner::new(false, Budget::default()), Instant::now());
         assert_eq!(planner.on_committed(Source::Them, 1, "how would you design a distributed cache", now), [Step::Prepare { utterance: 1 }]);
         assert!(planner.on_provisional(Source::Them, 2, "would you use redis here", "", now).iter().all(|s| matches!(s, Step::Prepare { .. })));
+    }
+
+    #[test]
+    fn the_chatgpt_subscription_waits_for_the_commit() {
+        assert!(!Budget::early_start_for(Provider::Codex));
+        assert!(Budget::early_start_for(Provider::Claude) && Budget::early_start_for(Provider::ApiKey));
+        let budget = Budget { early_start: Budget::early_start_for(Provider::Codex), ..Budget::default() };
+        let (mut planner, now) = (Planner::new(true, budget), Instant::now());
+        let steps = planner.on_provisional(Source::Them, 3, "so how would you design a distributed cache", "", now);
+        assert_eq!(steps, [Step::Prepare { utterance: 3 }]);
+        assert_eq!(planner.on_committed(Source::Them, 3, "so how would you design a distributed cache", now), [Step::Speculate { utterance: 3 }]);
     }
 
     #[test]

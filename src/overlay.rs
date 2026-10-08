@@ -579,6 +579,7 @@ impl Overlay {
         use crate::transcript::live::Update;
         if self.reasoning.is_none() { return Vec::new(); }
         self.planner.enabled = self.store.value.speculative_answers;
+        self.planner.budget.early_start = Budget::early_start_for(self.store.value.provider);
         let now = Instant::now();
         match update {
             Update::Provisional { source, id, stable, unstable } => self.planner.on_provisional(*source, *id, stable, unstable, now),
