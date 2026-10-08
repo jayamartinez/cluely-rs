@@ -2,7 +2,7 @@
 //! reference provider. It sits behind the same [`StreamingAsr`] interface as Parakeet, so
 //! transcript state, endpointing and the overlay are shared; only the audio leaves the PC.
 //!
-//! The API key lives in Windows Credential Manager under the provider id `deepgram` (or
+//! The API key lives in the OS credential store under the provider id `deepgram` (or
 //! `DEEPGRAM_API_KEY` for the replay example). It is never logged or formatted into errors.
 //!
 //! Live test (paid; only runs when you set the variable):
@@ -35,7 +35,7 @@ pub struct Deepgram {
 }
 
 impl Deepgram {
-    /// Uses the key in Credential Manager.
+    /// Uses the key in the OS credential store.
     pub fn from_store() -> Self { Self { key: crate::secrets::get(PROVIDER_ID) } }
 
     pub fn with_key(key: impl Into<String>) -> Self { Self { key: Some(key.into()) } }

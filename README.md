@@ -51,7 +51,7 @@ session, so other apps keep their shortcuts.
   sandbox and an empty working folder.
 - **Claude subscription** through the official Claude Code CLI with tools disabled.
 - **Your API key**: Anthropic, OpenAI, OpenRouter, Google Gemini, xAI, Groq, DeepSeek, Mistral, Together, local Ollama or
-  LM Studio, or any OpenAI-compatible URL. Keys are stored in Windows Credential Manager.
+  LM Studio, or any OpenAI-compatible URL. Keys are stored in Windows Credential Manager or the macOS Keychain.
 
 Answers are short by default (one to three sentences, longer only when the question is genuinely complex) and use
 the least reasoning the provider offers, so the first words stream within a few seconds. When Live starts, the ChatGPT
@@ -67,20 +67,23 @@ toggle and device picker (the system default unless you choose one). Turn **Tran
 conversations** off to keep Live to the screen and typed questions.
 
 **Deepgram** (optional): choose it under *Transcribe with* and save a Deepgram API key (kept in Windows Credential
-Manager). Live audio is then streamed to Deepgram's Nova-3 instead of being transcribed on this PC; everything after
-the recognizer (transcript, endpointing, the overlay) is the same, so the two can be compared with the latency report.
+Manager or the macOS Keychain). Live audio is then streamed to Deepgram's Nova-3 instead of being transcribed on
+this PC; everything after the recognizer (transcript, endpointing, the overlay) is the same, so the two can be compared
+with the latency report.
 
 **Sessions** (clock button in the pill) is a normal window for reviewing past Live sessions: an AI summary at three
 lengths, timeline, transcript, answers and the screenshots they used, plus search and "Ask about this session".
 
 ## Where data lives
 
-| What | Where |
-|---|---|
-| Settings | `%APPDATA%\CluelyRS\settings.json` |
-| Sessions and screenshots | `%APPDATA%\CluelyRS\sessions\` (kept 7 days, 30 days or forever) |
-| API keys | Windows Credential Manager, service `CluelyRS` |
-| Speech models | `%LOCALAPPDATA%\CluelyRS\models\` (downloaded when first needed, ~176 MB for Parakeet) |
+| What | Windows | macOS |
+|---|---|---|
+| Settings | `%APPDATA%\CluelyRS\settings.json` | `~/Library/Application Support/CluelyRS/settings.json` |
+| Sessions and screenshots | `%APPDATA%\CluelyRS\sessions\` | `~/Library/Application Support/CluelyRS/sessions/` |
+| API keys | Windows Credential Manager, service `CluelyRS` | login Keychain, service `CluelyRS` |
+| Speech models | `%LOCALAPPDATA%\CluelyRS\models\` | `~/Library/Application Support/CluelyRS/models/` |
+
+Sessions are kept 7 days, 30 days or forever. Speech models download when first needed (~176 MB for Parakeet).
 
 Nothing is uploaded except the requests sent to the provider you choose.
 
