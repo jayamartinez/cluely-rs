@@ -28,8 +28,7 @@ impl Tab {
 
 /// The dropdowns in Settings; at most one is open.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-/// `Composer` is the model switcher in the Live panel's composer bar.
-pub enum Picker { CodexModel, ClaudeModel, AnswerStyle, ApiProvider, ApiModel, SttProvider, Mic, Desktop, Composer }
+pub enum Picker { CodexModel, ClaudeModel, AnswerStyle, ApiProvider, ApiModel, SttProvider, Mic, Desktop }
 
 /// Like `cx.listener`, but the handler always gets the overlay's own window. On macOS the settings
 /// are shown in their own window, and handlers resize the overlay and start work tied to its
@@ -181,10 +180,10 @@ impl Overlay {
             .child(ui::icon("icons/close.svg", 12.0, theme::body()));
         let header = ui::panel_header().child(tabs).child(close);
         let body = self.settings_body(tab, cx);
-        let mut panel = div().relative().w(px(560.0)).flex().flex_col().rounded(px(18.0)).bg(theme::glass())
+        let mut panel = div().relative().w(px(crate::overlay::CARD_WIDTH)).flex().flex_col().rounded(px(18.0)).bg(theme::glass())
             .border_1().border_color(theme::hairline()).overflow_hidden()
             .child(header)
-            .child(div().id("settings-body").flex().flex_col().px(px(18.0)).pt(px(14.0)).pb(px(20.0)).max_h(px(652.0)).overflow_y_scroll().child(body));
+            .child(div().id("settings-body").flex().flex_col().px(px(18.0)).pt(px(14.0)).pb(px(20.0)).max_h(px(620.0)).overflow_y_scroll().child(body));
         if let Some(warning) = self.store.warning {
             panel = panel.child(div().px(px(18.0)).pb(px(12.0)).text_size(px(12.0)).text_color(gpui::rgb(0xffb4a8)).child(warning));
         }

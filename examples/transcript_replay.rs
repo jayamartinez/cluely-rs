@@ -10,7 +10,7 @@
 //!
 //!   DEEPGRAM_API_KEY=... cargo run --example transcript_replay -- --store-key
 //!
-//! stores that key in Windows Credential Manager (what Settings → Listening does), so the key
+//! stores that key in the OS credential store (what Settings → Listening does), so the key
 //! never has to be typed on a command line in plain text.
 
 use std::sync::Arc;
@@ -40,7 +40,7 @@ fn run() -> anyhow::Result<()> {
     if args.first().map(String::as_str) == Some("--store-key") {
         let key = std::env::var("DEEPGRAM_API_KEY").context("set DEEPGRAM_API_KEY in the environment first")?;
         cluely_rs::secrets::set(deepgram::PROVIDER_ID, &key)?;
-        println!("Deepgram key stored in Windows Credential Manager (service CluelyRS, id {}).", deepgram::PROVIDER_ID);
+        println!("Deepgram key stored in {} (service CluelyRS, id {}).", cluely_rs::secrets::STORE_NAME, deepgram::PROVIDER_ID);
         return Ok(());
     }
     let Some(wav) = args.first() else { bail!("usage: transcript_replay <wav> [--source me|them]") };
@@ -85,6 +85,7 @@ fn run() -> anyhow::Result<()> {
         let wall = start.elapsed().as_secs_f64() * 1000.0;
         match message {
             Message::Status(Status::Failed(reason)) => { println!("  failed: {reason}"); break; }
+            Message::Level { .. } => {}
             Message::Status(status) => println!("  {wall:7.0}  status {status:?}"),
             Message::Transcript(Update::Provisional { stable, unstable, .. }) => println!("  {wall:7.0}  partial   [{stable}] {unstable}"),
             Message::Transcript(Update::QuestionLikely { score, .. }) => println!("  {wall:7.0}  question? {score:.2}"),
