@@ -111,9 +111,8 @@ impl Overlay {
                 if settings_open { this.close_panels(window, cx) } else { this.open_settings(Tab::default(), window, cx) }
             }))
             .child(ui::icon("icons/gear.svg", 17.0, if settings_open { theme::text() } else { theme::muted() }));
+        // The overlay moves with its shortcuts only (Ctrl Alt arrows, ⌃⌥ arrows on macOS), not by dragging.
         div().flex().items_center().gap(px(6.0)).h(px(46.0)).pl(px(16.0)).pr(px(10.0)).bg(rgba(CARD)).rounded_b(px(19.0))
-            // Dragging the toolbar's background moves the overlay.
-            .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())
             .child(div().flex_1().flex().items_center().child(ui::mark(22.0)))
             .child(middle)
             .child(div().flex_1().flex().items_center().justify_end().gap(px(2.0)).child(sessions).child(settings))
