@@ -952,7 +952,7 @@ impl Render for Overlay {
         let mut root = div().size_full().flex().flex_col().items_center().gap(px(10.0)).pt(px(8.0)).pb(px(12.0))
             .font_family(theme::FONT).text_color(theme::text())
             .track_focus(&self.focus)
-            .on_children_prepainted(click_through(self.native, self.hits.clone(), self.shape.clone()))
+            .on_children_prepainted(click_through(self.native, self.hits.clone(), self.shape.clone(), self.settings_tab.is_some()))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 if event.keystroke.key != "escape" { return; }
                 if this.settings_tab.is_some() { this.close_panels(window, cx); }
@@ -1015,16 +1015,17 @@ impl Hits {
     }
 }
 
-/// Shape the window to the interactive controls only (pill, quick actions, composer, settings),
-/// so answers, the transcript ticker and the space around everything are click-through.
-fn click_through(native: Option<NativeWindow>, hits: Hits, applied: Rc<RefCell<Vec<platform::Shape>>>) -> impl Fn(Vec<gpui::Bounds<gpui::Pixels>>, &mut Window, &mut gpui::App) + 'static {
+/// Shape the window to what is visible (the card, Settings, the hint, open popovers), so the space
+/// around them is click-through; inside them `update_passthrough` decides per cursor position.
+/// While Settings is open (`settings_open`) the shape is held at one rectangle around everything
+/// shown since it opened, so collapsing Settings into the conversation never reshapes the window:
+/// changing the window region every frame stalled each frame for 20–80 ms.
+fn click_through(native: Option<NativeWindow>, hits: Hits, applied: Rc<RefCell<Vec<platform::Shape>>>, settings_open: bool) -> impl Fn(Vec<gpui::Bounds<gpui::Pixels>>, &mut Window, &mut gpui::App) + 'static {
     move |children, window, _| {
         let Some(native) = native else { return };
         let scale = window.scale_factor();
         hits.1.set(scale);
         let physical = |value: gpui::Pixels| (f32::from(value) * scale).round() as i32;
-        // The window keeps the shape of everything visible (pill, panel, caption); the space
-        // around them is cut away. Inside the panel, `passthrough` decides per cursor position.
         let floating = hits.floating();
         let shapes: Vec<platform::Shape> = children.iter().map(|bounds| (bounds, false)).chain(floating.iter().map(|bounds| (bounds, true))).map(|(bounds, float)| {
             let height = f32::from(bounds.size.height);
@@ -1032,11 +1033,19 @@ fn click_through(native: Option<NativeWindow>, hits: Hits, applied: Rc<RefCell<V
             (physical(bounds.left()) - 1, physical(bounds.top()) - 1, physical(bounds.right()) + 1, physical(bounds.bottom()) + 1,
                 (radius * scale).round() as i32)
         }).collect();
+        let shapes = if settings_open { vec![enclosing(applied.borrow().iter().chain(&shapes), (18.0 * scale).round() as i32)] } else { shapes };
         if *applied.borrow() != shapes {
             platform::set_shape(native, &shapes);
             *applied.borrow_mut() = shapes;
         }
     }
+}
+
+/// One rounded rectangle around `shapes`.
+fn enclosing<'a>(shapes: impl Iterator<Item = &'a platform::Shape>, radius: i32) -> platform::Shape {
+    shapes.fold((i32::MAX, i32::MAX, i32::MIN, i32::MIN, radius), |(left, top, right, bottom, radius), &(l, t, r, b, _)| {
+        (left.min(l), top.min(t), right.max(r), bottom.max(b), radius)
+    })
 }
 
 pub(crate) fn apply_capture_setting(native: NativeWindow, settings: &Settings) {
@@ -1058,4 +1067,18 @@ fn auto_header(id: u64, heard_ms: u64, streaming: bool, hit: impl IntoElement, c
         .when(streaming, |row| row.child(div().id(("stop-auto", id as usize)).px(px(10.0)).py(px(4.0)).rounded(px(8.0)).border_1().border_color(theme::hairline())
             .cursor_pointer().text_size(px(12.0)).line_height(px(16.0)).font_weight(FontWeight::SEMIBOLD).text_color(gpui::rgb(0xd9d5cc)).relative().child("Stop").child(hit)
             .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| this.stop_turn(id, cx)))))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::enclosing;
+
+    #[test]
+    fn open_settings_hold_one_rectangle_around_every_shape() {
+        let shapes = [(10, 0, 650, 104, 36), (10, 114, 650, 700, 36)];
+        assert_eq!(enclosing(shapes.iter(), 36), (10, 0, 650, 700, 36));
+        // Held across frames: once it encloses everything, a smaller frame doesn't shrink it.
+        let held = enclosing(shapes.iter(), 36);
+        assert_eq!(enclosing([held, (10, 0, 650, 300, 36)].iter(), 36), held);
+    }
 }
