@@ -106,7 +106,7 @@ impl TextInput {
 
     /// Whether typing goes here: the box has focus in a window that has the keyboard. The overlay
     /// keeps the box focused after handing the keyboard back to another app, so focus alone isn't enough.
-    fn has_keyboard(&self, window: &Window) -> bool { self.focus_handle.is_focused(window) && window.is_window_active() }
+    pub(crate) fn has_keyboard(&self, window: &Window) -> bool { self.focus_handle.is_focused(window) && window.is_window_active() }
 
     /// Blink while it has the keyboard; stop (ready to show at once next time) when it doesn't.
     fn keep_blinking(&mut self, window: &mut Window, cx: &mut Context<Self>) {

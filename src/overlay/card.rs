@@ -78,9 +78,18 @@ impl Overlay {
             .child(self.hits.mark())
     }
 
+    /// The Type shortcut toggles: it puts the caret in the text box, or, pressed while the box has
+    /// the keyboard, hands the keyboard back to the previous app as Esc does, keeping what was typed.
+    pub(super) fn type_shortcut(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) {
+        match TypeShortcut::when(self.composer.read(cx).has_keyboard(window)) {
+            TypeShortcut::Enter => self.focus_composer(window, cx),
+            TypeShortcut::Leave => self.return_to_previous_app(),
+        }
+    }
+
     /// A click in the text box gives it the keyboard. The overlay doesn't activate on a click (a
-    /// non-activating panel on macOS), so take it as the Type shortcut does; Esc or sending hands it
-    /// back. Settings stays open: typing there is allowed, and sending collapses it.
+    /// non-activating panel on macOS), so take it as the Type shortcut does; Esc, the shortcut again
+    /// or sending hands it back. Settings stays open: typing there is allowed, and sending collapses it.
     fn focus_text_box(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) {
         if let Some(native) = self.native && let Some(previous) = platform::take_focus(native) { self.return_focus = Some(previous); }
         window.focus(&self.composer.focus_handle(cx));
@@ -142,6 +151,19 @@ impl Overlay {
 
 /// Eased progress (0 to 1) of an animation `elapsed` into one lasting `duration`: ease-out cubic, so
 /// it moves most at the start and settles gently.
+/// What a press of the Type shortcut does, from whether the text box has the keyboard.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TypeShortcut {
+    /// Take the keyboard and put the caret in the text box.
+    Enter,
+    /// Hand the keyboard back to the app the user was in.
+    Leave,
+}
+
+impl TypeShortcut {
+    fn when(text_box_has_keyboard: bool) -> Self { if text_box_has_keyboard { Self::Leave } else { Self::Enter } }
+}
+
 pub(super) fn collapse_eased(elapsed: std::time::Duration, duration: std::time::Duration) -> f32 {
     let t = (elapsed.as_secs_f32() / duration.as_secs_f32().max(f32::EPSILON)).clamp(0.0, 1.0);
     1.0 - (1.0 - t).powi(3)
@@ -151,7 +173,7 @@ pub(super) fn collapse_eased(elapsed: std::time::Duration, duration: std::time::
 mod tests {
     use std::time::Duration;
 
-    use super::collapse_eased;
+    use super::{TypeShortcut, collapse_eased};
 
     #[test]
     fn the_collapse_eases_out_and_ends_exactly_at_one() {
@@ -161,5 +183,11 @@ mod tests {
         assert!(halfway > 0.8 && halfway < 0.9, "{halfway}");
         assert_eq!(collapse_eased(duration, duration), 1.0);
         assert_eq!(collapse_eased(Duration::from_secs(5), duration), 1.0);
+    }
+
+    #[test]
+    fn the_type_shortcut_enters_the_text_box_or_leaves_it_when_typing_there() {
+        assert_eq!(TypeShortcut::when(false), TypeShortcut::Enter);
+        assert_eq!(TypeShortcut::when(true), TypeShortcut::Leave);
     }
 }

@@ -362,7 +362,7 @@ impl Overlay {
             Action::Toggle => self.toggle_visible(),
             Action::Live => self.set_live(self.live_since.is_none(), window, cx),
             Action::Assist => self.send("Assist", String::new(), window, cx),
-            Action::Focus => self.focus_composer(window, cx),
+            Action::Focus => self.type_shortcut(window, cx),
             Action::MoveUp | Action::MoveDown | Action::MoveLeft | Action::MoveRight => self.start_motion(Motion::Move, window, cx),
             Action::ScrollUp | Action::ScrollDown => self.start_motion(Motion::Scroll, window, cx),
             Action::Close => self.close_panels(window, cx),
