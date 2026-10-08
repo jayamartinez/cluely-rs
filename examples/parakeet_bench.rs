@@ -221,6 +221,7 @@ fn read_wav(path: &str) -> anyhow::Result<Vec<f32>> {
     bail!("{path} has no audio data")
 }
 
+#[cfg(windows)]
 fn process_cpu_seconds() -> f64 {
     use windows::Win32::Foundation::FILETIME;
     use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
@@ -232,6 +233,7 @@ fn process_cpu_seconds() -> f64 {
     }
 }
 
+#[cfg(windows)]
 fn working_set_mb() -> f64 {
     use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
     use windows::Win32::System::Threading::GetCurrentProcess;
@@ -240,4 +242,23 @@ fn working_set_mb() -> f64 {
         Ok(()) => counters.WorkingSetSize as f64 / 1_048_576.0,
         Err(_) => f64::NAN,
     }
+}
+
+#[cfg(target_os = "macos")]
+fn process_cpu_seconds() -> f64 {
+    let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
+    if unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) } != 0 { return f64::NAN; }
+    let usage = unsafe { usage.assume_init() };
+    let seconds = |t: libc::timeval| t.tv_sec as f64 + t.tv_usec as f64 / 1e6;
+    seconds(usage.ru_utime) + seconds(usage.ru_stime)
+}
+
+/// Resident memory, the macOS counterpart of the Windows working set.
+#[cfg(target_os = "macos")]
+fn working_set_mb() -> f64 {
+    let mut info = std::mem::MaybeUninit::<libc::proc_taskinfo>::zeroed();
+    let size = size_of::<libc::proc_taskinfo>() as libc::c_int;
+    let written = unsafe { libc::proc_pidinfo(libc::getpid(), libc::PROC_PIDTASKINFO, 0, info.as_mut_ptr().cast(), size) };
+    if written != size { return f64::NAN; }
+    unsafe { info.assume_init() }.pti_resident_size as f64 / 1_048_576.0
 }

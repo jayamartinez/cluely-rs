@@ -985,6 +985,7 @@ dependencies = [
  "gpui",
  "image",
  "keyring",
+ "libc",
  "pulldown-cmark",
  "raw-window-handle",
  "rtrb",

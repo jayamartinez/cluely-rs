@@ -33,7 +33,8 @@ how upstream ships, and how to undo each one.
 
 ### 2. Build configuration (`build.rs`)
 
-These are CMake options and compiler flags, not source changes. To undo one, delete its line in `build.rs`.
+These are CMake options and compiler flags, not source changes. To undo one, delete its line in `build.rs`. The flags
+and `advapi32` below are MSVC-only; macOS differences are listed after them.
 
 - **Removable on upgrade:** `/Dfseeko=_fseeki64 /Dftello=_ftelli64`. v0.6.0 calls the POSIX `fseeko`/`ftello`, which
   MSVC doesn't provide; this maps them to MSVC's 64-bit equivalents. Remove it once upstream builds with MSVC as-is.
@@ -47,6 +48,15 @@ These are CMake options and compiler flags, not source changes. To undo one, del
 - **Git's bash:** `BASH_EXECUTABLE` is pointed at Git for Windows' bash. Upstream applies its own in-tree ggml patches
   with bash at configure time, and one of them speeds up CPU matrix multiplication. Applying them modifies files inside
   `third_party/parakeet.cpp/third_party/ggml`, so `.gitmodules` sets `ignore = dirty` for the submodule.
+- **macOS (Apple clang):** no compiler flags are needed. CMake finds the system bash, so upstream's ggml patches apply as
+  they do on Windows. `GGML_NATIVE=OFF` builds for the macOS arm64 baseline, which every Apple silicon Mac supports.
+  `GGML_BLAS=OFF`: streaming decodes run on ggml's CPU backend, never its BLAS backend. Accelerate stays on (upstream's
+  default) and is linked, because ggml-cpu uses it for vector math.
+- **macOS, Metal off:** parakeet.cpp's Metal backend (`PARAKEET_GGML_METAL`) is left off, as upstream ships it. On an M1 it
+  decodes slightly slower than the CPU, but uses about a ninth of the CPU (measurements below). It can't be turned on by
+  itself: parakeet.cpp keeps a process-wide backend that still holds Metal buffers at exit, and ggml then aborts in
+  `ggml_metal_rsets_free` ("you haven't deallocated all Metal resources before exiting"). Enabling it needs upstream's
+  `pk::shutdown_backend()` exported through the shim and called after the models are dropped, before the process exits.
 
 ### 3. Stream reset after each utterance (provider behaviour)
 
@@ -94,3 +104,28 @@ With OpenMP on, the same 4-thread run used 5.31 cores, at a p95 of ~171 ms.
 
 The provider's two missed EOUs fell in different passes, and its words were identical in every quarter, so no text was
 lost. Endpointing commits on silence when an EOU doesn't arrive.
+
+### Measurements on macOS
+
+Taken on 2026-10-08 on an M1 MacBook Air (4 performance and 4 efficiency cores, no fan), macOS 26.3, with a Rust debug
+build. The input was `dev/make-bench-audio.sh` output (the same questions as the Windows script, in the macOS voice): 30.9 s.
+Numbers are not comparable with the Windows table, because the voice and the machine differ.
+
+**Thread sweep, CPU.** 8 threads spill onto the efficiency cores and are much slower, so the 4-thread default holds.
+
+| Threads | RTF, 1 stream | RTF, 2 streams | p95 per-block decode, 2 streams |
+|---|---|---|---|
+| 2 | 0.212 | 0.360 | 57.5 ms |
+| 4 | 0.187 | 0.368 | 57.7 ms |
+| 8 | 0.591 | 1.367 | 199.5 ms |
+
+**Real time, Me and Them together, 4 threads, 60 s.** `PARAKEET_DEVICE=cpu` forced the CPU in a Metal build.
+
+| Backend | CPU (cores) | EOU latency p50 / p95 | Peak resident memory |
+|---|---|---|---|
+| CPU | 1.18 | ~172 / ~205 ms | 210 MB |
+| Metal | 0.13 | ~183 / ~193 ms | 249 MB |
+
+In the Metal build's sweep, one stream ran at an RTF of 0.222 and two at 0.415 each (4 threads), against 0.187 and 0.368 on
+the CPU.
+
