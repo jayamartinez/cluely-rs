@@ -92,7 +92,9 @@ fn main() {
     cc::Build::new()
         .cpp(true)
         .file("native/parakeet_shim.cpp")
+        .include(source.join("src"))
         .flag_if_supported("/std:c++17")
+        .flag_if_supported("-std=c++17")
         .compile("cluelyrs_parakeet_shim");
 }
 

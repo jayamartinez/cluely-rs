@@ -10,6 +10,9 @@
 //!       and through the provider (which replaces streams after each utterance).
 //!   cargo run --example parakeet_bench -- <wav> realtime [--seconds 120] [--threads 4]
 //!       Me and Them sessions fed at real-time pace: end-of-utterance latency, CPU, memory.
+//!   cargo run --example parakeet_bench -- <wav> switch
+//!       macOS: decode on the GPU, switch to the CPU and back (as Settings › Listening › Use GPU
+//!       does between Live sessions), reporting the speed each time.
 //!
 //! Uses the installed model (`--model <gguf>` to override). Prints results; writes nothing.
 
@@ -37,7 +40,7 @@ fn run() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) == Some("download") { return download(); }
     let (Some(wav), Some(mode)) = (args.first(), args.get(1)) else {
-        bail!("usage: parakeet_bench <wav> sweep|long|realtime [--threads N,..] [--reps N] [--seconds N] [--model PATH]");
+        bail!("usage: parakeet_bench <wav> sweep|long|realtime|switch [--threads N,..] [--reps N] [--seconds N] [--model PATH]");
     };
     let flag = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
     let model = flag("--model").map(PathBuf::from).or_else(|| parakeet::MODEL.path()).context("no model path")?;
@@ -51,6 +54,7 @@ fn run() -> anyhow::Result<()> {
         "sweep" => sweep(&model, &pcm, if flag("--threads").is_some() { &threads } else { &[2, 4, 6, 8] }),
         "long" => long(&model, &pcm, threads[0], flag("--reps").map(|r| r.parse()).transpose()?.unwrap_or(40)),
         "realtime" => realtime(&model, &pcm, threads[0], flag("--seconds").map(|s| s.parse()).transpose()?.unwrap_or(120.0)),
+        "switch" => switch(&model, &pcm, threads[0]),
         other => bail!("unknown mode {other}"),
     }
 }
@@ -60,7 +64,7 @@ fn sweep(model_path: &Path, pcm: &[f32], threads: &[usize]) -> anyhow::Result<()
     println!("\nthreads | 1 stream: RTF  p95 block | 2 streams: RTF (each)  p95 block");
     for &n in threads {
         ffi::set_threads(n);
-        let model = Arc::new(ffi::Model::load(model_path).map_err(anyhow::Error::msg)?);
+        let model = Arc::new(ffi::Model::load(model_path, None).map_err(anyhow::Error::msg)?);
         decode_all(&model, pcm)?; // warm up
         let (rtf1, p95_1) = decode_all(&model, pcm)?;
         let runs: Vec<_> = (0..2).map(|_| { let model = Arc::clone(&model); let pcm = pcm.to_vec();
@@ -88,10 +92,31 @@ fn decode_all(model: &Arc<ffi::Model>, pcm: &[f32]) -> anyhow::Result<(f64, f64)
     Ok((rtf, blocks[(blocks.len() * 95 / 100).min(blocks.len() - 1)]))
 }
 
+/// Loads through the provider with the GPU on, off and on again, each time after the previous
+/// model is gone, and decodes the clip once per device.
+fn switch(model_path: &Path, pcm: &[f32], threads: usize) -> anyhow::Result<()> {
+    // parakeet.cpp logs "pk::Backend using device: ..." each time it creates a GPU backend.
+    println!("\nUse GPU | RTF");
+    for use_gpu in [true, false, true] {
+        let provider = ParakeetRealtime::new(ParakeetConfig { model_path: Some(model_path.to_path_buf()), threads, use_gpu });
+        let (tx, _rx) = mpsc::channel();
+        let mut session = provider.start_session(EventSink::new(Source::Them, Generation(1), tx)).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let start = Instant::now();
+        for (i, block) in pcm.chunks(BLOCK).enumerate() {
+            session.push(&AudioChunk { source: Source::Them, start_ms: (i * BLOCK) as f64 / 16.0, samples: block.to_vec() }).map_err(|e| anyhow::anyhow!("{e}"))?;
+        }
+        session.finish().map_err(|e| anyhow::anyhow!("{e}"))?;
+        let rtf = start.elapsed().as_secs_f64() / (pcm.len() as f64 / 16000.0);
+        let note = if use_gpu && parakeet::gpu_unavailable() { "  (GPU unavailable: ran on the CPU)" } else { "" };
+        println!("{use_gpu:7} | {rtf:.3}{note}");
+    }
+    Ok(())
+}
+
 /// The same audio many times over: how many utterances does each approach still end?
 fn long(model_path: &Path, pcm: &[f32], threads: usize, reps: usize) -> anyhow::Result<()> {
     ffi::set_threads(threads);
-    let model = Arc::new(ffi::Model::load(model_path).map_err(anyhow::Error::msg)?);
+    let model = Arc::new(ffi::Model::load(model_path, None).map_err(anyhow::Error::msg)?);
     let gap = vec![0.0f32; 16000];
     let pass_ms = (pcm.len() + gap.len()) as f64 / 16.0;
     let long: Vec<f32> = (0..reps).flat_map(|_| pcm.iter().chain(&gap).copied()).collect();
@@ -110,7 +135,7 @@ fn long(model_path: &Path, pcm: &[f32], threads: usize, reps: usize) -> anyhow::
     drop(stream);
 
     // Provider: what CluelyRS uses.
-    let provider = ParakeetRealtime::new(ParakeetConfig { model_path: Some(model_path.to_path_buf()), threads });
+    let provider = ParakeetRealtime::new(ParakeetConfig { model_path: Some(model_path.to_path_buf()), threads, ..ParakeetConfig::default() });
     let (tx, rx) = mpsc::channel();
     let mut session = provider.start_session(EventSink::new(Source::Them, Generation(1), tx)).map_err(|e| anyhow::anyhow!("{e}"))?;
     for (i, block) in long.chunks(BLOCK).enumerate() {
@@ -142,7 +167,7 @@ fn long(model_path: &Path, pcm: &[f32], threads: usize, reps: usize) -> anyhow::
 
 /// Me and Them at real-time pace; latency from the EOU point in the audio to its event.
 fn realtime(model_path: &Path, pcm: &[f32], threads: usize, seconds: f64) -> anyhow::Result<()> {
-    let provider = Arc::new(ParakeetRealtime::new(ParakeetConfig { model_path: Some(model_path.to_path_buf()), threads }));
+    let provider = Arc::new(ParakeetRealtime::new(ParakeetConfig { model_path: Some(model_path.to_path_buf()), threads, ..ParakeetConfig::default() }));
     let (tx, rx) = mpsc::channel();
     let cpu_start = process_cpu_seconds();
     let start = Instant::now();

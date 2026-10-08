@@ -270,7 +270,7 @@ impl Overlay {
         }
         let now = &self.store.value;
         if previous.transcribe != now.transcribe || previous.stt_provider != now.stt_provider || previous.listen_mic != now.listen_mic || previous.listen_desktop != now.listen_desktop
-            || previous.mic_device != now.mic_device || previous.desktop_device != now.desktop_device {
+            || previous.mic_device != now.mic_device || previous.desktop_device != now.desktop_device || previous.use_gpu != now.use_gpu {
             self.restart_listening_if_live(window, cx);
         }
         cx.notify();

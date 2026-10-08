@@ -507,8 +507,8 @@ impl Overlay {
                 .on_mouse_down(MouseButton::Left, listen(cx, |this, _, window, cx| this.download_model(window, cx)))
                 .into_any_element()
         };
-        let mut row = div().flex().flex_col().gap(px(6.0))
-            .child(div().flex().items_center().gap(px(12.0)).px(px(12.0)).py(px(10.0)).rounded(px(12.0)).border_1().border_color(theme::hairline())
+        let card = div().flex().flex_col().rounded(px(12.0)).border_1().border_color(theme::hairline())
+            .child(div().flex().items_center().gap(px(12.0)).px(px(12.0)).py(px(10.0))
                 .child(div().flex().flex_col().gap(px(1.0)).flex_1().min_w_0()
                     .child(div().text_size(px(13.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child("Parakeet Realtime · English"))
                     .child(div().id("model-license").cursor_pointer().text_size(px(12.0)).text_color(theme::muted()).truncate()
@@ -516,10 +516,32 @@ impl Overlay {
                         .on_mouse_down(MouseButton::Left, listen(cx, |_, _, _, cx| cx.open_url(MODEL.license_url)))
                         .child(format!("{} · NVIDIA Open Model License", model_size_label(&MODEL)))))
                 .child(trailing));
+        #[cfg(target_os = "macos")]
+        let card = card.child(self.gpu_row(cx));
+        let mut row = div().flex().flex_col().gap(px(6.0)).child(card);
         if let Some(notice) = self.model_notice.clone() {
             row = row.child(div().text_size(px(12.0)).text_color(theme::accent_soft()).child(notice));
         }
         row
+    }
+
+    /// macOS: Parakeet on the GPU (Metal), on by default, with a note when it had to use the CPU.
+    #[cfg(target_os = "macos")]
+    fn gpu_row(&self, cx: &mut Context<Self>) -> Div {
+        let on = self.store.value.use_gpu;
+        let note = if on && crate::stt::parakeet::gpu_unavailable() {
+            div().text_color(theme::accent_soft()).child("The GPU couldn't be used, so transcription is running on the CPU.")
+        } else {
+            div().text_color(theme::muted()).child("Transcribes with a fraction of the CPU. Off runs on the processor.")
+        };
+        div().flex().items_center().gap(px(12.0)).px(px(12.0)).py(px(10.0)).border_t_1().border_color(theme::divider())
+            .child(div().flex().flex_col().gap(px(1.0)).flex_1().min_w_0()
+                .child(div().flex().items_center().gap(px(8.0))
+                    .child(div().text_size(px(13.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child("Use GPU (Metal)"))
+                    .child(div().px(px(7.0)).py(px(1.0)).rounded_full().bg(theme::bubble()).border_1().border_color(theme::bubble_border())
+                        .text_size(px(11.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::accent_soft()).child("Recommended")))
+                .child(note.text_size(px(12.0))))
+            .child(switch("use-gpu", on, |s, v| s.use_gpu = v, cx))
     }
 
     /// Enumerate audio devices off the UI thread for the Listening tab's pickers.

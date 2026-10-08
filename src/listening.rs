@@ -12,7 +12,7 @@ use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use crate::audio::{AudioCapture, AudioChunk, Devices, Source};
 use crate::metrics::{self, LatencyRecorder};
 use crate::settings::SttProvider;
-use crate::stt::parakeet::ParakeetRealtime;
+use crate::stt::parakeet::{ParakeetConfig, ParakeetRealtime};
 use crate::stt::{Availability, StreamingAsr, Transcriber};
 use crate::transcript::endpoint::EndpointConfig;
 use crate::transcript::live::{LiveTranscript, Update};
@@ -42,7 +42,7 @@ pub enum Command { Stop }
 /// The transcription provider Live uses, from Settings → Listening.
 pub fn provider(settings: &crate::settings::Settings) -> Arc<dyn StreamingAsr> {
     match settings.stt_provider {
-        SttProvider::Parakeet => Arc::new(ParakeetRealtime::default()),
+        SttProvider::Parakeet => Arc::new(ParakeetRealtime::new(ParakeetConfig { use_gpu: settings.use_gpu, ..ParakeetConfig::default() })),
         SttProvider::Deepgram => Arc::new(crate::stt::deepgram::Deepgram::from_store()),
     }
 }
