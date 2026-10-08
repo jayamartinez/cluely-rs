@@ -776,7 +776,7 @@ impl Overlay {
         if key.is_empty() { return; }
         let provider = self.key_target();
         self.key_notice = Some(match crate::secrets::set(&provider, &key) {
-            Ok(()) => { self.key_input.update(cx, |input, cx| input.clear(cx)); "Saved to Windows Credential Manager.".into() }
+            Ok(()) => { self.key_input.update(cx, |input, cx| input.clear(cx)); format!("Saved to {}.", crate::secrets::STORE_NAME).into() }
             Err(error) => format!("Couldn't save the key: {error}").into(),
         });
         cx.notify();
