@@ -7,7 +7,6 @@ use gpui::{AssetSource, Result, SharedString};
 const ICONS: &[(&str, &[u8])] = &[
     ("icons/gear.svg", include_bytes!("../assets/icons/gear.svg")),
     ("icons/close.svg", include_bytes!("../assets/icons/close.svg")),
-    ("icons/history.svg", include_bytes!("../assets/icons/history.svg")),
     ("icons/chevron-down.svg", include_bytes!("../assets/icons/chevron-down.svg")),
     ("icons/chevron-up.svg", include_bytes!("../assets/icons/chevron-up.svg")),
     ("icons/eye.svg", include_bytes!("../assets/icons/eye.svg")),
@@ -18,9 +17,7 @@ const ICONS: &[(&str, &[u8])] = &[
     ("icons/lightbulb.svg", include_bytes!("../assets/icons/lightbulb.svg")),
     ("icons/shift.svg", include_bytes!("../assets/icons/shift.svg")),
     ("icons/space.svg", include_bytes!("../assets/icons/space.svg")),
-    ("icons/send.svg", include_bytes!("../assets/icons/send.svg")),
     ("icons/return.svg", include_bytes!("../assets/icons/return.svg")),
-    ("icons/tooltip-pointer.svg", include_bytes!("../assets/icons/tooltip-pointer.svg")),
     ("icons/tooltip-pointer-up.svg", include_bytes!("../assets/icons/tooltip-pointer-up.svg")),
     ("icons/info.svg", include_bytes!("../assets/icons/info.svg")),
     ("icons/sparkle.svg", include_bytes!("../assets/icons/sparkle.svg")),
