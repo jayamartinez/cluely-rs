@@ -14,9 +14,9 @@ use crate::stt::{EventKind, Generation, TranscriptEvent};
 /// The question score at which an utterance counts as a question for metrics and listeners.
 pub const QUESTION_THRESHOLD: f32 = 0.5;
 
-/// Recognizers emit words this far behind the audio at most while someone is still talking
-/// (Parakeet measured 160–640 ms between partials), so only quiet beyond it counts as silence.
-const TEXT_LAG_MS: f64 = 400.0;
+/// Default for how far behind the audio a recognizer's words arrive while someone is still
+/// talking (Parakeet measured 160–640 ms between partials); providers state their own.
+const DEFAULT_TEXT_LAG_MS: f64 = 400.0;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Update {
@@ -35,6 +35,9 @@ pub struct LiveTranscript {
     provider: String,
     recorder: Option<LatencyRecorder>,
     questions: HashSet<UtteranceId>,
+    /// Audio time observed when each source's recognizer last sent anything (Me, Them).
+    last_event_ms: [f64; 2],
+    text_lag_ms: f64,
 }
 
 fn slot(source: Source) -> usize { match source { Source::Me => 0, Source::Them => 1 } }
@@ -42,10 +45,13 @@ fn slot(source: Source) -> usize { match source { Source::Me => 0, Source::Them 
 impl LiveTranscript {
     pub fn new(config: EndpointConfig, recorder: Option<LatencyRecorder>) -> Self {
         Self { state: TranscriptState::new(), silence: Default::default(), config, generation: None, provider: String::new(),
-            recorder, questions: HashSet::new() }
+            recorder, questions: HashSet::new(), last_event_ms: [0.0; 2], text_lag_ms: DEFAULT_TEXT_LAG_MS }
     }
 
     pub fn state(&self) -> &TranscriptState { &self.state }
+
+    /// The running provider's `Capabilities::text_lag_ms`.
+    pub fn set_text_lag(&mut self, ms: f64) { self.text_lag_ms = ms; }
 
     /// A provider (re)started: only its generation's events count, and in-progress text from
     /// the previous one is dropped.
@@ -64,6 +70,7 @@ impl LiveTranscript {
     pub fn on_event(&mut self, event: &TranscriptEvent) -> Vec<Update> {
         if self.generation != Some(event.generation) { return Vec::new(); }
         let source = event.source;
+        self.last_event_ms[slot(source)] = self.silence[slot(source)].latest_end_ms();
         let mut updates = Vec::new();
         match self.state.apply(event) {
             None => {}
@@ -104,7 +111,7 @@ impl LiveTranscript {
         let signals = Signals {
             has_text: !provisional.text().trim().is_empty(),
             end_of_utterance: provisional.end_of_utterance_ms.is_some(),
-            silence_ms: self.silence_for(source, provisional.end_ms),
+            silence_ms: self.silence_for(source, provisional.end_ms, provisional.end_of_utterance_ms.is_some()),
             assessment: assess(provisional.text()),
         };
         let Decision::Commit(reason) = decide(&signals, &self.config) else { return None };
@@ -118,10 +125,21 @@ impl LiveTranscript {
     /// the later of the last voice and the last text (so words still arriving aren't cut off),
     /// and the recognizer producing nothing new. The second one allows for its normal lag,
     /// and covers microphones whose noise bed hides the energy gaps.
-    fn silence_for(&self, source: Source, text_end_ms: f64) -> f64 {
+    fn silence_for(&self, source: Source, text_end_ms: f64, end_of_utterance: bool) -> f64 {
         let tracker = &self.silence[slot(source)];
+        // Until the recognizer has been quiet for its own lag, more words for this stretch may
+        // still be on the way (Deepgram's last segment arrives ~0.6 s after speech stops); an
+        // end-of-utterance says it has finished, so that path isn't held back.
+        let since_last_event = (tracker.latest_end_ms() - self.last_event_ms[slot(source)]).max(0.0);
         let energy = tracker.silence_since(text_end_ms);
-        let no_new_text = (tracker.latest_end_ms() - text_end_ms - TEXT_LAG_MS).max(0.0);
+        // After an end-of-utterance the recognizer has said it is done with this stretch, so the
+        // time since that signal counts in full. This is what endpoints desktop audio with
+        // music or another voice underneath, where energy never reads as silence.
+        if end_of_utterance { return energy.max(since_last_event); }
+        if since_last_event < self.text_lag_ms { return 0.0; }
+        // Measured from when the last event arrived, not the audio it covered: cloud recognizers
+        // report a window that ends well before the audio they have already consumed.
+        let no_new_text = (tracker.latest_end_ms() - text_end_ms.max(self.last_event_ms[slot(source)]) - self.text_lag_ms).max(0.0);
         energy.max(no_new_text)
     }
 
@@ -248,7 +266,7 @@ mod tests {
         noise(&mut live, Source::Me, 0.0, 3000.0, 0.03);
         noise(&mut live, Source::Me, 3000.0, 4500.0, 0.05);
         live.on_event(&partial(Source::Me, 4400.0, "i would start with a write through cache"));
-        assert!(live.silence_for(Source::Me, 4400.0) < 1.0);
+        assert!(live.silence_for(Source::Me, 4400.0, false) < 1.0);
         let updates = noise(&mut live, Source::Me, 4500.0, 5600.0, 0.03);
         assert_eq!(committed(&updates), [("i would start with a write through cache", Reason::Silence)]);
         // With an EOU the commit follows the recognizer going quiet too.
@@ -257,6 +275,23 @@ mod tests {
         live.on_event(&event(Source::Me, 6600.0, EventKind::EndOfUtterance { text: "then i would add invalidation on every write".into() }));
         let updates = noise(&mut live, Source::Me, 6600.0, 7400.0, 0.03);
         assert_eq!(committed(&updates), [("then i would add invalidation on every write", Reason::EndOfUtterance)]);
+    }
+
+    /// Seen with Deepgram: an interim result arrives a second or more after the audio it covers.
+    /// Quiet is counted from when the recognizer last said anything, not from that window.
+    #[test]
+    fn a_recognizer_that_reports_late_windows_is_not_mistaken_for_quiet() {
+        let mut live = LiveTranscript::new(EndpointConfig::default(), None);
+        live.set_generation(GEN, "deepgram");
+        audio(&mut live, Source::Them, 0.0, 3000.0, 0.2);
+        // Arrives at 3.0 s but covers only the first second of a sentence still being spoken.
+        let early = TranscriptEvent { start_ms: 0.0, ..partial(Source::Them, 1000.0, "walk me through what happens") };
+        assert!(committed(&live.on_event(&early)).is_empty());
+        assert!(committed(&audio(&mut live, Source::Them, 3000.0, 3400.0, 0.2)).is_empty());
+        let full = TranscriptEvent { start_ms: 0.0, ..partial(Source::Them, 3000.0, "walk me through what happens when two writers update the same key") };
+        live.on_event(&full);
+        let updates = audio(&mut live, Source::Them, 3400.0, 4400.0, 0.001);
+        assert_eq!(committed(&updates), [("walk me through what happens when two writers update the same key", Reason::Silence)]);
     }
 
     #[test]

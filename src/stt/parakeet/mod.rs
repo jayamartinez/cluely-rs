@@ -63,7 +63,7 @@ impl StreamingAsr for ParakeetRealtime {
     fn capabilities(&self) -> Capabilities {
         Capabilities { id: "parakeet-realtime", label: "Parakeet Realtime (on-device)",
             summary: "NVIDIA Parakeet Realtime EOU 120M. Private and free; English only.", locality: Locality::OnDevice,
-            requires_api_key: false, emits_end_of_utterance: true, languages: &["en"] }
+            requires_api_key: false, emits_end_of_utterance: true, languages: &["en"], text_lag_ms: 400.0 }
     }
 
     fn availability(&self) -> Availability {

@@ -60,6 +60,10 @@ The model (176 MB) downloads from Settings the first time, verified against a pi
 toggle and device picker (the system default unless you choose one). Turn **Transcribe
 conversations** off to keep Live to the screen and typed questions.
 
+**Deepgram** (optional): choose it under *Transcribe with* and save a Deepgram API key (kept in Windows Credential
+Manager). Live audio is then streamed to Deepgram's Nova-3 instead of being transcribed on this PC; everything after
+the recognizer (transcript, endpointing, the overlay) is the same, so the two can be compared with the latency report.
+
 **Sessions** (clock button in the pill) is a normal window for reviewing past Live sessions: an AI summary at three
 lengths, timeline, transcript, answers and the screenshots they used, plus search and "Ask about this session".
 
@@ -103,8 +107,8 @@ default (`cargo test -- --ignored` with the variables documented in `claude_cli.
 
 Working: overlay, keybinds, click-through, capture hiding, providers, screenshot on send, sessions and AI notes, and
 live on-device transcription of Me and Them with the transcript saved per session.
-Not yet: answers don't read the live transcript (they rely on the screenshot and your typed question), Deepgram as an
-optional cloud provider, and endpointing tuned on real conversations.
+Not yet: answers don't read the live transcript (they rely on the screenshot and your typed question), and endpointing
+tuned on real conversations.
 
 ## Third-party
 

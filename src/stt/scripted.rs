@@ -40,7 +40,7 @@ impl ScriptedAsr {
 impl StreamingAsr for ScriptedAsr {
     fn capabilities(&self) -> Capabilities {
         Capabilities { id: "scripted", label: "Scripted", summary: "Replays a fixed script (testing)", locality: Locality::OnDevice,
-            requires_api_key: false, emits_end_of_utterance: true, languages: &["en"] }
+            requires_api_key: false, emits_end_of_utterance: true, languages: &["en"], text_lag_ms: 400.0 }
     }
 
     fn availability(&self) -> Availability { self.availability.clone() }

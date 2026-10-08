@@ -11,6 +11,7 @@ use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 
 use crate::audio::{AudioCapture, AudioChunk, Devices, Source};
 use crate::metrics::{self, LatencyRecorder};
+use crate::settings::SttProvider;
 use crate::stt::parakeet::ParakeetRealtime;
 use crate::stt::{Availability, StreamingAsr, Transcriber};
 use crate::transcript::endpoint::EndpointConfig;
@@ -38,8 +39,13 @@ pub enum Message {
 
 pub enum Command { Stop }
 
-/// The transcription provider Live uses. Deepgram will join this once it lands.
-pub fn provider() -> Arc<dyn StreamingAsr> { Arc::new(ParakeetRealtime::default()) }
+/// The transcription provider Live uses, from Settings → Listening.
+pub fn provider(settings: &crate::settings::Settings) -> Arc<dyn StreamingAsr> {
+    match settings.stt_provider {
+        SttProvider::Parakeet => Arc::new(ParakeetRealtime::default()),
+        SttProvider::Deepgram => Arc::new(crate::stt::deepgram::Deepgram::from_store()),
+    }
+}
 
 /// Why the provider can't start, in the words the Live panel shows.
 pub fn not_ready(availability: &Availability) -> Option<String> {
@@ -107,7 +113,7 @@ pub fn run(provider: Arc<dyn StreamingAsr>, audio: Receiver<AudioChunk>, sources
     let (events, inbox) = channel();
     let mut transcriber = Transcriber::new(events);
     match transcriber.start(provider.clone(), sources) {
-        Ok(generation) => live.set_generation(generation, provider.capabilities().id),
+        Ok(generation) => { let caps = provider.capabilities(); live.set_generation(generation, caps.id); live.set_text_lag(caps.text_lag_ms); }
         Err(error) => { let _ = out.unbounded_send(Message::Status(Status::Failed(error.to_string()))); return; }
     }
     let _ = out.unbounded_send(Message::Status(Status::Listening { sources: sources.to_vec(), failures }));
