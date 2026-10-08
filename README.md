@@ -105,10 +105,13 @@ default (`cargo test -- --ignored` with the variables documented in `claude_cli.
 
 ## Status
 
-Working: overlay, keybinds, click-through, capture hiding, providers, screenshot on send, sessions and AI notes, and
-live on-device transcription of Me and Them with the transcript saved per session.
-Not yet: answers don't read the live transcript (they rely on the screenshot and your typed question), and endpointing
-tuned on real conversations.
+Working: overlay, keybinds, click-through, capture hiding, providers, screenshot on send, sessions and AI notes, live
+on-device transcription of Me and Them with the transcript saved per session, and answers that read the conversation
+heard so far (the last 10 minutes or 40 lines, plus what is being said right now). During a Live session the ChatGPT
+provider keeps one restricted Codex thread, so each answer only sends what is new; a newer request cancels the one in
+flight, and nothing from a cancelled request reaches the screen.
+Transcription runs on this PC with Parakeet, or optionally through Deepgram with your own key.
+Not yet: endpointing tuned on real conversations, and speculative answers.
 
 ## Third-party
 

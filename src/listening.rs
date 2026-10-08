@@ -57,6 +57,28 @@ pub fn not_ready(availability: &Availability) -> Option<String> {
     }
 }
 
+/// A Live session's metrics export: the shared recorder and the file stem (`live-<time>`)
+/// its marks and captured audio are written under.
+#[derive(Clone)]
+pub struct Metrics {
+    pub recorder: LatencyRecorder,
+    pub stem: std::path::PathBuf,
+}
+
+impl Metrics {
+    /// Set up an export for a session starting now, when `CLUELYRS_METRICS=1`.
+    pub fn for_session(started: Instant) -> Option<Self> {
+        if !metrics::export_enabled() { return None; }
+        let stem = metrics::metrics_dir()?.join(format!("live-{}", crate::archive::unix_now()));
+        Some(Self { recorder: LatencyRecorder::new(started), stem })
+    }
+
+    /// Write the marks. Call once, when the session ends.
+    pub fn export(&self) {
+        if let Err(error) = self.recorder.write_jsonl(&self.stem.with_extension("jsonl")) { eprintln!("metrics export failed: {error}"); }
+    }
+}
+
 /// A running pipeline. Dropping it stops listening; the threads wind down on their own.
 pub struct Listening {
     commands: Sender<Command>,
@@ -68,28 +90,26 @@ pub struct Listening {
 impl Listening {
     /// Start capturing `sources` and transcribing with `provider`. Returns immediately: device
     /// setup and model loading happen on the pipeline thread, which reports through `Message`s.
-    pub fn start(provider: Arc<dyn StreamingAsr>, sources: Vec<Source>, devices: Devices) -> (Self, UnboundedReceiver<Message>) {
+    /// `metrics` is the session's recorder and export stem when the Live session exports
+    /// (`CLUELYRS_METRICS=1`): the pipeline records into it and saves the captured audio next
+    /// to it; the owner of the recorder writes the marks when the session ends.
+    pub fn start(provider: Arc<dyn StreamingAsr>, sources: Vec<Source>, devices: Devices, metrics: Option<Metrics>) -> (Self, UnboundedReceiver<Message>) {
         let (out, messages) = unbounded();
         let (commands, inbox) = channel();
         let started = Instant::now();
         let thread = std::thread::Builder::new().name("cluelyrs-listening".into()).spawn(move || {
             let _ = out.unbounded_send(Message::Status(Status::Starting));
             let (chunks, audio) = channel();
-            let recorder = LatencyRecorder::new(started);
             let (capture, failures) = match AudioCapture::start_with(&sources, &devices, chunks) {
                 Ok(started) => started,
                 Err(error) => { let _ = out.unbounded_send(Message::Status(Status::Failed(error.to_string()))); return; }
             };
             let opened: Vec<Source> = capture.opened.iter().map(|info| info.source).collect();
-            let live = LiveTranscript::new(EndpointConfig::default(), Some(recorder.clone()));
-            let export = metrics::export_enabled().then(|| metrics::metrics_dir().map(|dir| dir.join(format!("live-{}", crate::archive::unix_now())))).flatten();
-            let mut dump = export.as_ref().and_then(|stem| AudioDump::create(stem, &opened).ok());
+            let live = LiveTranscript::new(EndpointConfig::default(), metrics.as_ref().map(|metrics| metrics.recorder.clone()));
+            let mut dump = metrics.as_ref().and_then(|metrics| AudioDump::create(&metrics.stem, &opened).ok());
             run(provider, audio, &opened, failures, live, &inbox, &out, dump.as_mut());
             capture.stop();
-            if let Some(stem) = export {
-                if let Err(error) = recorder.write_jsonl(&stem.with_extension("jsonl")) { eprintln!("metrics export failed: {error}"); }
-                if let Some(dump) = dump && let Err(error) = dump.finish() { eprintln!("audio export failed: {error}"); }
-            }
+            if let Some(dump) = dump && let Err(error) = dump.finish() { eprintln!("audio export failed: {error}"); }
         }).ok();
         (Self { commands, started, thread }, messages)
     }
@@ -283,7 +303,7 @@ mod tests {
     #[test]
     fn dropping_the_handle_stops_the_pipeline_without_blocking() {
         // No devices in CI-like runs is fine: the pipeline reports Failed or Listening on its own thread.
-        let (listening, mut messages) = Listening::start(Arc::new(ScriptedAsr::new(vec![])), vec![Source::Me], Devices::default());
+        let (listening, mut messages) = Listening::start(Arc::new(ScriptedAsr::new(vec![])), vec![Source::Me], Devices::default(), None);
         let started = Instant::now();
         drop(listening);
         assert!(started.elapsed() < Duration::from_millis(50));

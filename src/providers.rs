@@ -285,8 +285,15 @@ fn is_openai(base: &str) -> bool {
     base.starts_with("https://api.openai.com/")
 }
 
+/// One agent per timeout for the app's lifetime, so consecutive requests reuse the TLS
+/// connection instead of handshaking again (the "warm" part of API providers).
 fn agent(timeout: Duration) -> ureq::Agent {
-    ureq::Agent::config_builder()
+    static AGENTS: std::sync::Mutex<Vec<(Duration, ureq::Agent)>> = std::sync::Mutex::new(Vec::new());
+    let mut agents = AGENTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((_, agent)) = agents.iter().find(|(t, _)| *t == timeout) {
+        return agent.clone();
+    }
+    let agent = ureq::Agent::config_builder()
         .timeout_connect(Some(CONNECT_TIMEOUT))
         .timeout_global(Some(timeout))
         .http_status_as_error(false)
@@ -294,7 +301,9 @@ fn agent(timeout: Duration) -> ureq::Agent {
         .max_redirects(0)
         .user_agent("CluelyRS")
         .build()
-        .new_agent()
+        .new_agent();
+    agents.push((timeout, agent.clone()));
+    agent
 }
 
 fn auth_headers<B>(request: ureq::RequestBuilder<B>, wire: Wire, key: Option<&str>) -> ureq::RequestBuilder<B> {

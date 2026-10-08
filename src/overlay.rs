@@ -5,7 +5,6 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use futures::StreamExt;
@@ -20,6 +19,7 @@ use crate::answer::{self, Exchange};
 use crate::archive::{self, Archive, Recorder};
 use crate::input::{InputEvent, TextInput};
 use crate::listening::{self, Listening};
+use crate::reasoning::{self, ReasoningSession};
 use crate::settings::Provider;
 use crate::transcript_view::{Download, ProvisionalLine, TranscriptLine};
 use crate::sessions_window::{self, SessionsWindow};
@@ -82,8 +82,10 @@ pub struct Overlay {
     pub(crate) key_notice: Option<SharedString>,
     pub(crate) loaded_models: Vec<String>,
     pub(crate) models_loading: bool,
-    /// Cancels the answer currently streaming.
-    job_cancel: Option<Arc<AtomicBool>>,
+    /// Answers for the Live session: warm provider, one request at a time, stale replies dropped.
+    reasoning: Option<ReasoningSession>,
+    /// Latency marks and export location for this Live session, when `CLUELYRS_METRICS=1`.
+    pub(crate) metrics: Option<listening::Metrics>,
     next_turn: u64,
     /// True while the cursor is over a control and the window takes mouse input.
     catching_mouse: bool,
@@ -190,7 +192,7 @@ impl Overlay {
         }).detach();
         let mut overlay = Self { hwnd, hotkeys, store, settings_tab: None, sessions_window: None, archive, focus: cx.focus_handle(),
             recorder: None, shape: Rc::default(), hits: Hits::default(), composer, key_input, model_input, base_url_input,
-            key_notice: None, loaded_models: Vec::new(), models_loading: false, job_cancel: None, next_turn: 0, catching_mouse: true, return_focus: None,
+            key_notice: None, loaded_models: Vec::new(), models_loading: false, reasoning: None, metrics: None, next_turn: 0, catching_mouse: true, return_focus: None,
             codex: crate::codex::CodexClient::new(), codex_status: None, claude_status: None, signing_in: false,
             motion: None, live_since: None, turns: Vec::new(), scroll: ScrollHandle::new(),
             listening: None, listening_status: None, listening_epoch: 0, transcript: Vec::new(), provisional: Default::default(),
@@ -286,16 +288,24 @@ impl Overlay {
         self.live_since = live.then(Instant::now);
         self.hotkeys.set_live(live);
         if !live {
-            if let Some(cancel) = self.job_cancel.take() { cancel.store(true, Ordering::Relaxed); }
+            // Dropping the session cancels the running request; its late replies are stale.
+            self.reasoning = None;
             self.turns.clear();
             // The pipeline's own final commits arrive after it's gone and are dropped, so save
             // what each source was still saying from the last provisional text first.
             self.archive_provisional();
             self.stop_listening();
             self.clear_transcript();
+            if let Some(metrics) = self.metrics.take() { std::thread::spawn(move || metrics.export()); }
         }
         self.record(live);
-        if live { self.settings_tab = None; self.hotkeys.set_panel_open(false); self.start_listening(window, cx); }
+        if live {
+            self.settings_tab = None;
+            self.hotkeys.set_panel_open(false);
+            self.metrics = listening::Metrics::for_session(self.live_since.unwrap_or_else(Instant::now));
+            self.reasoning = Some(ReasoningSession::new(self.codex.clone(), self.metrics.as_ref().map(|metrics| metrics.recorder.clone())));
+            self.start_listening(window, cx);
+        }
         self.fit(window);
         cx.notify();
     }
@@ -405,7 +415,7 @@ impl Overlay {
     fn send(&mut self, action: &str, question: String, window: &mut Window, cx: &mut Context<Self>) {
         self.show();
         if self.live_since.is_none() { self.set_live(true, window, cx); }
-        if let Some(cancel) = self.job_cancel.take() { cancel.store(true, Ordering::Relaxed); }
+        // The session cancels the previous request when the new one starts (below).
         for turn in &mut self.turns { if turn.status == Status::Streaming { turn.status = Status::Failed("Stopped for a newer request.".into()); } }
         let history: Vec<Exchange> = self.turns.iter().filter(|t| t.status == Status::Done)
             .map(|t| Exchange { action: t.action.to_string(), question: t.question.clone(), answer: t.text.clone() }).collect();
@@ -416,33 +426,39 @@ impl Overlay {
         self.scroll.scroll_to_bottom();
         cx.notify();
         let settings = self.store.value.clone();
-        let codex = self.codex.clone();
         let point = self.hwnd.and_then(win::center);
         let action = action.to_string();
+        let conversation = self.conversation().render();
+        let utterance = self.latest_heard_utterance();
         cx.spawn_in(window, async move |this, cx| {
             let screenshot = match (settings.screen_on_send, point) {
                 (true, Some((x, y))) => cx.background_executor().spawn(async move { crate::capture::screen_jpeg(x, y).ok() }).await,
                 _ => None,
             };
-            let request = answer::build(&settings, &codex, &action, &question, &history, screenshot.clone());
-            let mut job = match request {
-                Ok(request) => answer::start(request),
-                Err(reason) => { let _ = this.update(cx, |this, cx| this.finish_turn(id, Err(reason), cx)); return; }
-            };
-            let cancel = job.cancel.clone();
-            if this.update(cx, |this, _| {
-                this.job_cancel = Some(cancel);
+            let request = reasoning::Request { action, question, history, conversation, screenshot: screenshot.clone(), utterance };
+            let started = this.update(cx, |this, cx| {
                 if let Some(turn) = this.turns.iter_mut().find(|t| t.id == id) { turn.screenshot = screenshot; }
-            }).is_err() { return; }
-            while let Some(event) = job.events.next().await {
-                let finished = matches!(event, answer::Event::Done(_));
-                let alive = this.update(cx, |this, cx| match event {
-                    answer::Event::Delta(delta) => {
-                        if let Some(turn) = this.turns.iter_mut().find(|t| t.id == id && t.status == Status::Streaming) { turn.text.push_str(&delta); }
-                        this.scroll.scroll_to_bottom();
-                        cx.notify();
+                // Live ended while the screenshot was taken: nothing to answer any more.
+                let Some(session) = this.reasoning.as_mut() else { this.finish_turn(id, Err("Live session ended.".into()), cx); return None };
+                match session.ask(&settings, request) {
+                    Ok(started) => Some(started),
+                    Err(reason) => { this.finish_turn(id, Err(reason), cx); None }
+                }
+            });
+            let Ok(Some((generation, mut replies))) = started else { return };
+            while let Some(reply) = replies.next().await {
+                let finished = matches!(reply.event, reasoning::session::Event::Done(_));
+                let alive = this.update(cx, |this, cx| {
+                    // Replies from a request that was cancelled or superseded never reach the screen.
+                    if !this.reasoning.as_ref().is_some_and(|session| session.is_current(generation)) { return; }
+                    match reply.event {
+                        reasoning::session::Event::Delta(delta) => {
+                            if let Some(turn) = this.turns.iter_mut().find(|t| t.id == id && t.status == Status::Streaming) { turn.text.push_str(&delta); }
+                            this.scroll.scroll_to_bottom();
+                            cx.notify();
+                        }
+                        reasoning::session::Event::Done(result) => this.finish_turn(id, result, cx),
                     }
-                    answer::Event::Done(result) => this.finish_turn(id, result, cx),
                 }).is_ok();
                 if finished || !alive { break; }
             }
@@ -464,7 +480,6 @@ impl Overlay {
             }
             Err(reason) => turn.status = Status::Failed(reason.into()),
         }
-        self.job_cancel = None;
         cx.notify();
     }
 
