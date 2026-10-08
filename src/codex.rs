@@ -1881,7 +1881,7 @@ impl Drop for CodexClient {
 // Tests
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::collections::VecDeque;
     use std::sync::Condvar;
@@ -2037,6 +2037,35 @@ mod tests {
             poll: Duration::from_millis(10),
         };
         CodexClient::with_launcher(Box::new(Shared(launcher.clone())), limits)
+    }
+
+    /// For other modules' tests: a signed-in app-server that opens threads `thr_1`, `thr_2`, …
+    /// and answers every turn at once with "answer N", plus every message the client sent.
+    pub(crate) fn scripted_client() -> (Arc<CodexClient>, Arc<Mutex<Vec<Value>>>) {
+        let (threads, turns) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let base = server(chatgpt(), good_thread(), Vec::new());
+        let launcher = Arc::new(FakeLauncher::new(move |message| {
+            let id = message.get("id").cloned().unwrap_or(Value::Null);
+            match message.get("method").and_then(Value::as_str) {
+                Some("thread/start") => {
+                    let mut thread = good_thread();
+                    thread["thread"]["id"] = json!(format!("thr_{}", threads.fetch_add(1, Ordering::SeqCst) + 1));
+                    vec![json!({ "id": id, "result": thread })]
+                }
+                Some("turn/start") => {
+                    let n = turns.fetch_add(1, Ordering::SeqCst) + 1;
+                    let (thread, turn) = (message["params"]["threadId"].clone(), format!("turn_{n}"));
+                    vec![
+                        json!({ "id": id, "result": { "turn": { "id": turn, "items": [], "status": "inProgress" } } }),
+                        json!({ "method": "item/agentMessage/delta", "params": { "threadId": thread, "turnId": turn, "itemId": "m", "delta": format!("answer {n}") } }),
+                        json!({ "method": "turn/completed", "params": { "threadId": thread, "turn": { "id": turn, "items": [], "status": "completed" } } }),
+                    ]
+                }
+                _ => base(message),
+            }
+        }));
+        let received = launcher.received.clone();
+        (Arc::new(client(&launcher)), received)
     }
 
     const CWD: &str = "C:\\Temp\\cluelyrs-codex-1";

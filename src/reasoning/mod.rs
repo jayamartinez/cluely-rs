@@ -12,9 +12,15 @@
 //!   context is prebuilt and the history is replayed.
 //! - **API providers:** the HTTP agent is shared for the app's lifetime, so requests reuse the
 //!   TLS connection; the history is replayed.
+//!
+//! Answers can also be prepared before they're asked for (`speculation`): preparation (no model
+//! requests) for every question heard, and, when Settings turns it on, a speculative answer: a
+//! real request to the selected model that runs on its own thread or process and is shown the
+//! moment Assist is pressed if the conversation still matches.
 
 pub mod context;
 pub mod session;
+pub mod speculation;
 
 pub use context::{Conversation, Line, Now};
-pub use session::{Generation, Reply, ReasoningSession, Request};
+pub use session::{Claimed, Generation, Reply, ReasoningSession, Request};

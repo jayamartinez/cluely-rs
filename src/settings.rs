@@ -54,6 +54,14 @@ pub struct Settings {
     /// Slower, deeper reasoning for answers. Off answers with the least reasoning the provider
     /// offers, so the first words arrive as fast as possible.
     pub smart_mode: bool,
+    /// Start answering a question from the other side as soon as it is heard, before Assist is
+    /// pressed, so the answer is ready when asked for. Each one is a real request to the
+    /// selected model on the user's subscription or API key (counting toward its usage and rate
+    /// limits), sent with the conversation and a screenshot, including the ones nobody asks for.
+    /// Off by default.
+    pub speculative_answers: bool,
+    /// Show those answers as they are produced, without pressing anything. Needs `speculative_answers`.
+    pub auto_answer: bool,
     /// Transcribe the Live session's audio on this PC. Off keeps Live to the screen and typed questions.
     pub transcribe: bool,
     pub stt_provider: SttProvider,
@@ -77,7 +85,7 @@ impl Default for Settings {
         Self {
             provider: Provider::default(), claude_model: ClaudeModel::default(), claude_models: BTreeMap::new(), codex_model: String::new(),
             api_provider: "anthropic".into(), api_models: BTreeMap::new(), custom_base_url: String::new(),
-            answer_style: AnswerStyle::default(), smart_mode: false, transcribe: true, stt_provider: SttProvider::default(),
+            answer_style: AnswerStyle::default(), smart_mode: false, speculative_answers: false, auto_answer: false, transcribe: true, stt_provider: SttProvider::default(),
             listen_mic: true, listen_desktop: true,
             mic_device: String::new(), desktop_device: String::new(),
             hide_from_capture: true, screen_on_send: true, start_live_on_launch: false,
@@ -150,6 +158,7 @@ mod tests {
         assert_eq!(partial.provider, Provider::Claude);
         assert!(partial.hide_from_capture);
         assert!(!partial.smart_mode, "answers default to the fastest reasoning");
+        assert!(!partial.speculative_answers && !partial.auto_answer, "speculative answers are opt-in");
         assert!(partial.transcribe);
         assert_eq!(partial.sources(), Source::ALL);
         assert_eq!(Settings { listen_mic: false, ..Settings::default() }.sources(), [Source::Them]);

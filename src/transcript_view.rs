@@ -118,7 +118,11 @@ impl Overlay {
         if epoch != self.listening_epoch || self.listening.is_none() { return; }
         match message {
             Message::Status(status) => self.listening_status = Some(status),
-            Message::Transcript(update) => self.apply_update(update),
+            Message::Transcript(update) => {
+                let steps = self.plan(&update);
+                self.apply_update(update);
+                self.run_steps(steps, cx);
+            }
         }
         cx.notify();
     }

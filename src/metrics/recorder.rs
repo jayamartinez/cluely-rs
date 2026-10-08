@@ -30,7 +30,19 @@ pub enum Stage {
     LlmRequestStarted,
     LlmFirstToken,
     ResponseCommitted,
+    /// A speculative answer that wasn't shown was stopped (newer question, a miss, Live ended).
     SpeculationCancelled,
+    /// A speculative answer started for a question nobody has asked for yet.
+    SpeculationStarted,
+    SpeculationFirstToken,
+    /// The user asked for an answer (Assist, What do I say?, a typed question).
+    AnswerRequested,
+    /// The asked-for answer was ready and shown at once.
+    SpeculationHit,
+    /// A speculative answer was running but the conversation no longer matched what was asked.
+    SpeculationMissed,
+    /// The first words of the asked-for answer reached the screen.
+    AnswerShown,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
