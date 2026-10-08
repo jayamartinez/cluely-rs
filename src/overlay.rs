@@ -285,6 +285,19 @@ impl Overlay {
     pub fn open_sessions(&mut self, cx: &mut Context<Self>) {
         let Some(root) = self.archive.as_ref().map(|archive| archive.root().to_path_buf()) else { return };
         let _ = std::fs::create_dir_all(&root);
+        // On macOS, bring CluelyRS forward first: GPUI deadlocks when a window becomes key while its
+        // app isn't active (it resigns key status while holding the window's lock), and CluelyRS is
+        // usually not the active app. Done on the next turn, after this click, as for Settings.
+        #[cfg(target_os = "macos")]
+        {
+            let (overlay, mut handle, codex) = (cx.entity(), self.sessions_window, self.codex.clone());
+            cx.defer(move |cx| {
+                cx.activate(true);
+                sessions_window::open(&mut handle, root, codex, cx);
+                overlay.update(cx, |overlay, _| overlay.sessions_window = handle);
+            });
+        }
+        #[cfg(not(target_os = "macos"))]
         sessions_window::open(&mut self.sessions_window, root, self.codex.clone(), cx);
     }
 
