@@ -28,13 +28,23 @@ use crate::hotkeys::{Action, Hotkeys};
 use crate::settings::{Settings, Store};
 use crate::settings_view::Tab;
 use crate::theme;
-use crate::ui::{self, chip, keycap};
+#[cfg(not(target_os = "macos"))]
+use crate::ui::{chip, keycap};
+use crate::ui;
 use crate::platform::{self, NativeWindow, PreviousFocus};
 
 /// The overlay window; the Live panel is 40 px narrower.
 pub const WIDTH: f32 = 680.0;
-const IDLE_HEIGHT: f32 = 120.0;
+#[cfg(not(target_os = "macos"))]
+pub const IDLE_HEIGHT: f32 = 120.0;
+/// macOS: the bar, its hint and room for a toggle's popover below it.
+#[cfg(target_os = "macos")]
+pub const IDLE_HEIGHT: f32 = 270.0;
+#[cfg(not(target_os = "macos"))]
 const LIVE_HEIGHT: f32 = 600.0;
+/// macOS: the card at its tallest (about 520 px) and room for a toggle's popover below it.
+#[cfg(target_os = "macos")]
+const LIVE_HEIGHT: f32 = 680.0;
 /// Settings needs room for an open picker list below the content.
 const SETTINGS_HEIGHT: f32 = 800.0;
 /// Held movement eases in so a tap nudges, then cruises. Pixels per ~16 ms frame.
@@ -150,7 +160,7 @@ pub struct Overlay {
     /// The pointer is over the composer's Smart pill (shows its tooltip).
     pub(crate) smart_hover: bool,
     /// The composer toggle under the pointer (shows its state popover).
-    pub(crate) toggle_hover: Option<crate::composer::Toggle>,
+    pub(crate) toggle_hover: Option<crate::toggles::Toggle>,
 }
 
 impl Overlay {
@@ -200,6 +210,9 @@ impl Overlay {
         base_url_input.update(cx, |input, cx| input.set_text(store.value.custom_base_url.clone(), cx));
         cx.subscribe_in(&composer, window, |this, input, event, window, cx| {
             if matches!(event, InputEvent::Submit) { this.send_composer(input.clone(), window, cx); }
+            // The macOS bar's return button turns blue once there is text to send.
+            #[cfg(target_os = "macos")]
+            if matches!(event, InputEvent::Changed) { cx.notify(); }
         }).detach();
         cx.subscribe_in(&key_input, window, |this, _, event, _, cx| { if matches!(event, InputEvent::Submit) { this.save_key(cx); } }).detach();
         cx.subscribe_in(&model_input, window, |this, input, event, window, cx| {
@@ -850,6 +863,7 @@ impl Overlay {
 
 
 impl Overlay {
+    #[cfg(not(target_os = "macos"))]
     fn pill(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let live = self.live_since.is_some();
         let mark = ui::mark(30.0);
@@ -894,7 +908,9 @@ impl Overlay {
         pill.child(self.hits.mark())
     }
 
-    fn panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The Live panel's transcript strip, answer thread and quick actions, shared by the Windows
+    /// panel (with the composer below them) and the macOS card (above its composer).
+    fn live_parts(&self, cx: &mut Context<Self>) -> (gpui::Div, gpui::Stateful<gpui::Div>, gpui::Div) {
         let ticker = self.transcript_block();
         let mut thread = div().id("thread").flex().flex_col().gap(px(14.0)).px(px(18.0)).py(px(14.0))
             .flex_1().overflow_y_scroll().track_scroll(&self.scroll);
@@ -939,6 +955,12 @@ impl Overlay {
             actions = actions.child(div().flex_1().flex().justify_end().pr(px(4.0)).text_size(px(12.0)).text_color(theme::muted())
                 .child("Answer ready for their last question"));
         }
+        (ticker, thread, actions)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let (ticker, thread, actions) = self.live_parts(cx);
         let composer = div().relative().mx(px(12.0)).mb(px(12.0)).flex().flex_col().gap(px(12.0)).p(px(12.0)).rounded(px(13.0))
             .bg(theme::field()).border_1().border_color(theme::hairline())
             .child(div().flex().items_center().gap(px(8.0))
@@ -953,6 +975,14 @@ impl Overlay {
             .child(ticker).child(thread).child(actions).child(composer)
     }
 }
+
+/// The line under the idle overlay saying what Start does.
+fn idle_hint(text: &'static str) -> impl IntoElement {
+    div().text_size(px(12.0)).text_color(theme::body()).px(px(12.0)).py(px(5.0)).rounded_full().bg(gpui::rgba(0x0f1012b3)).child(text)
+}
+
+#[cfg(target_os = "macos")]
+mod mac_bar;
 
 impl Render for Overlay {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -969,13 +999,20 @@ impl Render for Overlay {
                     this.composer.update(cx, |input, cx| input.clear(cx));
                     this.return_to_previous_app();
                 }
-            }))
-            .child(self.pill(cx));
-        if let Some(tab) = self.settings_tab { root = root.child(self.settings_panel(tab, cx)); }
-        else if live { root = root.child(self.panel(cx)); }
-        else {
-            root = root.child(div().text_size(px(12.0)).text_color(theme::body()).px(px(12.0)).py(px(5.0)).rounded_full()
-                .bg(gpui::rgba(0x0f1012b3)).child("Start listens to your desktop + mic and attaches your screen to every message."));
+            }));
+        // macOS shows the composer-first bar with an answer card below it (Paper "macOS · Overlay");
+        // settings open in their own window there.
+        #[cfg(target_os = "macos")]
+        {
+            root = root.child(self.mac_bar(cx));
+            if !live { root = root.child(idle_hint("Start listens to your Mac's audio + mic and attaches your screen to every message.")); }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            root = root.child(self.pill(cx));
+            if let Some(tab) = self.settings_tab { root = root.child(self.settings_panel(tab, cx)); }
+            else if live { root = root.child(self.panel(cx)); }
+            else { root = root.child(idle_hint("Start listens to your desktop + mic and attaches your screen to every message.")); }
         }
         root
     }

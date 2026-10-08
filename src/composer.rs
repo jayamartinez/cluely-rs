@@ -7,7 +7,8 @@ use gpui::{Context, Div, FontWeight, IntoElement, MouseButton, ParentElement, St
 
 use crate::hotkeys::Action;
 use crate::overlay::Overlay;
-use crate::settings::{Provider, Settings};
+use crate::settings::Provider;
+use crate::toggles::{Toggle, ToggleStyle};
 use crate::settings_view::{Picker, Tab};
 use crate::theme;
 use crate::ui;
@@ -26,49 +27,6 @@ const VISIBLE_MODELS: usize = 8;
 const TOOLTIP_HEIGHT: f32 = 84.0;
 /// Gap between the Smart pill and the tooltip's pointer.
 const TOOLTIP_GAP: f32 = 6.0;
-const POPOVER_WIDTH: f32 = 290.0;
-/// Upper bound on a toggle popover's height, reserved in the window region.
-const POPOVER_HEIGHT: f32 = 118.0;
-/// The popover's right edge sits this far right of its icon's, so it ends near the panel's edge.
-const POPOVER_INSET: f32 = 10.0;
-
-/// The settings the bar shows as icons. Clicking one flips it; hovering shows its state.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Toggle { ScreenOnSend, HideFromCapture }
-
-impl Toggle {
-    fn is_on(self, s: &Settings) -> bool {
-        match self { Self::ScreenOnSend => s.screen_on_send, Self::HideFromCapture => s.hide_from_capture }
-    }
-
-    fn flip(self, s: &mut Settings) {
-        match self { Self::ScreenOnSend => s.screen_on_send = !s.screen_on_send, Self::HideFromCapture => s.hide_from_capture = !s.hide_from_capture }
-    }
-
-    fn icon(self, on: bool) -> &'static str {
-        match (self, on) {
-            (Self::ScreenOnSend, true) => "icons/image.svg",
-            (Self::ScreenOnSend, false) => "icons/image-off.svg",
-            (Self::HideFromCapture, true) => "icons/eye-off.svg",
-            (Self::HideFromCapture, false) => "icons/eye.svg",
-        }
-    }
-
-    fn title(self) -> &'static str {
-        match self { Self::ScreenOnSend => "Screen on send", Self::HideFromCapture => "Hidden from screen sharing" }
-    }
-
-    /// What the current state means, in one line.
-    fn state(self, on: bool) -> &'static str {
-        match (self, on) {
-            (Self::ScreenOnSend, true) => "A screenshot of your screen goes with every question.",
-            (Self::ScreenOnSend, false) => "Questions go without a screenshot. Answers use the conversation and your text.",
-            (Self::HideFromCapture, true) => "Only you can see CluelyRS. Screen shares, recordings and screenshots leave it out.",
-            (Self::HideFromCapture, false) => "Anyone you share your screen with can see the overlay.",
-        }
-    }
-}
-
 impl Overlay {
     pub(crate) fn composer_bar(&self, cx: &mut Context<Self>) -> Div {
         let left = div().relative().flex().items_center().gap(px(6.0))
@@ -155,38 +113,8 @@ impl Overlay {
     /// Screen on send and Hidden from screen sharing, at the right of the text box.
     pub(crate) fn composer_toggles(&self, cx: &mut Context<Self>) -> Div {
         div().flex().flex_none().items_center().gap(px(4.0))
-            .child(self.toggle_button(Toggle::ScreenOnSend, cx))
-            .child(self.toggle_button(Toggle::HideFromCapture, cx))
-    }
-
-    /// A setting shown as an icon: blue while on, plain while off. Clicking flips
-    /// it; hovering shows its state popover above.
-    fn toggle_button(&self, toggle: Toggle, cx: &mut Context<Self>) -> impl IntoElement {
-        let on = toggle.is_on(&self.store.value);
-        let mut button = div().id(toggle.title()).relative().flex().flex_none().items_center().justify_center().w(px(32.0)).h(px(30.0))
-            .rounded(px(8.0)).border_1().cursor_pointer()
-            .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, window, cx| {
-                cx.stop_propagation();
-                this.update_settings(|s| toggle.flip(s), window, cx);
-            }))
-            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                let next = if *hovered { Some(toggle) } else if this.toggle_hover == Some(toggle) { None } else { this.toggle_hover };
-                if next != this.toggle_hover { this.toggle_hover = next; cx.notify(); }
-            }))
-            .child(ui::icon(toggle.icon(on), 17.0, if on { theme::accent_soft() } else { theme::body() }));
-        button = if on { button.bg(theme::bubble()).border_color(theme::bubble_border()) } else { button.bg(theme::raised()).border_color(rgb(0x3a3e44)) };
-        if self.toggle_hover == Some(toggle) {
-            // Like the Smart tooltip: reserved in the window region, but not a hit area.
-            let hits = self.hits.clone();
-            button = button
-                .child(gpui::canvas(move |bounds, _, _| {
-                    let height = px(POPOVER_HEIGHT + TOOLTIP_GAP);
-                    let left = bounds.right() + px(POPOVER_INSET) - px(POPOVER_WIDTH);
-                    hits.reserve(gpui::Bounds::new(gpui::point(left, bounds.top() - height), gpui::size(px(POPOVER_WIDTH), height)));
-                }, |_, _, _, _| {}).absolute().top_0().left_0().size_full())
-                .child(deferred(div().absolute().bottom(px(30.0 + TOOLTIP_GAP)).right(px(-POPOVER_INSET)).child(state_popover(toggle, on))));
-        }
-        button
+            .child(self.toggle_button(Toggle::ScreenOnSend, ToggleStyle::Boxed, cx))
+            .child(self.toggle_button(Toggle::HideFromCapture, ToggleStyle::Boxed, cx))
     }
 
     /// Smart mode: higher reasoning for harder questions. Hovering explains it.
@@ -225,27 +153,6 @@ impl Overlay {
         }
         pill
     }
-}
-
-/// A toggle's state popover, from the Paper "Toggle state popovers" artboard: title, an ON/OFF
-/// badge, what the state means and how to change it. It shows state only; the icon is the control.
-fn state_popover(toggle: Toggle, on: bool) -> Div {
-    let badge = div().flex_none().px(px(7.0)).py(px(1.0)).rounded(px(5.0)).border_1()
-        .text_size(px(10.0)).line_height(px(14.0)).font_weight(FontWeight::BOLD)
-        .when(on, |badge| badge.bg(theme::bubble()).border_color(theme::bubble_border()).text_color(theme::accent_soft()).child("ON"))
-        .when(!on, |badge| badge.bg(rgb(0x2c2f33)).border_color(theme::keycap_border()).text_color(theme::text()).child("OFF"));
-    div().w(px(POPOVER_WIDTH)).flex().flex_col().items_end()
-        .child(div().w_full().flex().flex_col().gap(px(8.0)).px(px(14.0)).py(px(12.0)).rounded(px(12.0))
-            .bg(theme::raised()).border_1().border_color(theme::keycap_border())
-            .child(div().flex().items_center().gap(px(10.0))
-                .child(ui::icon(toggle.icon(on), 16.0, if on { theme::accent_soft() } else { theme::body() }))
-                .child(div().flex_1().text_size(px(13.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child(toggle.title()))
-                .child(badge))
-            .child(div().text_size(px(12.0)).line_height(px(17.0)).text_color(theme::body()).child(toggle.state(on)))
-            .child(div().pt(px(8.0)).border_t_1().border_color(theme::hairline()).text_size(px(11.0)).line_height(px(14.0)).text_color(theme::muted())
-                .child(if on { "Click the icon to turn off" } else { "Click the icon to turn on" })))
-        // The pointer, in the popover's colour, centred under the icon.
-        .child(div().pr(px(POPOVER_INSET + 10.0)).child(gpui::svg().path("icons/tooltip-pointer.svg").w(px(12.0)).h(px(6.0)).mt(px(-1.0)).flex_none().text_color(theme::raised())))
 }
 
 fn hint(text: &'static str) -> impl IntoElement {
