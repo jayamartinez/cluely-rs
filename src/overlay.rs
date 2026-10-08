@@ -97,6 +97,9 @@ pub struct Overlay {
     pub(crate) key_notice: Option<SharedString>,
     pub(crate) loaded_models: Vec<String>,
     pub(crate) models_loading: bool,
+    /// The macOS Settings window's provider → key → model form.
+    #[cfg(target_os = "macos")]
+    pub(crate) model_ui: crate::settings_view::ModelUi,
     /// Answers for the Live session: warm provider, one request at a time, stale replies dropped.
     reasoning: Option<ReasoningSession>,
     /// Decides when to prepare an answer ahead of time (`reasoning::speculation`).
@@ -222,6 +225,7 @@ impl Overlay {
             // The card's return button turns blue once there is text to send.
             if matches!(event, InputEvent::Changed) { cx.notify(); }
         }).detach();
+        #[cfg(not(target_os = "macos"))]
         cx.subscribe_in(&key_input, window, |this, _, event, _, cx| { if matches!(event, InputEvent::Submit) { this.save_key(cx); } }).detach();
         cx.subscribe_in(&model_input, window, |this, input, event, window, cx| {
             if matches!(event, InputEvent::Changed) {
@@ -236,11 +240,15 @@ impl Overlay {
             }
         }).detach();
         let modes_ui = crate::modes_view::ModesUi::new(&modes, window, cx);
+        #[cfg(target_os = "macos")]
+        let model_ui = crate::settings_view::ModelUi::new(&key_input, &base_url_input, window, cx);
         let mut overlay = Self { native, own_window: window.window_handle(), hotkeys, store, settings_tab: None, sessions_window: None,
             #[cfg(target_os = "macos")]
             settings_window: None,
             archive, focus: cx.focus_handle(),
             recorder: None, shape: Rc::default(), hits: Hits::default(), composer, key_input, model_input, base_url_input,
+            #[cfg(target_os = "macos")]
+            model_ui,
             key_notice: None, loaded_models: Vec::new(), models_loading: false, reasoning: None, planner: Planner::new(false, Budget::default()), prepared_shot: PreparedShot::default(), answer_action: "Assist", speculation_attempt: 0,
             metrics: None, next_turn: 0, catching_mouse: true, return_focus: None,
             codex: crate::codex::CodexClient::new(), codex_status: None, claude_status: None, signing_in: false,
@@ -282,6 +290,9 @@ impl Overlay {
             || previous.mic_device != now.mic_device || previous.desktop_device != now.desktop_device || previous.use_gpu != now.use_gpu {
             self.restart_listening_if_live(window, cx);
         }
+        // A new provider (or saved model) may need its list.
+        #[cfg(target_os = "macos")]
+        self.ensure_models(false, window, cx);
         cx.notify();
     }
 
@@ -310,6 +321,8 @@ impl Overlay {
         // A key shown while typing is hidden again whenever a tab opens.
         self.key_input.update(cx, |input, cx| input.set_revealed(false, cx));
         if tab == Tab::Model { self.refresh_subscriptions(window, cx); }
+        #[cfg(target_os = "macos")]
+        if tab == Tab::Model { self.ensure_models(true, window, cx); }
         if tab == Tab::Listening { self.refresh_model_status(); self.load_devices(window, cx); }
         if tab == Tab::History { self.refresh_archive_size(window, cx); }
         if tab == Tab::Modes { self.prepare_modes_tab(cx); }
@@ -822,12 +835,24 @@ impl Overlay {
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
             let result = cx.background_executor().spawn(async move { crate::providers::list_models(wire, &base, key.as_deref()) }).await;
-            let _ = this.update(cx, |this, cx| {
+            let _ = this.update_in(cx, |this, window, cx| {
                 this.models_loading = false;
-                match result {
-                    Ok(models) => this.loaded_models = models,
-                    Err(error) => this.key_notice = Some(format!("Couldn't load models: {error}").into()),
+                // The provider changed while this list loaded: it belongs to the previous one.
+                if this.store.value.api_provider != preset.id {
+                    #[cfg(target_os = "macos")]
+                    this.models_stale(window, cx);
+                } else {
+                    #[cfg(target_os = "macos")]
+                    this.models_loaded(preset, result);
+                    #[cfg(not(target_os = "macos"))]
+                    match result {
+                        Ok(models) => this.loaded_models = models,
+                        Err(error) => this.key_notice = Some(format!("Couldn't load models: {error}").into()),
+                    }
                 }
+                // Only macOS starts another load from here.
+                #[cfg(not(target_os = "macos"))]
+                let _ = window;
                 cx.notify();
             });
         }).detach();

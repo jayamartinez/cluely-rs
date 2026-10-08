@@ -16,6 +16,11 @@ use crate::theme;
 use crate::transcript_view::model_size_label;
 use crate::ui;
 
+#[cfg(target_os = "macos")]
+mod model_form;
+#[cfg(target_os = "macos")]
+pub(crate) use model_form::ModelUi;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Tab { #[default] Model, Listening, Modes, Keys, Window, History }
 
@@ -297,18 +302,29 @@ impl Overlay {
                 .on_mouse_down(MouseButton::Left, listen(cx, move |this, _, window, cx| this.update_settings(|s| s.provider = provider, window, cx)))
                 .child(self.connection_badge(provider, index, cx)));
         }
-        let choice = self.model_choice();
-        let model = field("Model", self.dropdown(choice.picker, choice.value, choice.options, &choice.selected, choice.set, cx));
+        // macOS: provider, key and model as one form in the Settings window (`model_form`).
+        #[cfg(target_os = "macos")]
+        { self.model_form(list, cx) }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let choice = self.model_choice();
+            let model = field("Model", self.dropdown(choice.picker, choice.value, choice.options, &choice.selected, choice.set, cx));
+            let style = field("Answer style", self.answer_style_picker(cx));
+            let smart = ui::setting_row("Smart mode · slower, deeper reasoning", switch("smart-mode", s.smart_mode, |s, v| s.smart_mode = v, cx)).border_b_0();
+            let mut tab = div().flex().flex_col().gap(px(16.0)).child(list).child(div().flex().gap(px(12.0)).child(model).child(style)).child(smart)
+                .child(answer_early(s, cx));
+            if s.provider == Provider::ApiKey { tab = tab.child(self.api_key_section(cx)); }
+            tab
+        }
+    }
+
+    fn answer_style_picker(&self, cx: &mut Context<Self>) -> Div {
+        let s = &self.store.value;
         let styles = [(AnswerStyle::Spoken, "Words I can say aloud"), (AnswerStyle::Standard, "Standard explanations")];
         let style_value = styles.iter().find(|(st, _)| *st == s.answer_style).map(|(_, l)| *l).unwrap_or("Words I can say aloud");
-        let style = field("Answer style", self.dropdown(Picker::AnswerStyle, style_value,
+        self.dropdown(Picker::AnswerStyle, style_value,
             styles.iter().map(|(st, l)| (format!("{st:?}"), l.to_string())).collect(), &format!("{:?}", s.answer_style),
-            |s, v| s.answer_style = if v == "Standard" { AnswerStyle::Standard } else { AnswerStyle::Spoken }, cx));
-        let smart = ui::setting_row("Smart mode · slower, deeper reasoning", switch("smart-mode", s.smart_mode, |s, v| s.smart_mode = v, cx)).border_b_0();
-        let mut tab = div().flex().flex_col().gap(px(16.0)).child(list).child(div().flex().gap(px(12.0)).child(model).child(style)).child(smart)
-            .child(answer_early(s, cx));
-        if s.provider == Provider::ApiKey { tab = tab.child(self.api_key_section(cx)); }
-        tab
+            |s, v| s.answer_style = if v == "Standard" { AnswerStyle::Standard } else { AnswerStyle::Spoken }, cx)
     }
 
     /// Trailing status for a provider row: the account (masked until clicked), a Sign in
@@ -392,6 +408,7 @@ impl Overlay {
         }
     }
 
+    #[cfg(not(target_os = "macos"))]
     fn api_key_section(&self, cx: &mut Context<Self>) -> Div {
         let s = &self.store.value;
         let presets: Vec<(String, String)> = crate::providers::PRESETS.iter().map(|p| (p.id.to_string(), p.label.to_string())).collect();
