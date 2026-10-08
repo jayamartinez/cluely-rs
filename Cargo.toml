@@ -12,11 +12,15 @@ base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 cpal = "0.18"
 dirs = "6"
+# Reads the deflated document part of DOCX files added to a mode.
+flate2 = "1"
 futures = "0.3"
 global-hotkey = "0.8"
 gpui = "0.2.2"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 pulldown-cmark = { version = "0.13", default-features = false }
+# Text of PDF files added to a mode.
+pdf-extract = "0.12"
 raw-window-handle = "0.6"
 rtrb = "0.4"
 rubato = "5"

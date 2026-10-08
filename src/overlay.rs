@@ -164,7 +164,8 @@ pub struct Overlay {
 impl Overlay {
     pub fn new(hotkeys: Hotkeys, presses: UnboundedReceiver<Action>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let native = platform::native_window(window);
-        let store = Store::load();
+        let mut store = Store::load();
+        store.value.mode = crate::modes::ModeStore::load().active_material();
         if let Some(native) = native {
             // Failures here leave a visible, usable window; they are not fatal.
             apply_capture_setting(native, &store.value);
