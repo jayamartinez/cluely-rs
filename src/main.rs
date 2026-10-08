@@ -32,10 +32,10 @@ fn main() {
         let display = cx.primary_display();
         let origin = display.as_ref().map(|display| {
             let bounds = display.bounds();
-            point(bounds.origin.x + (bounds.size.width - px(600.0)) / 2.0, bounds.origin.y + px(24.0))
+            point(bounds.origin.x + (bounds.size.width - px(overlay::WIDTH)) / 2.0, bounds.origin.y + px(24.0))
         }).unwrap_or(point(px(200.0), px(24.0)));
         let options = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(Bounds::new(origin, size(px(600.0), px(120.0))))),
+            window_bounds: Some(WindowBounds::Windowed(Bounds::new(origin, size(px(overlay::WIDTH), px(120.0))))),
             titlebar: None,
             window_background: WindowBackgroundAppearance::Transparent,
             kind: WindowKind::PopUp,

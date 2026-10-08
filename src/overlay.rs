@@ -31,7 +31,8 @@ use crate::theme;
 use crate::ui::{self, chip, keycap};
 use crate::platform::{self, NativeWindow, PreviousFocus};
 
-const WIDTH: f32 = 600.0;
+/// The overlay window; the Live panel is 40 px narrower.
+pub const WIDTH: f32 = 680.0;
 const IDLE_HEIGHT: f32 = 120.0;
 const LIVE_HEIGHT: f32 = 600.0;
 /// Settings needs room for an open picker list below the content.
@@ -148,6 +149,8 @@ pub struct Overlay {
     pub(crate) picker_face: Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
     /// The pointer is over the composer's Smart pill (shows its tooltip).
     pub(crate) smart_hover: bool,
+    /// The composer toggle under the pointer (shows its state popover).
+    pub(crate) toggle_hover: Option<crate::composer::Toggle>,
 }
 
 impl Overlay {
@@ -222,7 +225,7 @@ impl Overlay {
             motion: None, live_since: None, turns: Vec::new(), scroll: ScrollHandle::new(),
             listening: None, listening_status: None, listening_epoch: 0, transcript: Vec::new(), provisional: Default::default(),
             model_installed: false, model_download: None, model_notice: None,
-            open_picker: None, reveal_accounts: false, devices: None, devices_loading: false, archive_bytes: None, picker_face: Rc::default(), smart_hover: false };
+            open_picker: None, reveal_accounts: false, devices: None, devices_loading: false, archive_bytes: None, picker_face: Rc::default(), smart_hover: false, toggle_hover: None };
         overlay.refresh_model_status();
         #[cfg(target_os = "macos")]
         overlay.update_dock();
@@ -414,8 +417,9 @@ impl Overlay {
         }
         // Likewise, leaving a control for the click-through area sends the overlay no "hover
         // ended", so a hover tooltip is cleared here.
-        if self.smart_hover && !over_control {
+        if (self.smart_hover || self.toggle_hover.is_some()) && !over_control {
             self.smart_hover = false;
+            self.toggle_hover = None;
             cx.notify();
         }
     }
@@ -937,12 +941,14 @@ impl Overlay {
         }
         let composer = div().relative().mx(px(12.0)).mb(px(12.0)).flex().flex_col().gap(px(12.0)).p(px(12.0)).rounded(px(13.0))
             .bg(theme::field()).border_1().border_color(theme::hairline())
-            .child(div().id("composer-input").cursor_text()
-                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| window.focus(&this.composer.focus_handle(cx))))
-                .child(self.composer.clone()))
+            .child(div().flex().items_center().gap(px(8.0))
+                .child(div().id("composer-input").flex_1().min_w_0().cursor_text()
+                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| window.focus(&this.composer.focus_handle(cx))))
+                    .child(self.composer.clone()))
+                .child(self.composer_toggles(cx)))
             .child(self.composer_bar(cx))
             .child(self.hits.mark());
-        div().w(px(560.0)).flex_1().min_h_0().flex().flex_col().rounded(px(18.0)).bg(theme::glass())
+        div().w(px(WIDTH - 40.0)).flex_1().min_h_0().flex().flex_col().rounded(px(18.0)).bg(theme::glass())
             .border_1().border_color(theme::hairline()).overflow_hidden()
             .child(ticker).child(thread).child(actions).child(composer)
     }
