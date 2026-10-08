@@ -214,9 +214,8 @@ pub fn return_focus(previous: PreviousFocus) {
 static SHOWN: AtomicBool = AtomicBool::new(true);
 /// Bumped by every show and hide, so a hide whose fade ends after the overlay was shown again leaves it.
 static VISIBILITY_GENERATION: AtomicU64 = AtomicU64::new(0);
-const FADE_SECONDS: f64 = 0.14;
-/// Showing, the overlay settles this far down into place as it fades in.
-const POP_DISTANCE: f64 = 8.0;
+const FADE_SECONDS: f64 = super::FADE.as_secs_f64();
+use super::POP_DISTANCE;
 
 pub fn is_visible(window: NativeWindow) -> bool { window.get().isVisible() && SHOWN.load(Ordering::Relaxed) }
 

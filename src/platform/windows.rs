@@ -3,6 +3,8 @@
 
 use std::path::Path;
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use gpui::{Pixels, Size, Window};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -19,9 +21,11 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, VIRTUAL_KEY, VK_CONTROL, VK_DOWN, VK_LBUTTON, VK_LEFT, VK_MENU, VK_RIGHT, VK_SHIFT, VK_UP,
 };
 use windows::Win32::Foundation::{COLORREF, POINT};
+use super::{FADE, POP_DISTANCE};
+use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
-    GWL_EXSTYLE, GetCursorPos, GetForegroundWindow, GetWindowLongPtrW, SetForegroundWindow, LWA_ALPHA, SetLayeredWindowAttributes, SetWindowLongPtrW, WS_EX_LAYERED,
-    WS_EX_TRANSPARENT,
+    GWL_EXSTYLE, GetCursorPos, GetForegroundWindow, GetLayeredWindowAttributes, GetWindowLongPtrW, SetForegroundWindow, LWA_ALPHA, SetLayeredWindowAttributes,
+    SetWindowLongPtrW, WS_EX_LAYERED, WS_EX_TRANSPARENT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowRect, HWND_TOPMOST, IsWindowVisible, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOSIZE,
@@ -177,12 +181,67 @@ pub fn take_focus(hwnd: HWND) -> Option<PreviousFocus> {
 /// Hand the keyboard back to the window `take_focus` returned.
 pub fn return_focus(previous: PreviousFocus) { activate(previous); }
 
-pub fn is_visible(hwnd: HWND) -> bool { unsafe { IsWindowVisible(hwnd).as_bool() } }
+/// Whether the overlay was last shown rather than hidden. A hide keeps the window on screen until its
+/// fade ends, so the window's own visibility would lag a quick second toggle (as on macOS).
+static SHOWN: AtomicBool = AtomicBool::new(true);
+/// Bumped by every show and hide, so a fade that a newer one has overtaken stops.
+static VISIBILITY_GENERATION: AtomicU64 = AtomicU64::new(0);
+/// Time between fade steps (about 120 per second; each is one layered-alpha update).
+const FADE_STEP: Duration = Duration::from_millis(8);
 
-/// Show without stealing focus from the app the user is working in.
+pub fn is_visible(hwnd: HWND) -> bool { (unsafe { IsWindowVisible(hwnd).as_bool() }) && SHOWN.load(Ordering::Relaxed) }
+
+/// Show without stealing focus from the app the user is working in. As on macOS, showing pops in (a
+/// fade while settling `POP_DISTANCE` down into place) and hiding fades out, over `FADE`. The steps run
+/// on a short-lived thread, so the UI thread never waits for them.
 pub fn set_visible(hwnd: HWND, visible: bool) {
-    unsafe { let _ = ShowWindow(hwnd, if visible { SW_SHOWNOACTIVATE } else { SW_HIDE }); }
+    let generation = VISIBILITY_GENERATION.fetch_add(1, Ordering::Relaxed) + 1;
+    SHOWN.store(visible, Ordering::Relaxed);
+    // HWND isn't Send; the handle stays valid for the app's lifetime.
+    let raw = hwnd.0 as isize;
+    let _ = std::thread::Builder::new().name("cluelyrs-fade".into()).spawn(move || fade(HWND(raw as *mut _), visible, generation));
 }
+
+fn fade(hwnd: HWND, visible: bool, generation: u64) {
+    let overtaken = || VISIBILITY_GENERATION.load(Ordering::Relaxed) != generation;
+    unsafe {
+        let was_visible = IsWindowVisible(hwnd).as_bool();
+        if !visible && !was_visible { return; }
+        // A fade that was overtaken continues from where it stopped.
+        let mut alpha = 255u8;
+        let from = if was_visible && GetLayeredWindowAttributes(hwnd, None, Some(&mut alpha), None).is_ok() { alpha as f32 / 255.0 } else { 0.0 };
+        let to = if visible { 1.0 } else { 0.0 };
+        let mut rest = RECT::default();
+        let _ = GetWindowRect(hwnd, &mut rest);
+        let pop = if visible && !was_visible { (POP_DISTANCE * GetDpiForWindow(hwnd) as f64 / 96.0).round() as i32 } else { 0 };
+        let place = |offset: i32| { let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), rest.left, rest.top - offset, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE); };
+        if visible && !was_visible {
+            let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 0, LWA_ALPHA);
+            place(pop);
+            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        }
+        let started = Instant::now();
+        loop {
+            if overtaken() {
+                // The newer fade starts from wherever this one is; only the position must be at rest.
+                if pop != 0 { place(0); }
+                return;
+            }
+            let progress = ease_in_out((started.elapsed().as_secs_f32() / FADE.as_secs_f32()).min(1.0));
+            let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), ((from + (to - from) * progress) * 255.0).round() as u8, LWA_ALPHA);
+            if pop != 0 { place((pop as f32 * (1.0 - progress)).round() as i32); }
+            if progress >= 1.0 { break; }
+            std::thread::sleep(FADE_STEP);
+        }
+        if !visible && !overtaken() {
+            let _ = ShowWindow(hwnd, SW_HIDE);
+            let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA);
+        }
+    }
+}
+
+/// Slow in, slow out, like the macOS animation's default timing.
+fn ease_in_out(t: f32) -> f32 { if t < 0.5 { 2.0 * t * t } else { 1.0 - (-2.0 * t + 2.0).powi(2) / 2.0 } }
 
 /// Open a folder in File Explorer.
 pub fn open_folder(path: &Path) -> std::io::Result<()> { Command::new("explorer.exe").arg(path).spawn().map(drop) }
