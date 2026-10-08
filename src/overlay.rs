@@ -198,7 +198,7 @@ impl Overlay {
             if store.value.save_sessions { archive.prune(store.value.keep_sessions, archive::unix_now()); }
         }
         let start_live = store.value.start_live_on_launch;
-        let composer = cx.new(|cx| TextInput::new("Ask about your screen or conversation…", cx));
+        let composer = cx.new(|cx| TextInput::new(composer_placeholder(&store.value), cx));
         let key_input = cx.new(|cx| TextInput::new("Paste your API key", cx).masked(true));
         let model_input = cx.new(|cx| TextInput::new("Model id, e.g. from the list below", cx));
         let base_url_input = cx.new(|cx| TextInput::new("https://your-endpoint.example/v1", cx));
@@ -252,6 +252,10 @@ impl Overlay {
         }
         #[cfg(target_os = "macos")]
         if previous.show_in_dock != self.store.value.show_in_dock { self.update_dock(); }
+        if previous.screen_on_send != self.store.value.screen_on_send {
+            let placeholder = composer_placeholder(&self.store.value);
+            self.composer.update(cx, |input, cx| input.set_placeholder(placeholder, cx));
+        }
         if previous.api_provider != self.store.value.api_provider {
             // Each provider keeps its own model; show the one saved for the new provider.
             let model = self.store.value.api_model().to_string();
@@ -1041,6 +1045,11 @@ fn click_through(native: Option<NativeWindow>, hits: Hits, applied: Rc<RefCell<V
     }
 }
 
+/// The text box's placeholder says what an answer will see: the screen only while Screen on send is on.
+fn composer_placeholder(settings: &Settings) -> &'static str {
+    if settings.screen_on_send { "Ask about your screen or conversation…" } else { "Ask about your conversation…" }
+}
+
 /// One rounded rectangle around `shapes`.
 fn enclosing<'a>(shapes: impl Iterator<Item = &'a platform::Shape>, radius: i32) -> platform::Shape {
     shapes.fold((i32::MAX, i32::MAX, i32::MIN, i32::MIN, radius), |(left, top, right, bottom, radius), &(l, t, r, b, _)| {
@@ -1071,7 +1080,16 @@ fn auto_header(id: u64, heard_ms: u64, streaming: bool, hit: impl IntoElement, c
 
 #[cfg(test)]
 mod tests {
-    use super::enclosing;
+    use super::{composer_placeholder, enclosing};
+    use crate::settings::Settings;
+
+    #[test]
+    fn the_placeholder_mentions_the_screen_only_while_it_is_sent() {
+        let on = Settings { screen_on_send: true, ..Settings::default() };
+        let off = Settings { screen_on_send: false, ..Settings::default() };
+        assert_eq!(composer_placeholder(&on), "Ask about your screen or conversation…");
+        assert_eq!(composer_placeholder(&off), "Ask about your conversation…");
+    }
 
     #[test]
     fn open_settings_hold_one_rectangle_around_every_shape() {

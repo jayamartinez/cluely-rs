@@ -118,6 +118,11 @@ impl TextInput {
     }
 
     /// Render the text as bullets (for API keys). Copy and cut are disabled while masked.
+    pub fn set_placeholder(&mut self, placeholder: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.placeholder = placeholder.into();
+        cx.notify();
+    }
+
     pub fn masked(mut self, masked: bool) -> Self {
         self.masked = masked;
         self
