@@ -39,6 +39,7 @@ fn main() -> anyhow::Result<()> {
             source.label(), s.chunks, s.samples as f64 / SAMPLE_RATE as f64, s.first_start.unwrap_or(0.0), s.last_end.unwrap_or(0.0),
             s.peak, s.max_gap, s.max_lag, capture.dropped_samples(*source));
     }
+    for (source, why) in capture.take_ended() { println!("{}: ended: {why}", source.label()); }
     capture.stop();
     if them_only {
         println!("\nThem level per 500 ms (from its first sample):");
