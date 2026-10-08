@@ -23,10 +23,13 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 /// The overlay's own window. `native_window` keeps a strong reference for the rest of the
 /// process, so the pointer stays valid.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct NativeWindow(NonNull<NSWindow>);
+pub struct NativeWindow { window: NonNull<NSWindow>, view: NonNull<NSView> }
 
 impl NativeWindow {
-    fn get(&self) -> &NSWindow { unsafe { self.0.as_ref() } }
+    fn get(&self) -> &NSWindow { unsafe { self.window.as_ref() } }
+
+    /// GPUI's view, which must be the first responder for key presses to reach GPUI.
+    fn view(&self) -> &NSView { unsafe { self.view.as_ref() } }
 }
 
 /// The app that was frontmost before the overlay took the keyboard, and the overlay itself.
@@ -38,9 +41,10 @@ pub type Shape = (i32, i32, i32, i32, i32);
 
 pub fn native_window(window: &Window) -> Option<NativeWindow> {
     let RawWindowHandle::AppKit(handle) = HasWindowHandle::window_handle(window).ok()?.as_raw() else { return None };
-    // GPUI's content view, alive as long as its window; only its window is read.
-    let view: &NSView = unsafe { handle.ns_view.cast().as_ref() };
-    NonNull::new(Retained::into_raw(view.window()?)).map(NativeWindow)
+    // GPUI's view, alive as long as its window, which is retained here for the rest of the process.
+    let view = handle.ns_view.cast::<NSView>();
+    let window = NonNull::new(Retained::into_raw(unsafe { view.as_ref() }.window()?))?;
+    Some(NativeWindow { window, view })
 }
 
 /// Keep the overlay out of screen shares, recordings and screenshots: the window server leaves
@@ -53,9 +57,12 @@ pub fn set_capture_hidden(window: NativeWindow, hidden: bool) -> std::io::Result
 /// GPUI's panel is titled, so macOS draws a hairline border and a shadow around its transparent
 /// rectangle. Make it borderless (still non-activating) and drop the shadow.
 pub fn remove_frame(window: NativeWindow) {
-    let window = window.get();
-    window.setStyleMask(NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel);
-    window.setHasShadow(false);
+    let native = window.get();
+    native.setStyleMask(NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel);
+    native.setHasShadow(false);
+    // Changing the style mask rebuilds the frame and leaves the window itself as first responder,
+    // so key presses would never reach GPUI (the text box would show a caret but take no typing).
+    native.makeFirstResponder(Some(window.view()));
 }
 
 /// GPUI already floats the panel above other apps' windows. Also keep it in place through Mission
@@ -169,13 +176,21 @@ pub fn cursor_in_window(window: NativeWindow) -> Option<(i32, i32)> {
     Some((x.round() as i32, y.round() as i32))
 }
 
-/// Give the overlay the keyboard, returning the app that had it. The panel is non-activating, so it
-/// becomes the key window without bringing CluelyRS forward. Allowed because it follows a hotkey
+/// Give the overlay the keyboard, returning the app that had it. Allowed because it follows a hotkey
 /// press or a click.
 pub fn take_focus(window: NativeWindow) -> Option<PreviousFocus> {
     let own = std::process::id() as i32;
     let previous = NSWorkspace::sharedWorkspace().frontmostApplication().map(|app| app.processIdentifier()).filter(|pid| *pid != own);
+    // Keyboard input goes to the active app, so activate CluelyRS (as SetForegroundWindow does on
+    // Windows) before making the panel key. Activating first also keeps GPUI from seeing a key
+    // window in an inactive app, which it handles by resigning key status under a lock (a deadlock).
+    if let Some(mtm) = MainThreadMarker::new() {
+        // `activate()` exists only from macOS 14.
+        #[allow(deprecated)]
+        NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
+    }
     window.get().makeKeyAndOrderFront(None);
+    window.get().makeFirstResponder(Some(window.view()));
     previous.map(|pid| PreviousFocus { pid, overlay: window })
 }
 
