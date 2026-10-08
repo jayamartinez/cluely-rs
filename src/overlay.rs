@@ -65,11 +65,17 @@ struct Turn {
 
 pub struct Overlay {
     native: Option<NativeWindow>,
+    /// The overlay's own window. Settings handlers run here even when macOS shows the settings
+    /// in their own window (see `settings_view::listen`).
+    pub(crate) own_window: gpui::AnyWindowHandle,
     pub(crate) hotkeys: Hotkeys,
     pub(crate) store: Store,
     settings_tab: Option<Tab>,
     /// The Sessions review window, while it's open.
     sessions_window: Option<gpui::WindowHandle<SessionsWindow>>,
+    /// macOS shows settings in their own window, while it's open.
+    #[cfg(target_os = "macos")]
+    pub(crate) settings_window: Option<gpui::WindowHandle<crate::settings_window::SettingsWindow>>,
     /// Where Live sessions are saved; `None` when no data folder is available.
     pub(crate) archive: Option<Archive>,
     /// Receives Esc while settings is open.
@@ -205,7 +211,10 @@ impl Overlay {
                 this.update_settings(|s| s.custom_base_url = url, window, cx);
             }
         }).detach();
-        let mut overlay = Self { native, hotkeys, store, settings_tab: None, sessions_window: None, archive, focus: cx.focus_handle(),
+        let mut overlay = Self { native, own_window: window.window_handle(), hotkeys, store, settings_tab: None, sessions_window: None,
+            #[cfg(target_os = "macos")]
+            settings_window: None,
+            archive, focus: cx.focus_handle(),
             recorder: None, shape: Rc::default(), hits: Hits::default(), composer, key_input, model_input, base_url_input,
             key_notice: None, loaded_models: Vec::new(), models_loading: false, reasoning: None, planner: Planner::new(false, Budget::default()), prepared_shot: PreparedShot::default(), answer_action: "Assist", speculation_attempt: 0,
             metrics: None, next_turn: 0, catching_mouse: true, return_focus: None,
@@ -243,12 +252,22 @@ impl Overlay {
     }
 
     pub fn open_settings(&mut self, tab: Tab, window: &mut Window, cx: &mut Context<Self>) {
+        self.prepare_tab(tab, window, cx);
+        #[cfg(target_os = "macos")]
+        crate::settings_window::open(self, tab, cx);
+        #[cfg(not(target_os = "macos"))]
+        {
+            self.settings_tab = Some(tab);
+            self.open_panel(window, cx);
+        }
+    }
+
+    /// Refresh what a settings tab shows (accounts, devices, history size) as it opens.
+    pub(crate) fn prepare_tab(&mut self, tab: Tab, window: &mut Window, cx: &mut Context<Self>) {
         self.open_picker = None;
         if tab == Tab::Model { self.refresh_subscriptions(window, cx); }
         if tab == Tab::Listening { self.refresh_model_status(); self.load_devices(window, cx); }
         if tab == Tab::History { self.refresh_archive_size(window, cx); }
-        self.settings_tab = Some(tab);
-        self.open_panel(window, cx);
     }
 
     /// Open (or focus) the full-size Sessions review window.
@@ -258,6 +277,7 @@ impl Overlay {
         sessions_window::open(&mut self.sessions_window, root, self.codex.clone(), cx);
     }
 
+    #[cfg(not(target_os = "macos"))]
     fn open_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // Esc works through the global shortcut; focus also lets it work when the overlay is active.
         window.focus(&self.focus);
@@ -348,6 +368,12 @@ impl Overlay {
         }
     }
 
+    /// Whether the open dropdown is shown in the overlay (Settings in the overlay, or the composer's
+    /// model switcher) rather than in the macOS Settings window.
+    fn picker_in_overlay(&self) -> bool {
+        self.open_picker.is_some_and(|picker| self.settings_tab.is_some() || picker == crate::settings_view::Picker::Composer)
+    }
+
     fn update_passthrough(&mut self, cx: &mut Context<Self>) {
         let Some(native) = self.native else { return };
         let over_control = platform::cursor_in_window(native).is_some_and(|point| self.hits.contains(point));
@@ -357,7 +383,7 @@ impl Overlay {
         }
         // A press anywhere that isn't one of the overlay's controls (the click-through answer
         // area, or another app) never reaches the overlay, so an open list closes from here.
-        if self.open_picker.is_some() && !over_control && platform::left_button_down() {
+        if self.picker_in_overlay() && !over_control && platform::left_button_down() {
             self.open_picker = None;
             cx.notify();
         }
@@ -982,7 +1008,7 @@ fn click_through(native: Option<NativeWindow>, hits: Hits, applied: Rc<RefCell<V
     }
 }
 
-fn apply_capture_setting(native: NativeWindow, settings: &Settings) {
+pub(crate) fn apply_capture_setting(native: NativeWindow, settings: &Settings) {
     // CLUELYRS_ALLOW_CAPTURE=1 is a development switch for taking screenshots of the overlay.
     let dev_override = std::env::var_os("CLUELYRS_ALLOW_CAPTURE").is_some_and(|value| value == "1");
     if let Err(error) = platform::set_capture_hidden(native, settings.hide_from_capture && !dev_override) {
