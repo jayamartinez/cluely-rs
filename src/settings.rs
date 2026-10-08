@@ -81,6 +81,10 @@ pub struct Settings {
     /// Also keep the screenshots attached to answers.
     pub save_screenshots: bool,
     pub keep_sessions: Retention,
+    /// The active mode's meeting context and file text (see `modes`). Not saved here: the
+    /// overlay fills it from `modes.json` when it starts and whenever the mode changes.
+    #[serde(skip)]
+    pub mode: Option<std::sync::Arc<crate::modes::Active>>,
 }
 
 impl Default for Settings {
@@ -92,7 +96,7 @@ impl Default for Settings {
             listen_mic: true, listen_desktop: true,
             mic_device: String::new(), desktop_device: String::new(),
             hide_from_capture: true, screen_on_send: true, start_live_on_launch: false, show_in_dock: false,
-            save_sessions: true, save_screenshots: true, keep_sessions: Retention::default(),
+            save_sessions: true, save_screenshots: true, keep_sessions: Retention::default(), mode: None,
         }
     }
 }

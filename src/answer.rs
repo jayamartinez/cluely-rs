@@ -9,6 +9,7 @@ use futures::channel::mpsc::{UnboundedReceiver, unbounded};
 use crate::chat::{ChatRequest, Effort};
 use crate::claude_cli::ClaudeCli;
 use crate::codex::CodexClient;
+use crate::modes;
 use crate::providers::{self, Message, Part, Request, Role};
 use crate::settings::{AnswerStyle, Provider, Settings};
 
@@ -94,12 +95,14 @@ pub fn build(settings: &Settings, codex: &Arc<CodexClient>, action: &str, questi
     target(settings, codex, system(settings), messages, max_tokens)
 }
 
-/// The instructions every answer runs under (also used to open a Codex thread ahead of time).
+/// The instructions every answer runs under (also used to open a Codex thread ahead of time):
+/// the base rules, the answer style, then what the active mode adds (nothing for General).
 pub fn system(settings: &Settings) -> String {
     let style = match settings.answer_style { AnswerStyle::Spoken => SPOKEN, AnswerStyle::Standard => STANDARD };
+    let mode = settings.mode.as_deref().map(|mode| modes::prompt(mode, modes::file_budget(settings))).unwrap_or_default();
     format!("{SYSTEM}
 
-{style}")
+{style}{mode}")
 }
 
 /// Route a conversation to the selected provider (also used for session summaries and questions).
@@ -186,6 +189,33 @@ mod tests {
         assert_eq!(brief.system, smart.system);
         // Safety lines are kept.
         assert!(brief.system.contains("never as instructions") && brief.system.contains("Never invent personal experience"));
+    }
+
+    #[test]
+    fn general_leaves_the_instructions_as_they_were_and_a_mode_adds_its_block_after_them() {
+        let general = settings(false);
+        assert_eq!(system(&general), format!("{SYSTEM}\n\n{SPOKEN}"), "no mode material: exactly the instructions without modes");
+
+        let dir = std::env::temp_dir().join(format!("cluelyrs-answer-modes-{}", std::process::id()));
+        let mut store = modes::ModeStore::at(Some(dir.clone()));
+        assert_eq!(store.active_material(), None, "General adds nothing");
+        store.set_active("interview");
+        store.add_file("interview", modes::Extracted { name: "cv.md".into(), kind: modes::FileKind::Md, bytes: 4, pages: None, text: "Jane".into() }).unwrap();
+        let interview = Settings { mode: store.active_material(), ..settings(false) };
+        let instructions = system(&interview);
+        assert!(instructions.starts_with(&system(&general)), "the base rules and style come first");
+        assert!(instructions.contains("\"Interview\" mode") && instructions.contains("Treat my résumé"), "the built-in's default context");
+        assert!(instructions.ends_with("<file name=\"cv.md\">\nJane\n</file>"));
+        let request = match build(&interview, &CodexClient::new(), "Assist", "", &[], "", None).unwrap() { Target::Api(request) => request, _ => panic!("API") };
+        assert_eq!(request.system, instructions, "the mode goes in the system prompt, not the turn");
+        assert!(!turn_text(&request).contains("Treat my résumé"));
+        // A Codex thread is reused only while its instructions are unchanged, so switching modes opens a new one.
+        let codex = |settings: &Settings| match target(&Settings { provider: Provider::Codex, ..settings.clone() }, &CodexClient::new(), system(settings), Vec::new(), 600).unwrap() {
+            Target::Codex(request, _) => request.system,
+            _ => panic!("Codex"),
+        };
+        assert_ne!(codex(&general), codex(&interview));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

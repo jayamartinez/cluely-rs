@@ -19,6 +19,7 @@ pub mod listening;
 pub mod markdown;
 pub mod metrics;
 pub mod models;
+pub mod modes;
 pub mod notes;
 pub mod overlay;
 pub mod platform;
