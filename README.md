@@ -35,15 +35,15 @@ paths are deep, so in a long folder path run `git config --global core.longpaths
 |---|---|
 | `Ctrl Shift ↵` | Start / stop a Live session |
 | `Ctrl Shift Space` | Jump into the text box (Enter sends and returns you to your app; Esc returns without sending) |
-| `Ctrl ↵` | Assist: answer from your screen and the conversation (only while Live) |
+| `Ctrl ↵` | Assist: answer from your screen and the conversation (starts Live if needed) |
 | `Ctrl \` | Show / hide the overlay |
 | `Ctrl Alt ←↑↓→` | Move the overlay (hold to glide) |
 | `Ctrl Alt Shift ↑↓` | Scroll the answer |
 | `Esc` | Close settings |
 
 Only the pill, the quick actions and the text box take mouse clicks; answers and the space around the overlay are
-click-through. Move and scroll shortcuts are claimed only while the overlay is visible, and Assist only during a Live
-session, so other apps keep their shortcuts.
+click-through. Move and scroll shortcuts are claimed only while the overlay is visible, so other apps keep their
+shortcuts. Assist is claimed at all times, as in Cluely: while CluelyRS runs, other apps never get `Ctrl ↵`.
 
 **Answer with** (Settings → Model):
 

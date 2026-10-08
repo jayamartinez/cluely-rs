@@ -9,6 +9,8 @@ use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Action {
+    /// Answer from the screen and the conversation. Claimed at all times, as Cluely does, so the app
+    /// in front never gets the Ctrl+Enter (⌘↵ on macOS), Live or not.
     Assist,
     Live,
     /// Jump into the composer to type without clicking.
@@ -35,9 +37,6 @@ impl Action {
     /// panel is open and on screen, so it never swallows Esc in other apps otherwise.
     pub fn only_while_panel(self) -> bool { matches!(self, Self::Close) }
 
-    /// Ctrl+Enter sends messages in many apps, so Assist is only claimed during a Live session.
-    pub fn only_while_live(self) -> bool { matches!(self, Self::Assist) }
-
     #[cfg(target_os = "macos")]
     fn arrow(self) -> Option<crate::platform::Arrow> {
         use crate::platform::Arrow;
@@ -50,7 +49,7 @@ impl Action {
         }
     }
 
-    fn always(self) -> bool { !self.only_while_visible() && !self.only_while_panel() && !self.only_while_live() }
+    fn always(self) -> bool { !self.only_while_visible() && !self.only_while_panel() }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -91,7 +90,6 @@ pub struct Hotkeys {
     by_id: HashMap<u32, Action>,
     visible_registered: bool,
     panel_registered: bool,
-    live_registered: bool,
     /// Shortcuts another application already owns; reported instead of failing startup.
     pub unavailable: Vec<Action>,
 }
@@ -116,7 +114,7 @@ impl Hotkeys {
                 let _ = sender.unbounded_send(*action);
             }
         }));
-        let mut hotkeys = Self { manager, bindings, by_id, visible_registered: false, panel_registered: false, live_registered: false, unavailable: Vec::new() };
+        let mut hotkeys = Self { manager, bindings, by_id, visible_registered: false, panel_registered: false, unavailable: Vec::new() };
         hotkeys.register(Action::always);
         Ok((hotkeys, receiver))
     }
@@ -133,12 +131,6 @@ impl Hotkeys {
         if visible == self.visible_registered { return; }
         self.visible_registered = visible;
         self.set_group(Action::only_while_visible, visible);
-    }
-
-    pub fn set_live(&mut self, live: bool) {
-        if live == self.live_registered { return; }
-        self.live_registered = live;
-        self.set_group(Action::only_while_live, live);
     }
 
     pub fn set_panel_open(&mut self, open: bool) {
@@ -180,4 +172,14 @@ fn pretty(accelerator: &str) -> String {
         "super" => "⌘", "control" => "⌃", "alt" => "⌥", "shift" => "⇧", "Enter" => "↵", "Backslash" => "\\",
         "ArrowUp" => "↑", "ArrowDown" => "↓", "ArrowLeft" => "←", "ArrowRight" => "→", "Escape" => "Esc", other => other,
     }).collect::<Vec<_>>().join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Action;
+
+    #[test]
+    fn assist_is_claimed_at_all_times_like_cluely() {
+        assert!(Action::Assist.always());
+    }
 }
