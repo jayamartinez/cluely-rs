@@ -1,6 +1,9 @@
 //! Win32 window behaviour GPUI does not expose: capture exclusion, topmost,
 //! keyboard-driven movement and hide/show without destroying the window.
 
+use std::path::Path;
+use std::process::Command;
+
 use gpui::Window;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use windows::Win32::Foundation::{HWND, RECT};
@@ -25,7 +28,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SetWindowDisplayAffinity, SetWindowPos, ShowWindow, WDA_EXCLUDEFROMCAPTURE, WDA_NONE,
 };
 
-pub fn hwnd(window: &Window) -> Option<HWND> {
+/// The overlay's own top-level window.
+pub type NativeWindow = HWND;
+/// The window that had the keyboard before the overlay took it.
+pub type PreviousFocus = HWND;
+
+pub fn native_window(window: &Window) -> Option<NativeWindow> {
     // Window has an inherent `window_handle()` returning GPUI's own handle type.
     match HasWindowHandle::window_handle(window).ok()?.as_raw() {
         RawWindowHandle::Win32(handle) => Some(HWND(handle.hwnd.get() as *mut _)),
@@ -147,13 +155,24 @@ pub fn cursor_in_window(hwnd: HWND) -> Option<(i32, i32)> {
     Some((point.x - rect.left, point.y - rect.top))
 }
 
-pub fn foreground() -> Option<HWND> {
+fn foreground() -> Option<HWND> {
     let window = unsafe { GetForegroundWindow() };
     (!window.is_invalid()).then_some(window)
 }
 
 /// Bring a window to the foreground. Allowed here because it follows a hotkey press or a click.
-pub fn activate(hwnd: HWND) { unsafe { let _ = SetForegroundWindow(hwnd); } }
+fn activate(hwnd: HWND) { unsafe { let _ = SetForegroundWindow(hwnd); } }
+
+/// Bring the overlay to the foreground, returning the window that had the keyboard if it was
+/// another one.
+pub fn take_focus(hwnd: HWND) -> Option<PreviousFocus> {
+    let previous = foreground().filter(|previous| *previous != hwnd);
+    activate(hwnd);
+    previous
+}
+
+/// Hand the keyboard back to the window `take_focus` returned.
+pub fn return_focus(previous: PreviousFocus) { activate(previous); }
 
 pub fn is_visible(hwnd: HWND) -> bool { unsafe { IsWindowVisible(hwnd).as_bool() } }
 
@@ -161,3 +180,9 @@ pub fn is_visible(hwnd: HWND) -> bool { unsafe { IsWindowVisible(hwnd).as_bool()
 pub fn set_visible(hwnd: HWND, visible: bool) {
     unsafe { let _ = ShowWindow(hwnd, if visible { SW_SHOWNOACTIVATE } else { SW_HIDE }); }
 }
+
+/// Open a folder in File Explorer.
+pub fn open_folder(path: &Path) -> std::io::Result<()> { Command::new("explorer.exe").arg(path).spawn().map(drop) }
+
+/// Open File Explorer at a file's folder with the file selected.
+pub fn reveal_file(path: &Path) -> std::io::Result<()> { Command::new("explorer.exe").arg("/select,").arg(path).spawn().map(drop) }
