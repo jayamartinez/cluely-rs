@@ -23,8 +23,9 @@ const RETURN_IDLE: u32 = 0x43464b;
 /// Toolbar icons while off.
 const ICON_OFF: u32 = 0x8a867e;
 const HOVER: u32 = 0xffffff0f;
-/// The conversation scrolls once it reaches this height.
-const THREAD_MAX_HEIGHT: f32 = 344.0;
+/// The conversation (transcript strip, answers, quick actions) grows to this height, then the
+/// answers scroll.
+const CONVERSATION_MAX_HEIGHT: f32 = 418.0;
 
 impl Overlay {
     pub(super) fn mac_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -35,9 +36,12 @@ impl Overlay {
             .border_1().border_color(rgba(EDGE));
         if live {
             let (ticker, thread, actions) = self.live_parts(cx);
-            let mut conversation = div().flex().flex_col().bg(rgba(CARD)).rounded_t(px(19.0)).child(ticker);
-            if !self.turns.is_empty() { conversation = conversation.child(thread.flex_none().max_h(px(THREAD_MAX_HEIGHT))); }
-            card = card.child(conversation.child(actions));
+            // The conversation hugs its content up to a cap; past it the thread (which may shrink,
+            // unlike the strip and the actions) scrolls.
+            let mut conversation = div().flex().flex_col().max_h(px(CONVERSATION_MAX_HEIGHT)).bg(rgba(CARD)).rounded_t(px(19.0))
+                .child(ticker.flex_none());
+            if !self.turns.is_empty() { conversation = conversation.child(thread.flex_initial().min_h_0()); }
+            card = card.child(conversation.child(actions.flex_none()));
         }
         card.child(self.input_row(live, cx)).child(self.toolbar(live, cx))
     }
