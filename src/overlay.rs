@@ -807,7 +807,7 @@ impl Overlay {
             chip().id("start").bg(theme::accent()).cursor_pointer()
                 .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| this.set_live(true, window, cx)))
                 .child(div().text_size(px(13.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::accent_ink()).child("▶  Start"))
-                .child(div().font_family(theme::MONO).text_size(px(11.0)).text_color(gpui::rgb(0x16336b)).child(self.hotkeys.label(Action::Live)))
+                .child(ui::keys(&self.hotkeys.label(Action::Live), 11.0, gpui::rgb(0x16336b)))
                 .into_any_element()
         };
         let hide = chip().id("hide").cursor_pointer()
