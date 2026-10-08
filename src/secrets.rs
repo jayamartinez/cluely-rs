@@ -1,4 +1,5 @@
-//! Provider API keys stored in the Windows Credential Manager (via `keyring`).
+//! Provider API keys stored in the OS credential store via `keyring`: the Windows Credential
+//! Manager on Windows, the login Keychain on macOS.
 //!
 //! Key material is never logged, formatted into errors, or returned except by [`get`].
 //! Errors from the credential store are mapped to short fixed messages because some
@@ -6,7 +7,11 @@
 
 use anyhow::{Result, bail};
 
-const SERVICE: &str = "CluelyRS";
+/// The credential store's name in user-facing copy such as "Saved to Keychain."
+pub const STORE_NAME: &str = if cfg!(windows) { "Windows Credential Manager" } else { "Keychain" };
+
+/// Test builds use their own service so they can never read, overwrite or delete real keys.
+const SERVICE: &str = if cfg!(test) { "cluely-rs-keychain-test" } else { "CluelyRS" };
 const MAX_PROVIDER_ID_LEN: usize = 64;
 const MAX_KEY_LEN: usize = 512;
 
@@ -38,8 +43,11 @@ pub fn hint(provider_id: &str) -> Option<String> {
 
 fn entry(provider_id: &str) -> Result<keyring::Entry> {
     validate_provider_id(provider_id)?;
-    keyring::Entry::new(SERVICE, &format!("api-key:{provider_id}"))
-        .map_err(|error| store_error("open", &error))
+    keyring::Entry::new(SERVICE, &account(provider_id)).map_err(|error| store_error("open", &error))
+}
+
+fn account(provider_id: &str) -> String {
+    format!("api-key:{provider_id}")
 }
 
 fn store_error(action: &str, error: &keyring::Error) -> anyhow::Error {
@@ -134,5 +142,45 @@ mod tests {
     fn store_errors_do_not_include_secret_bytes() {
         let error = store_error("save", &keyring::Error::BadEncoding(b"sk-topsecret".to_vec()));
         assert!(!error.to_string().contains("topsecret"));
+    }
+
+    /// Stores, reads and deletes a dummy key in the real OS credential store, under the test
+    /// service only. On macOS this can show a Keychain access prompt, so it never runs by default:
+    ///   cargo test --lib secrets::tests::os_store_round_trip -- --ignored
+    #[test]
+    #[ignore = "writes to the OS credential store"]
+    fn os_store_round_trip() {
+        const PROVIDER: &str = "round-trip";
+        let key = "sk-dummy-0123456789abcd";
+        remove(PROVIDER).unwrap();
+        assert_eq!(get(PROVIDER), None);
+
+        set(PROVIDER, key).unwrap();
+        #[cfg(target_os = "macos")]
+        assert!(keychain_has_item(PROVIDER), "the key should be a persistent Keychain item");
+        assert_eq!(get(PROVIDER).as_deref(), Some(key));
+        assert_eq!(hint(PROVIDER).as_deref(), Some("••••abcd"));
+        // A Settings render reads up to two keys (`get` for the badge, `hint` for the key row).
+        const READS: u32 = 50;
+        let started = std::time::Instant::now();
+        for _ in 0..READS {
+            assert!(get(PROVIDER).is_some());
+        }
+        eprintln!("get(): {:?} per read over {READS} reads", started.elapsed() / READS);
+
+        remove(PROVIDER).unwrap();
+        assert_eq!(get(PROVIDER), None);
+        #[cfg(target_os = "macos")]
+        assert!(!keychain_has_item(PROVIDER), "the Keychain item should be gone");
+    }
+
+    /// Looks the item up from another process by its attributes only (no `-g`/`-w`), so the secret
+    /// is never read and no access prompt can appear.
+    #[cfg(target_os = "macos")]
+    fn keychain_has_item(provider_id: &str) -> bool {
+        std::process::Command::new("/usr/bin/security")
+            .args(["find-generic-password", "-s", SERVICE, "-a", &account(provider_id)])
+            .output()
+            .is_ok_and(|output| output.status.success())
     }
 }
