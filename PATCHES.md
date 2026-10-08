@@ -55,8 +55,8 @@ and `advapi32` below are MSVC-only; macOS differences are listed after them.
   default) and is linked, because ggml-cpu uses it for vector math.
 - **macOS, Metal on:** `PARAKEET_GGML_METAL=ON` (upstream ships it off) with `GGML_METAL_EMBED_LIBRARY=ON`, so the
   Metal shaders are compiled into the binary and nothing has to ship beside it. `ggml-metal` and the Foundation, Metal and
-  MetalKit frameworks are linked. On an M1, streams decode at about the CPU's latency with a fraction of its CPU time
-  (measurements below). parakeet.cpp picks the GPU by itself; `PARAKEET_DEVICE=cpu` still forces the CPU backend. Metal
+  MetalKit frameworks are linked. On an M1, streams reach about the CPU's end-of-utterance latency with a ninth of its
+  CPU time, although raw decoding is slower than 4 CPU threads (measurements below). parakeet.cpp picks the GPU by itself; `PARAKEET_DEVICE=cpu` still forces the CPU backend. Metal
   needs the backend shutdown in section 4. To undo, set `PARAKEET_GGML_METAL` back to `OFF` and drop `ggml-metal`, the
   three frameworks and `GGML_METAL_EMBED_LIBRARY`; the shutdown can stay, it is harmless on the CPU.
 
@@ -140,30 +140,30 @@ Numbers are not comparable with the Windows table, because the voice and the mac
 | 8 | 0.591 | 1.367 | 199.5 ms |
 
 **Real time, Me and Them together, 4 threads, 60 s.** `PARAKEET_DEVICE=cpu` forced the CPU in a Metal build. The first
-run is the original measurement, from before Metal was enabled. The second is this build (embedded shaders, backend freed
-at exit), under `/usr/bin/time -l`, while another build may have been compiling on the machine. Latency is the worse of Me
-and Them.
+run is the original measurement (debug build, from before Metal was enabled). The second is this build as users run it
+(`--release`, embedded shaders, backend freed at exit) under `/usr/bin/time -l`, with no other build running but other
+programs busy (load average about 4, including another app drawing on the GPU). Latency is the worse of Me and Them.
 
 | Backend | CPU (cores) | EOU latency p50 / p95 | Peak resident memory |
 |---|---|---|---|
 | CPU, first run | 1.18 | ~172 / ~205 ms | 210 MB |
 | Metal, first run | 0.13 | ~183 / ~193 ms | 249 MB |
-| CPU, second run | 1.65 | ~189 / ~231 ms | 223 MB |
-| Metal, second run | 0.10 | ~169 / ~188 ms | 409 MB |
+| CPU, release | 1.11 | ~173 / ~230 ms | 221 MB |
+| Metal, release | 0.12 | ~183 / ~217 ms | 405 MB |
 
-The second run's memory is the process's peak as `time` reports it; sampled while streaming, it was 251 MB on Metal and
-212 MB on the CPU. Both second runs exited with 0; the Metal one logged `ggml_metal_free: deallocating` and left no crash
-report.
+The release runs' memory is the process's peak as `time` reports it; sampled while streaming, it was 254 MB on Metal and
+209 MB on the CPU. Both exited with 0; the Metal one logged `ggml_metal_free: deallocating` and left no crash report.
 
-**Thread sweep, second run.** `parakeet_bench <wav> sweep --threads 2,4`; RTF per stream.
+**Thread sweep, release.** `parakeet_bench <wav> sweep --threads 2,4`; RTF per stream.
 
 | Backend, threads | RTF, 1 stream | RTF, 2 streams | p95 per-block decode, 2 streams |
 |---|---|---|---|
-| Metal, 2 | 0.144 | 0.241 | 38.0 ms |
-| Metal, 4 | 0.124 | 0.254 | 40.4 ms |
-| CPU, 2 | 0.243 | 0.435 | 68.5 ms |
-| CPU, 4 | 0.289 | 0.516 | 83.3 ms |
+| Metal, 2 | 0.159 | 0.301 | 47.4 ms |
+| Metal, 4 | 0.167 | 0.307 | 48.9 ms |
+| CPU, 2 | 0.138 | 0.280 | 44.0 ms |
+| CPU, 4 | 0.123 | 0.239 | 36.4 ms |
 
-On Metal the thread count matters little. The very first Metal run after the
-build took about 13 s to start decoding while macOS compiled the shaders. Later runs, including one from a copy of the
-binary at another path, started at once.
+So Metal is not faster on an M1: it decodes about a quarter slower than 4 CPU threads, and its end-of-utterance latency is
+about the same (10 ms worse at the median). What it saves is CPU time, about a ninth of the CPU backend's, which is why it
+is the default. The very first Metal run after the build took about 13 s to start decoding while macOS compiled the
+shaders. Later runs, including one from a copy of the binary at another path, started at once.
