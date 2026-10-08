@@ -13,7 +13,6 @@ use gpui::{
     AnyElement, Context, Entity, FocusHandle, Focusable, FontWeight, IntoElement, KeyDownEvent, MouseButton, ParentElement, Render,
     ScrollHandle, SharedString, Styled, Window, div, point, prelude::*, px, size,
 };
-use windows::Win32::Foundation::HWND;
 
 use crate::answer::{self, Exchange};
 use crate::archive::{self, Archive, Recorder};
@@ -28,7 +27,7 @@ use crate::settings::{Settings, Store};
 use crate::settings_view::Tab;
 use crate::theme;
 use crate::ui::{self, chip, keycap};
-use crate::win;
+use crate::platform::{self, NativeWindow, PreviousFocus};
 
 const WIDTH: f32 = 600.0;
 const IDLE_HEIGHT: f32 = 120.0;
@@ -60,7 +59,7 @@ struct Turn {
 }
 
 pub struct Overlay {
-    hwnd: Option<HWND>,
+    native: Option<NativeWindow>,
     pub(crate) hotkeys: Hotkeys,
     pub(crate) store: Store,
     settings_tab: Option<Tab>,
@@ -71,7 +70,7 @@ pub struct Overlay {
     /// Receives Esc while settings is open.
     focus: FocusHandle,
     /// Last window shape applied, so the region is only rebuilt when the layout changes.
-    shape: Rc<RefCell<Vec<win::Shape>>>,
+    shape: Rc<RefCell<Vec<platform::Shape>>>,
     /// Interactive areas laid out this frame; everything else is click-through.
     pub(crate) hits: Hits,
     pub(crate) composer: Entity<TextInput>,
@@ -90,7 +89,7 @@ pub struct Overlay {
     /// True while the cursor is over a control and the window takes mouse input.
     catching_mouse: bool,
     /// The app that had focus before the Focus shortcut, so sending or Esc can return to it.
-    return_focus: Option<HWND>,
+    return_focus: Option<PreviousFocus>,
     /// The ChatGPT subscription client (one Codex app-server for the app's lifetime).
     pub(crate) codex: Arc<crate::codex::CodexClient>,
     /// Last known sign-in state for the ChatGPT and Claude subscriptions (None while checking).
@@ -133,13 +132,13 @@ pub struct Overlay {
 
 impl Overlay {
     pub fn new(hotkeys: Hotkeys, presses: UnboundedReceiver<Action>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let hwnd = win::hwnd(window);
+        let native = platform::native_window(window);
         let store = Store::load();
-        if let Some(hwnd) = hwnd {
+        if let Some(native) = native {
             // Failures here leave a visible, usable window; they are not fatal.
-            apply_capture_setting(hwnd, &store.value);
-            win::remove_frame(hwnd);
-            let _ = win::set_topmost(hwnd);
+            apply_capture_setting(native, &store.value);
+            platform::remove_frame(native);
+            let _ = platform::set_topmost(native);
         }
         let mut hotkeys = hotkeys;
         hotkeys.set_overlay_visible(true);
@@ -152,7 +151,7 @@ impl Overlay {
             }
         }).detach();
         // Text, answers and the transcript line let clicks through; only controls catch them.
-        if let Some(hwnd) = hwnd { win::enable_passthrough(hwnd); }
+        if let Some(native) = native { platform::enable_passthrough(native); }
         cx.spawn_in(window, async move |this, cx| loop {
             cx.background_executor().timer(Duration::from_millis(30)).await;
             if this.update(cx, |this, cx| this.update_passthrough(cx)).is_err() { break; }
@@ -192,7 +191,7 @@ impl Overlay {
                 this.update_settings(|s| s.custom_base_url = url, window, cx);
             }
         }).detach();
-        let mut overlay = Self { hwnd, hotkeys, store, settings_tab: None, sessions_window: None, archive, focus: cx.focus_handle(),
+        let mut overlay = Self { native, hotkeys, store, settings_tab: None, sessions_window: None, archive, focus: cx.focus_handle(),
             recorder: None, shape: Rc::default(), hits: Hits::default(), composer, key_input, model_input, base_url_input,
             key_notice: None, loaded_models: Vec::new(), models_loading: false, reasoning: None, metrics: None, next_turn: 0, catching_mouse: true, return_focus: None,
             codex: crate::codex::CodexClient::new(), codex_status: None, claude_status: None, signing_in: false,
@@ -210,8 +209,8 @@ impl Overlay {
         change(&mut self.store.value);
         if self.store.value == previous { return; }
         self.store.save();
-        if let Some(hwnd) = self.hwnd && previous.hide_from_capture != self.store.value.hide_from_capture {
-            apply_capture_setting(hwnd, &self.store.value);
+        if let Some(native) = self.native && previous.hide_from_capture != self.store.value.hide_from_capture {
+            apply_capture_setting(native, &self.store.value);
         }
         if previous.api_provider != self.store.value.api_provider {
             // Each provider keeps its own model; show the one saved for the new provider.
@@ -265,7 +264,7 @@ impl Overlay {
     pub fn reveal_archive(&self) {
         let Some(archive) = &self.archive else { return };
         let _ = std::fs::create_dir_all(archive.root());
-        if let Err(error) = std::process::Command::new("explorer.exe").arg(archive.root()).spawn() { eprintln!("could not open folder: {error}"); }
+        if let Err(error) = platform::open_folder(archive.root()) { eprintln!("could not open folder: {error}"); }
     }
 
     /// Size the window to its content state; transparent area outside the content still takes clicks.
@@ -333,15 +332,15 @@ impl Overlay {
     }
 
     fn update_passthrough(&mut self, cx: &mut Context<Self>) {
-        let Some(hwnd) = self.hwnd else { return };
-        let over_control = win::cursor_in_window(hwnd).is_some_and(|point| self.hits.contains(point));
+        let Some(native) = self.native else { return };
+        let over_control = platform::cursor_in_window(native).is_some_and(|point| self.hits.contains(point));
         if over_control != self.catching_mouse {
             self.catching_mouse = over_control;
-            win::set_mouse_passthrough(hwnd, !over_control);
+            platform::set_mouse_passthrough(native, !over_control);
         }
         // A press anywhere that isn't one of the overlay's controls (the click-through answer
         // area, or another app) never reaches the overlay, so an open list closes from here.
-        if self.open_picker.is_some() && !over_control && win::left_button_down() {
+        if self.open_picker.is_some() && !over_control && platform::left_button_down() {
             self.open_picker = None;
             cx.notify();
         }
@@ -358,17 +357,14 @@ impl Overlay {
         self.show();
         if self.settings_tab.is_some() { self.close_panels(window, cx); }
         if self.live_since.is_none() { self.set_live(true, window, cx); }
-        if let Some(hwnd) = self.hwnd {
-            if let Some(previous) = win::foreground().filter(|previous| *previous != hwnd) { self.return_focus = Some(previous); }
-            win::activate(hwnd);
-        }
+        if let Some(native) = self.native && let Some(previous) = platform::take_focus(native) { self.return_focus = Some(previous); }
         window.focus(&self.composer.focus_handle(cx));
         cx.notify();
     }
 
     /// Hand the keyboard back to the app the user was in before typing here.
     fn return_to_previous_app(&mut self) {
-        if let Some(previous) = self.return_focus.take() { win::activate(previous); }
+        if let Some(previous) = self.return_focus.take() { platform::return_focus(previous); }
     }
 
     /// Title, overview, topics and follow-ups for a finished session, written off the UI thread.
@@ -443,7 +439,7 @@ impl Overlay {
         self.scroll.scroll_to_bottom();
         cx.notify();
         let settings = self.store.value.clone();
-        let point = self.hwnd.and_then(win::center);
+        let point = self.native.and_then(platform::center);
         let action = action.to_string();
         let conversation = self.conversation().render();
         let utterance = self.latest_heard_utterance();
@@ -565,17 +561,17 @@ impl Overlay {
     }
 
     fn toggle_visible(&mut self) {
-        let Some(hwnd) = self.hwnd else { return };
-        let visible = !win::is_visible(hwnd);
-        win::set_visible(hwnd, visible);
+        let Some(native) = self.native else { return };
+        let visible = !platform::is_visible(native);
+        platform::set_visible(native, visible);
         self.hotkeys.set_overlay_visible(visible);
         // A hidden panel must not keep claiming Esc.
         self.hotkeys.set_panel_open(visible && self.settings_tab.is_some());
     }
 
     fn show(&mut self) {
-        if let Some(hwnd) = self.hwnd.filter(|hwnd| !win::is_visible(*hwnd)) {
-            win::set_visible(hwnd, true);
+        if let Some(native) = self.native.filter(|native| !platform::is_visible(*native)) {
+            platform::set_visible(native, true);
             self.hotkeys.set_overlay_visible(true);
         }
     }
@@ -597,15 +593,15 @@ impl Overlay {
     }
 
     fn motion_step(&mut self, kind: Motion, frame: u32, cx: &mut Context<Self>) -> bool {
-        let Some((dx, dy)) = win::held_direction(kind == Motion::Scroll) else {
+        let Some((dx, dy)) = platform::held_direction(kind == Motion::Scroll) else {
             self.motion = None;
             return false;
         };
         let cruise = if kind == Motion::Move { MOVE_CRUISE } else { SCROLL_CRUISE };
         let speed = (MOVE_START + frame as f32 * EASE_PER_FRAME).min(cruise);
         match kind {
-            Motion::Move => if let Some(hwnd) = self.hwnd {
-                let _ = win::move_by(hwnd, (dx as f32 * speed).round() as i32, (dy as f32 * speed).round() as i32);
+            Motion::Move => if let Some(native) = self.native {
+                let _ = platform::move_by(native, (dx as f32 * speed).round() as i32, (dy as f32 * speed).round() as i32);
             },
             Motion::Scroll => self.scroll_by(dy as f32 * speed, cx),
         }
@@ -721,7 +717,7 @@ impl Render for Overlay {
         let mut root = div().size_full().flex().flex_col().items_center().gap(px(10.0)).pt(px(8.0)).pb(px(12.0))
             .font_family(theme::FONT).text_color(theme::text())
             .track_focus(&self.focus)
-            .on_children_prepainted(click_through(self.hwnd, self.hits.clone(), self.shape.clone()))
+            .on_children_prepainted(click_through(self.native, self.hits.clone(), self.shape.clone()))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 if event.keystroke.key != "escape" { return; }
                 if this.settings_tab.is_some() { this.close_panels(window, cx); }
@@ -777,32 +773,32 @@ impl Hits {
 
 /// Shape the window to the interactive controls only (pill, quick actions, composer, settings),
 /// so answers, the transcript ticker and the space around everything are click-through.
-fn click_through(hwnd: Option<HWND>, hits: Hits, applied: Rc<RefCell<Vec<win::Shape>>>) -> impl Fn(Vec<gpui::Bounds<gpui::Pixels>>, &mut Window, &mut gpui::App) + 'static {
+fn click_through(native: Option<NativeWindow>, hits: Hits, applied: Rc<RefCell<Vec<platform::Shape>>>) -> impl Fn(Vec<gpui::Bounds<gpui::Pixels>>, &mut Window, &mut gpui::App) + 'static {
     move |children, window, _| {
-        let Some(hwnd) = hwnd else { return };
+        let Some(native) = native else { return };
         let scale = window.scale_factor();
         hits.1.set(scale);
         let physical = |value: gpui::Pixels| (f32::from(value) * scale).round() as i32;
         // The window keeps the shape of everything visible (pill, panel, caption); the space
         // around them is cut away. Inside the panel, `passthrough` decides per cursor position.
         let floating = hits.floating();
-        let shapes: Vec<win::Shape> = children.iter().map(|bounds| (bounds, false)).chain(floating.iter().map(|bounds| (bounds, true))).map(|(bounds, float)| {
+        let shapes: Vec<platform::Shape> = children.iter().map(|bounds| (bounds, false)).chain(floating.iter().map(|bounds| (bounds, true))).map(|(bounds, float)| {
             let height = f32::from(bounds.size.height);
             let radius = if float { 10.0 } else if height <= 44.0 { height / 2.0 } else { 18.0 };
             (physical(bounds.left()) - 1, physical(bounds.top()) - 1, physical(bounds.right()) + 1, physical(bounds.bottom()) + 1,
                 (radius * scale).round() as i32)
         }).collect();
         if *applied.borrow() != shapes {
-            win::set_shape(hwnd, &shapes);
+            platform::set_shape(native, &shapes);
             *applied.borrow_mut() = shapes;
         }
     }
 }
 
-fn apply_capture_setting(hwnd: HWND, settings: &Settings) {
+fn apply_capture_setting(native: NativeWindow, settings: &Settings) {
     // CLUELYRS_ALLOW_CAPTURE=1 is a development switch for taking screenshots of the overlay.
     let dev_override = std::env::var_os("CLUELYRS_ALLOW_CAPTURE").is_some_and(|value| value == "1");
-    if let Err(error) = win::set_capture_hidden(hwnd, settings.hide_from_capture && !dev_override) {
+    if let Err(error) = platform::set_capture_hidden(native, settings.hide_from_capture && !dev_override) {
         eprintln!("capture exclusion unavailable: {error}");
     }
 }

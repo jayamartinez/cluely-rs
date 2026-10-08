@@ -15,6 +15,7 @@ use gpui::{
 use crate::archive::{Archive, Line, Session, Speaker, Summary, SummaryLength, Turn, clock};
 use crate::codex::CodexClient;
 use crate::input::{InputEvent, TextInput};
+use crate::platform;
 use crate::settings::Store;
 use crate::theme;
 use crate::ui;
@@ -173,7 +174,7 @@ impl SessionsWindow {
         let Some(id) = self.session.as_ref().map(|s| s.id.clone()) else { return };
         self.notice = Some(match self.archive.export_markdown(&id) {
             Ok(path) => {
-                let _ = std::process::Command::new("explorer.exe").arg("/select,").arg(&path).spawn();
+                let _ = platform::reveal_file(&path);
                 "Saved session.md next to the session".into()
             }
             Err(_) => "Export failed. Check the sessions folder permissions.".into(),
@@ -183,7 +184,7 @@ impl SessionsWindow {
 
     fn reveal(&self) {
         if let Some(session) = &self.session {
-            let _ = std::process::Command::new("explorer.exe").arg(self.archive.root().join(&session.id)).spawn();
+            let _ = platform::open_folder(&self.archive.root().join(&session.id));
         }
     }
 
