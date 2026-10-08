@@ -20,7 +20,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use base64::Engine as _;
 use serde_json::{Value, json};
 
-use crate::chat::{ChatRequest, SubscriptionStatus};
+use crate::chat::{ChatRequest, Effort, SubscriptionStatus};
 use crate::providers::{Message, Part, Role};
 
 const MODELS: [(&str, &str); 3] = [("sonnet", "Sonnet"), ("opus", "Opus"), ("haiku", "Haiku")];
@@ -107,12 +107,35 @@ impl ClaudeCli {
     /// Streams one answer. `on_delta` receives answer text only; reasoning, tool and
     /// system events are never forwarded.
     pub fn stream(req: &ChatRequest, cancel: &AtomicBool, on_delta: &mut dyn FnMut(&str)) -> Result<String, String> {
+        Self::stream_warm(&mut None, false, req, cancel, on_delta)
+    }
+
+    /// Start a Claude Code process for the next answer, so the CLI's boot (about 0.9 s) is
+    /// already done when it's needed. Nothing is sent: the process waits for its first input,
+    /// with the same restrictions as any answer. Replaces any spare with other settings.
+    pub fn prepare(spare: &mut Option<Spare>, system: &str, model: Option<&str>, effort: Effort) -> Result<(), String> {
+        let model = validate_model(model)?;
+        if system.chars().count() > MAX_SYSTEM { return Err("The assistant instructions are too large.".into()); }
+        let args = stream_args(system, model, effort);
+        if spare.as_mut().is_some_and(|ready| ready.usable_for(&args)) { return Ok(()); }
+        *spare = None;
+        let exe = resolve_executable()?;
+        check_command_line(&exe, &args, COMMAND_LINE_LIMIT)?;
+        *spare = Some(Spare { running: Some(launch(&exe, &args, true, true)?), args, started: Instant::now() });
+        Ok(())
+    }
+
+    /// Like [`ClaudeCli::stream`], answering with the spare process when it was started with
+    /// this request's settings. With `refill`, a new spare is started for the next answer once
+    /// this one ends (each answer gets a fresh process: its history is folded in as usual, so
+    /// earlier turns' context never piles up inside a long-lived process).
+    pub fn stream_warm(spare: &mut Option<Spare>, refill: bool, req: &ChatRequest, cancel: &AtomicBool, on_delta: &mut dyn FnMut(&str)) -> Result<String, String> {
         validate_messages(&req.messages)?;
         let model = validate_model(req.model.as_deref())?;
         if req.system.chars().count() > MAX_SYSTEM {
             return Err("The assistant instructions are too large.".into());
         }
-        let args = stream_args(&req.system, model);
+        let args = stream_args(&req.system, model, req.effort);
         let exe = resolve_executable()?;
         check_command_line(&exe, &args, COMMAND_LINE_LIMIT)?;
         let mut line = serde_json::to_string(&fold_history(&req.messages)).map_err(|_| INPUT_INVALID.to_string())?;
@@ -120,13 +143,80 @@ impl ClaudeCli {
         if cancel.load(Ordering::SeqCst) {
             return Err(CANCELLED.into());
         }
-        let mut running = launch(&exe, &args, true, true)?;
+        let ready = spare.take().and_then(|mut ready| if ready.usable_for(&args) { ready.running.take() } else { None });
+        let mut running = match ready { Some(running) => running, None => launch(&exe, &args, true, true)? };
         let result = run_stream(&mut running, line, cancel, on_delta);
+        if let Some(id) = running.model.take() { remember_model(model.unwrap_or(DEFAULT_ALIAS), &id); }
         // After a complete turn the CLI may exit on its own within a grace period;
         // on failure or cancellation it is killed immediately.
         reap(running, if result.is_ok() { EXIT_GRACE } else { Duration::ZERO });
+        if refill && let Ok(next) = launch(&exe, &args, true, true) {
+            *spare = Some(Spare { running: Some(next), args, started: Instant::now() });
+        }
         result
     }
+}
+
+/// A Claude Code process started ahead of time for one answer (see [`ClaudeCli::prepare`]).
+/// It holds no conversation; it is killed when dropped.
+pub struct Spare {
+    running: Option<Running>,
+    args: Vec<String>,
+    started: Instant,
+}
+
+/// A spare older than this is replaced rather than trusted (sign-in or CLI state may have moved on).
+const SPARE_MAX_AGE: Duration = Duration::from_secs(10 * 60);
+
+impl Spare {
+    /// Started with exactly these arguments, recently, and still waiting.
+    fn usable_for(&mut self, args: &[String]) -> bool {
+        self.args == args && self.started.elapsed() < SPARE_MAX_AGE
+            && self.running.as_mut().is_some_and(|running| matches!(running.child.try_wait(), Ok(None)))
+    }
+}
+
+impl Drop for Spare {
+    fn drop(&mut self) {
+        if let Some(running) = self.running.take() { reap(running, Duration::ZERO); }
+    }
+}
+
+/// The alias a request without `--model` is recorded under (the CLI picks its default model).
+pub const DEFAULT_ALIAS: &str = "default";
+
+/// Model ids the CLI resolved each alias to, as seen in answers this run (see [`resolved_models`]).
+static RESOLVED: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
+
+fn remember_model(alias: &str, id: &str) {
+    let mut resolved = RESOLVED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    resolved.retain(|(known, _)| known != alias);
+    resolved.push((alias.to_string(), id.to_string()));
+}
+
+/// (alias, model id) for every alias the CLI has resolved during this run, e.g. ("opus", "claude-opus-5-5").
+/// The CLI only reports the model once it has a prompt, so an alias appears after its first answer.
+pub fn resolved_models() -> Vec<(String, String)> {
+    RESOLVED.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+}
+
+/// A model id from the CLI's `init` line, accepted only if it looks like one (it is shown in the UI).
+fn plausible_model_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 100 && id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'[' | b']'))
+}
+
+/// A readable name for a Claude model id: "claude-opus-5-5" → "Opus 5.5", "claude-haiku-4-5-20251001" →
+/// "Haiku 4.5", "claude-sonnet-5-5[1m]" → "Sonnet 5.5". Ids in any other shape are returned unchanged.
+pub fn model_label(id: &str) -> String {
+    let base = id.split('[').next().unwrap_or(id);
+    let Some(rest) = base.strip_prefix("claude-") else { return id.to_string() };
+    let parts: Vec<&str> = rest.split('-').collect();
+    let Some((family, version)) = parts.split_first() else { return id.to_string() };
+    let numbers: Vec<&str> = version.iter().copied().take_while(|part| part.len() <= 2 && part.bytes().all(|b| b.is_ascii_digit())).collect();
+    if family.is_empty() || !family.bytes().all(|b| b.is_ascii_alphabetic()) || numbers.is_empty() { return id.to_string() }
+    let mut name = family[..1].to_ascii_uppercase();
+    name.push_str(&family[1..]);
+    format!("{name} {}", numbers.join("."))
 }
 
 fn models() -> Vec<(String, String)> {
@@ -138,7 +228,7 @@ fn models() -> Vec<(String, String)> {
 // ---------------------------------------------------------------------------
 
 /// Restricted print-mode argv. Every value is its own argv entry; no shell parses it.
-fn stream_args(system: &str, model: Option<&str>) -> Vec<String> {
+fn stream_args(system: &str, model: Option<&str>, effort: Effort) -> Vec<String> {
     let mut args: Vec<String> = [
         "-p",
         "--input-format",
@@ -164,7 +254,18 @@ fn stream_args(system: &str, model: Option<&str>) -> Vec<String> {
         args.push("--model".into());
         args.push(model.to_string());
     }
+    if let Some(level) = effort_level(model, effort) {
+        args.push("--effort".into());
+        args.push(level.into());
+    }
     args
+}
+
+/// `--effort` for the request: the least thinking for normal answers, high in Smart mode.
+/// Haiku is left at its default (it is the fast model already and may not take the flag).
+fn effort_level(model: Option<&str>, effort: Effort) -> Option<&'static str> {
+    if model.is_some_and(|model| model.to_ascii_lowercase().contains("haiku")) { return None; }
+    Some(match effort { Effort::Fast => "low", Effort::Smart => "high" })
 }
 
 /// Upper bound of the quoted Windows command line, in UTF-16 units: each argument may
@@ -312,6 +413,8 @@ fn fold_history(messages: &[Message]) -> Value {
 #[derive(Debug, PartialEq)]
 enum LineEvent {
     Text(String),
+    /// The `system`/`init` line: the model id the CLI resolved this session to.
+    Model(String),
     /// Final `result`: the fallback answer text on success, or a user-safe error.
     Finished(Result<Option<String>, String>),
     Ignore,
@@ -343,6 +446,10 @@ fn classify(message: &Value) -> Result<LineEvent, String> {
             }
             Ok(LineEvent::Finished(Ok(message["result"].as_str().map(String::from))))
         }
+        Some("system") if message["subtype"] == "init" => Ok(match message["model"].as_str().filter(|id| plausible_model_id(id)) {
+            Some(id) => LineEvent::Model(id.to_string()),
+            None => LineEvent::Ignore,
+        }),
         // System, assistant snapshots, thinking and tool events are never forwarded.
         _ => Ok(LineEvent::Ignore),
     }
@@ -384,6 +491,8 @@ fn result_failure(message: &Value) -> String {
 struct StreamParser {
     buffer: Vec<u8>,
     text: String,
+    /// The model the CLI reported in its `init` line.
+    model: Option<String>,
     chars: usize,
     max_line: usize,
     max_chars: usize,
@@ -395,7 +504,7 @@ impl StreamParser {
     }
 
     fn with_limits(max_line: usize, max_chars: usize) -> Self {
-        Self { buffer: Vec::new(), text: String::new(), chars: 0, max_line, max_chars }
+        Self { buffer: Vec::new(), text: String::new(), model: None, chars: 0, max_line, max_chars }
     }
 
     /// Returns `Ok(true)` once the final successful result has been seen.
@@ -410,6 +519,7 @@ impl StreamParser {
             let message: Value = serde_json::from_str(decoded).map_err(|_| MALFORMED.to_string())?;
             match classify(&message)? {
                 LineEvent::Ignore => {}
+                LineEvent::Model(id) => self.model = Some(id),
                 LineEvent::Text(text) => self.deliver(&text, on_delta)?,
                 LineEvent::Finished(Err(message)) => return Err(message),
                 LineEvent::Finished(Ok(fallback)) => {
@@ -576,6 +686,8 @@ impl Drop for Workspace {
 struct Running {
     child: Child,
     workspace: Workspace,
+    /// The model the CLI reported for this process (from its `init` line), once seen.
+    model: Option<String>,
 }
 
 fn launch(exe: &Path, args: &[String], stdin: bool, stdout: bool) -> Result<Running, String> {
@@ -597,7 +709,7 @@ fn launch(exe: &Path, args: &[String], stdin: bool, stdout: bool) -> Result<Runn
     let child = command.spawn().map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound { NOT_FOUND.to_string() } else { COULD_NOT_START.to_string() }
     })?;
-    Ok(Running { child, workspace })
+    Ok(Running { child, workspace, model: None })
 }
 
 /// Kills the child, then kills again after `KILL_GRACE` if it is still alive.
@@ -669,7 +781,9 @@ fn run_stream(running: &mut Running, line: String, cancel: &AtomicBool, on_delta
         }
         match receiver.recv_timeout(POLL) {
             Ok(chunk) => {
-                if parser.feed(&chunk, on_delta)? {
+                let finished = parser.feed(&chunk, on_delta);
+                if let Some(id) = parser.model.take() { running.model = Some(id); }
+                if finished? {
                     return Ok(parser.text);
                 }
             }
@@ -772,7 +886,7 @@ mod tests {
 
     #[test]
     fn argv_is_restricted_and_ordered() {
-        let args = stream_args("Be brief.", Some("haiku"));
+        let args = stream_args("Be brief.", Some("haiku"), Effort::Fast);
         assert_eq!(
             args,
             [
@@ -783,7 +897,13 @@ mod tests {
         );
         let tools = args.iter().position(|arg| arg == "--tools").unwrap();
         assert_eq!(args[tools + 1], "", "an empty element disables every tool");
-        assert!(!stream_args("x", None).contains(&"--model".to_string()));
+        assert!(!stream_args("x", None, Effort::Fast).contains(&"--model".to_string()));
+        // Normal answers think least; Smart mode thinks more; Haiku keeps its default.
+        let fast = stream_args("x", Some("sonnet"), Effort::Fast);
+        assert_eq!(fast[fast.len() - 2..], ["--effort", "low"]);
+        let smart = stream_args("x", None, Effort::Smart);
+        assert_eq!(smart[smart.len() - 2..], ["--effort", "high"]);
+        assert!(!args.contains(&"--effort".to_string()));
     }
 
     #[test]
@@ -799,8 +919,8 @@ mod tests {
     #[test]
     fn command_line_length_is_guarded() {
         let exe = Path::new(r"C:\Users\me\.local\bin\claude.exe");
-        assert!(check_command_line(exe, &stream_args("short", None), 30_000).is_ok());
-        let error = check_command_line(exe, &stream_args(&"x".repeat(30_000), None), 30_000).unwrap_err();
+        assert!(check_command_line(exe, &stream_args("short", None, Effort::Fast), 30_000).is_ok());
+        let error = check_command_line(exe, &stream_args(&"x".repeat(30_000), None, Effort::Fast), 30_000).unwrap_err();
         assert!(error.contains("too long"));
         // Quotes and backslashes count toward the escaped length.
         let plain = command_line_len(exe, &["aaaa".into()]);
@@ -808,6 +928,45 @@ mod tests {
         assert_eq!(escaped, plain + 2);
         // Non-BMP characters take two UTF-16 units.
         assert_eq!(command_line_len(exe, &["\u{1F600}".into()]), command_line_len(exe, &["ab".into()]));
+    }
+
+    /// A spare is only used for a request with exactly its arguments, while it's still running,
+    /// and is killed when dropped. A long-lived stand-in process plays the CLI waiting on stdin.
+    #[cfg(windows)]
+    #[test]
+    fn a_spare_serves_only_matching_requests_and_dies_with_its_owner() {
+        let waiting = |args: &[String]| {
+            let exe = PathBuf::from(std::env::var_os("ComSpec").unwrap_or_else(|| "C:\\Windows\\System32\\cmd.exe".into()));
+            let running = launch(&exe, &["/c".into(), "ping".into(), "-n".into(), "30".into(), "127.0.0.1".into()], true, true).unwrap();
+            Spare { running: Some(running), args: args.to_vec(), started: Instant::now() }
+        };
+        let fast = stream_args("Be brief.", Some("sonnet"), Effort::Fast);
+        let smart = stream_args("Be brief.", Some("sonnet"), Effort::Smart);
+        let mut spare = waiting(&fast);
+        assert!(spare.usable_for(&fast));
+        assert!(!spare.usable_for(&smart), "Smart mode or another model needs another process");
+        let mut stale = waiting(&fast);
+        stale.started = Instant::now() - SPARE_MAX_AGE;
+        assert!(!stale.usable_for(&fast));
+
+        let child = spare.running.as_mut().unwrap();
+        let _ = child.child.kill();
+        let _ = child.child.wait();
+        assert!(!spare.usable_for(&fast), "an exited process is never used");
+
+        let mut owned = Some(waiting(&fast));
+        let pid = owned.as_ref().unwrap().running.as_ref().unwrap().child.id();
+        owned = None;
+        drop(owned);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline && process_alive(pid) { thread::sleep(Duration::from_millis(50)); }
+        assert!(!process_alive(pid), "a dropped spare is killed");
+    }
+
+    #[cfg(windows)]
+    fn process_alive(pid: u32) -> bool {
+        let output = Command::new("tasklist").args(["/FI", &format!("PID eq {pid}"), "/NH"]).output().unwrap();
+        String::from_utf8_lossy(&output.stdout).contains(&pid.to_string())
     }
 
     #[test]
@@ -1066,6 +1225,7 @@ mod tests {
             system: "Answer in one short line.".into(),
             messages: vec![user("Reply with exactly: pong", 0)],
             model: Some("haiku".into()),
+            effort: Effort::Fast,
         };
         let mut deltas = 0;
         let answer = ClaudeCli::stream(&req, &AtomicBool::new(false), &mut |_| deltas += 1);
@@ -1088,9 +1248,38 @@ mod tests {
                 parts: vec![Part::Text("What colour is this image?".into()), Part::Jpeg(jpeg)],
             }],
             model: Some("haiku".into()),
+            effort: Effort::Fast,
         };
         let answer = ClaudeCli::stream(&req, &AtomicBool::new(false), &mut |_| {});
         println!("live_image: {answer:?}");
         assert!(answer.is_ok());
+    }
+
+    #[test]
+    fn model_ids_read_as_family_and_version() {
+        assert_eq!(model_label("claude-opus-5-5"), "Opus 5.5");
+        assert_eq!(model_label("claude-sonnet-5-5"), "Sonnet 5.5");
+        assert_eq!(model_label("claude-haiku-4-5-20251001"), "Haiku 4.5");
+        assert_eq!(model_label("claude-sonnet-5-5[1m]"), "Sonnet 5.5");
+        assert_eq!(model_label("claude-fable-5-1"), "Fable 5.1");
+        for unknown in ["gpt-6.1-sol", "claude-", "claude-opus", "claude-opus-latest", "something"] {
+            assert_eq!(model_label(unknown), unknown);
+        }
+    }
+
+    #[test]
+    fn the_init_line_reports_the_resolved_model_and_odd_ids_are_ignored() {
+        let mut parser = StreamParser::new();
+        let input = format!("{}{}{}", line(json!({ "type": "system", "subtype": "init", "model": "claude-opus-5-5", "tools": [] })),
+            line(delta("Hi")), line(json!({ "type": "result", "subtype": "success", "is_error": false, "result": "Hi" })));
+        assert_eq!(parser.feed(input.as_bytes(), &mut |_| {}), Ok(true));
+        assert_eq!(parser.model.as_deref(), Some("claude-opus-5-5"));
+        let odd = line(json!({ "type": "system", "subtype": "init", "model": "<script>alert(1)</script>" }));
+        let mut parser = StreamParser::new();
+        assert_eq!(parser.feed(odd.as_bytes(), &mut |_| {}), Ok(false));
+        assert_eq!(parser.model, None);
+        remember_model("opus", "claude-opus-5-5");
+        remember_model("opus", "claude-opus-5-6");
+        assert_eq!(resolved_models().iter().filter(|(alias, _)| alias == "opus").collect::<Vec<_>>(), [&("opus".to_string(), "claude-opus-5-6".to_string())]);
     }
 }

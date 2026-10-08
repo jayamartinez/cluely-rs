@@ -13,7 +13,7 @@ use windows::Win32::Graphics::Gdi::{
     MonitorFromWindow, RGN_OR, SetWindowRgn,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, VIRTUAL_KEY, VK_CONTROL, VK_DOWN, VK_LEFT, VK_MENU, VK_RIGHT, VK_SHIFT, VK_UP,
+    GetAsyncKeyState, VIRTUAL_KEY, VK_CONTROL, VK_DOWN, VK_LBUTTON, VK_LEFT, VK_MENU, VK_RIGHT, VK_SHIFT, VK_UP,
 };
 use windows::Win32::Foundation::{COLORREF, POINT};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -83,6 +83,9 @@ pub fn held_direction(with_shift: bool) -> Option<(i32, i32)> {
     let direction = (axis(VK_LEFT, VK_RIGHT), axis(VK_UP, VK_DOWN));
     (direction != (0, 0)).then_some(direction)
 }
+
+/// Whether the left mouse button is held right now, wherever the pointer is.
+pub fn left_button_down() -> bool { down(VK_LBUTTON) }
 
 /// A rounded rectangle in physical pixels relative to the window: left, top, right, bottom, radius.
 pub type Shape = (i32, i32, i32, i32, i32);

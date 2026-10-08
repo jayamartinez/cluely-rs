@@ -28,10 +28,22 @@ impl Tab {
 
 /// The dropdowns in Settings; at most one is open.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Picker { CodexModel, ClaudeModel, AnswerStyle, ApiProvider, ApiModel, SttProvider, Mic, Desktop }
+/// `Composer` is the model switcher in the Live panel's composer bar.
+pub enum Picker { CodexModel, ClaudeModel, AnswerStyle, ApiProvider, ApiModel, SttProvider, Mic, Desktop, Composer }
 
 /// Taller lists scroll.
-const MENU_MAX_HEIGHT: f32 = 300.0;
+pub(crate) const MENU_MAX_HEIGHT: f32 = 300.0;
+
+/// The models offered for the selected provider (see `Overlay::model_choice`).
+pub(crate) struct ModelChoice {
+    pub picker: Picker,
+    /// What the current choice is called.
+    pub value: String,
+    /// (id, label) pairs.
+    pub options: Vec<(String, String)>,
+    pub selected: String,
+    pub set: fn(&mut Settings, String),
+}
 
 /// A segmented control over `options`; clicking applies `set` and saves.
 fn choice<T: Copy + PartialEq + 'static>(
@@ -59,6 +71,24 @@ fn switch(name: &'static str, on: bool, set: fn(&mut Settings, bool), cx: &mut C
 fn button(id: &'static str, label: impl Into<SharedString>, primary: bool) -> gpui::Stateful<Div> {
     let base = div().id(id).flex_none().px(px(12.0)).py(px(6.0)).rounded(px(9.0)).cursor_pointer().text_size(px(12.0)).font_weight(FontWeight::SEMIBOLD).child(label.into());
     if primary { base.bg(theme::accent()).text_color(theme::accent_ink()) } else { base.border_1().border_color(theme::hairline()).text_color(theme::body()) }
+}
+
+/// GPT version of a Codex model id: "gpt-6.1-sol" → (6, 1), "gpt-6-luna" → (6, 0); `None` for other shapes.
+fn gpt_version(id: &str) -> Option<(u32, u32)> {
+    let version = id.to_ascii_lowercase().strip_prefix("gpt-")?.split('-').next()?.to_string();
+    let mut parts = version.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = match parts.next() { Some(minor) => minor.parse().ok()?, None => 0 };
+    Some((major, minor))
+}
+
+/// The models worth offering: only the newest GPT generation (every 6.x once GPT-6 exists, so a
+/// future 6.2 appears on its own), without Astra variants. If no id carries a GPT version the list
+/// is returned as is, rather than leaving the picker empty.
+pub(crate) fn latest_gpt_models(models: &[(String, String)]) -> Vec<(String, String)> {
+    let Some(newest) = models.iter().filter_map(|(id, _)| gpt_version(id)).map(|(major, _)| major).max() else { return models.to_vec() };
+    models.iter().filter(|(id, name)| gpt_version(id).is_some_and(|(major, _)| major == newest)
+        && !id.to_ascii_lowercase().contains("astra") && !name.to_ascii_lowercase().contains("astra")).cloned().collect()
 }
 
 /// "plus" → "ChatGPT Plus", "max_5x" → "Max 5x": the plan as the CLI reports it, made readable.
@@ -184,29 +214,15 @@ impl Overlay {
                 .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, window, cx| this.update_settings(|s| s.provider = provider, window, cx)))
                 .child(self.connection_badge(provider, index, cx)));
         }
-        let model: Div = match s.provider {
-            Provider::Codex => {
-                let models = self.codex_status.as_ref().map(|st| st.models.clone()).unwrap_or_default();
-                let mut options = vec![(String::new(), "Default".to_string())];
-                options.extend(models.iter().cloned());
-                let value = models.iter().find(|(id, _)| *id == s.codex_model).map(|(_, name)| name.clone())
-                    .unwrap_or_else(|| if s.codex_model.is_empty() { "Default".into() } else { s.codex_model.clone() });
-                field("Model", self.dropdown(Picker::CodexModel, value, options, &s.codex_model, |s, v| s.codex_model = v, cx))
-            }
-            Provider::Claude => {
-                let options = [(ClaudeModel::Sonnet, "Sonnet"), (ClaudeModel::Opus, "Opus"), (ClaudeModel::Haiku, "Haiku")];
-                let value = options.iter().find(|(m, _)| *m == s.claude_model).map(|(_, l)| *l).unwrap_or("Sonnet");
-                field("Model", self.dropdown(Picker::ClaudeModel, value, options.iter().map(|(m, l)| (m.id().to_string(), l.to_string())).collect(), s.claude_model.id(),
-                    |s, v| s.claude_model = match v.as_str() { "opus" => ClaudeModel::Opus, "haiku" => ClaudeModel::Haiku, _ => ClaudeModel::Sonnet }, cx))
-            }
-            Provider::ApiKey => self.api_model_field(cx),
-        };
+        let choice = self.model_choice();
+        let model = field("Model", self.dropdown(choice.picker, choice.value, choice.options, &choice.selected, choice.set, cx));
         let styles = [(AnswerStyle::Spoken, "Words I can say aloud"), (AnswerStyle::Standard, "Standard explanations")];
         let style_value = styles.iter().find(|(st, _)| *st == s.answer_style).map(|(_, l)| *l).unwrap_or("Words I can say aloud");
         let style = field("Answer style", self.dropdown(Picker::AnswerStyle, style_value,
             styles.iter().map(|(st, l)| (format!("{st:?}"), l.to_string())).collect(), &format!("{:?}", s.answer_style),
             |s, v| s.answer_style = if v == "Standard" { AnswerStyle::Standard } else { AnswerStyle::Spoken }, cx));
-        let mut tab = div().flex().flex_col().gap(px(16.0)).child(list).child(div().flex().gap(px(12.0)).child(model).child(style));
+        let smart = ui::setting_row("Smart mode · slower, deeper reasoning", switch("smart-mode", s.smart_mode, |s, v| s.smart_mode = v, cx)).border_b_0();
+        let mut tab = div().flex().flex_col().gap(px(16.0)).child(list).child(div().flex().gap(px(12.0)).child(model).child(style)).child(smart);
         if s.provider == Provider::ApiKey { tab = tab.child(self.api_key_section(cx)); }
         tab
     }
@@ -249,17 +265,47 @@ impl Overlay {
         }
     }
 
-    /// Model for "Your API key": a picker over loaded or suggested models, plus a free-text id.
-    fn api_model_field(&self, cx: &mut Context<Self>) -> Div {
+    /// The selected provider's models, the current one, and how to choose another. Shared by the
+    /// Settings → Model dropdown and the composer's model switcher, so both always agree.
+    pub(crate) fn model_choice(&self) -> ModelChoice {
         let s = &self.store.value;
-        let suggestions: Vec<String> = match crate::providers::preset(&s.api_provider) {
-            Some(preset) if self.loaded_models.is_empty() => preset.suggested_models.iter().map(|m| m.to_string()).collect(),
-            Some(_) => self.loaded_models.iter().take(60).cloned().collect(),
-            None => Vec::new(),
-        };
-        let value = if s.api_model().is_empty() { "Choose a model".to_string() } else { s.api_model().to_string() };
-        let options = suggestions.into_iter().map(|m| (m.clone(), m)).collect();
-        field("Model", self.dropdown(Picker::ApiModel, value, options, s.api_model(), |s, v| { s.api_models.insert(s.api_provider.clone(), v); }, cx))
+        match s.provider {
+            Provider::Codex => {
+                let status = self.codex_status.as_ref();
+                let models = status.map(|st| st.models.clone()).unwrap_or_default();
+                let name = |id: &str| models.iter().find(|(known, _)| known == id).map(|(_, name)| name.clone());
+                let default = match status.and_then(|st| st.default_model.as_deref()) {
+                    Some(id) => format!("Default · {}", name(id).unwrap_or_else(|| id.to_string())),
+                    None => "Default".to_string(),
+                };
+                let mut options = vec![(String::new(), default.clone())];
+                options.extend(latest_gpt_models(&models));
+                // A saved model that is no longer offered (e.g. an older generation) still shows as
+                // the current choice until another is picked.
+                let value = if s.codex_model.is_empty() { default } else { name(&s.codex_model).unwrap_or_else(|| s.codex_model.clone()) };
+                ModelChoice { picker: Picker::CodexModel, value, options, selected: s.codex_model.clone(), set: |s, v| s.codex_model = v }
+            }
+            Provider::Claude => {
+                let models = [(ClaudeModel::Sonnet, "Sonnet"), (ClaudeModel::Opus, "Opus"), (ClaudeModel::Haiku, "Haiku")];
+                // The version each alias resolves to, once Claude Code has reported it.
+                let label = |model: ClaudeModel, alias_label: &str| s.claude_models.get(model.id())
+                    .map(|id| crate::claude_cli::model_label(id)).unwrap_or_else(|| alias_label.to_string());
+                let value = models.iter().find(|(m, _)| *m == s.claude_model).map(|(m, l)| label(*m, l)).unwrap_or_else(|| "Sonnet".into());
+                ModelChoice { picker: Picker::ClaudeModel, value, options: models.iter().map(|(m, l)| (m.id().to_string(), label(*m, l))).collect(),
+                    selected: s.claude_model.id().to_string(),
+                    set: |s, v| s.claude_model = match v.as_str() { "opus" => ClaudeModel::Opus, "haiku" => ClaudeModel::Haiku, _ => ClaudeModel::Sonnet } }
+            }
+            Provider::ApiKey => {
+                let suggestions: Vec<String> = match crate::providers::preset(&s.api_provider) {
+                    Some(preset) if self.loaded_models.is_empty() => preset.suggested_models.iter().map(|m| m.to_string()).collect(),
+                    Some(_) => self.loaded_models.iter().take(60).cloned().collect(),
+                    None => Vec::new(),
+                };
+                let value = if s.api_model().is_empty() { "Choose a model".to_string() } else { s.api_model().to_string() };
+                ModelChoice { picker: Picker::ApiModel, value, options: suggestions.into_iter().map(|m| (m.clone(), m)).collect(),
+                    selected: s.api_model().to_string(), set: |s, v| { s.api_models.insert(s.api_provider.clone(), v); } }
+            }
+        }
     }
 
     fn api_key_section(&self, cx: &mut Context<Self>) -> Div {
@@ -494,6 +540,23 @@ fn folder_bytes(root: &std::path::Path) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_newest_gpt_generation_is_offered_without_astra() {
+        let models: Vec<(String, String)> = ["gpt-6.1-sol", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]
+            .iter().map(|id| (id.to_string(), id.to_uppercase())).collect();
+        assert_eq!(latest_gpt_models(&models).into_iter().map(|(id, _)| id).collect::<Vec<_>>(), ["gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna"]);
+        // A future minor version shows up on its own; a new major version replaces the old ones.
+        let mut later = models.clone();
+        later.push(("gpt-6.2-sol".into(), "GPT-6.2-Sol".into()));
+        assert!(latest_gpt_models(&later).iter().any(|(id, _)| id == "gpt-6.2-sol"));
+        later.push(("gpt-7-sol".into(), "GPT-7-Sol".into()));
+        assert_eq!(latest_gpt_models(&later).into_iter().map(|(id, _)| id).collect::<Vec<_>>(), ["gpt-7-sol"]);
+        // Unrecognised ids are left alone rather than emptying the picker.
+        let other = vec![("codex-mini".to_string(), "Codex Mini".to_string())];
+        assert_eq!(latest_gpt_models(&other), other);
+        assert_eq!((gpt_version("gpt-6.1-sol"), gpt_version("GPT-6-Luna"), gpt_version("gpt-x")), (Some((6, 1)), Some((6, 0)), None));
+    }
 
     #[test]
     fn plans_and_accounts_read_as_intended() {

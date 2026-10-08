@@ -39,6 +39,9 @@ pub enum SttProvider { #[default] Parakeet, Deepgram }
 pub struct Settings {
     pub provider: Provider,
     pub claude_model: ClaudeModel,
+    /// The model id Claude Code last reported for each alias ("opus" → "claude-opus-5-5"), so the
+    /// pickers can show real version numbers before this run's first answer.
+    pub claude_models: BTreeMap<String, String>,
     /// Codex model id from the account's model list; empty uses the Codex default.
     pub codex_model: String,
     /// Preset id from `providers::PRESETS` used with "Your API key".
@@ -48,6 +51,9 @@ pub struct Settings {
     /// Base URL for the "custom" OpenAI-compatible provider.
     pub custom_base_url: String,
     pub answer_style: AnswerStyle,
+    /// Slower, deeper reasoning for answers. Off answers with the least reasoning the provider
+    /// offers, so the first words arrive as fast as possible.
+    pub smart_mode: bool,
     /// Transcribe the Live session's audio on this PC. Off keeps Live to the screen and typed questions.
     pub transcribe: bool,
     pub stt_provider: SttProvider,
@@ -69,9 +75,10 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            provider: Provider::default(), claude_model: ClaudeModel::default(), codex_model: String::new(),
+            provider: Provider::default(), claude_model: ClaudeModel::default(), claude_models: BTreeMap::new(), codex_model: String::new(),
             api_provider: "anthropic".into(), api_models: BTreeMap::new(), custom_base_url: String::new(),
-            answer_style: AnswerStyle::default(), transcribe: true, stt_provider: SttProvider::default(), listen_mic: true, listen_desktop: true,
+            answer_style: AnswerStyle::default(), smart_mode: false, transcribe: true, stt_provider: SttProvider::default(),
+            listen_mic: true, listen_desktop: true,
             mic_device: String::new(), desktop_device: String::new(),
             hide_from_capture: true, screen_on_send: true, start_live_on_launch: false,
             save_sessions: true, save_screenshots: true, keep_sessions: Retention::default(),
@@ -142,6 +149,7 @@ mod tests {
         let partial: Settings = serde_json::from_str(r#"{"provider":"claude","language":"japanese","speechEngine":"whisper"}"#).unwrap();
         assert_eq!(partial.provider, Provider::Claude);
         assert!(partial.hide_from_capture);
+        assert!(!partial.smart_mode, "answers default to the fastest reasoning");
         assert!(partial.transcribe);
         assert_eq!(partial.sources(), Source::ALL);
         assert_eq!(Settings { listen_mic: false, ..Settings::default() }.sources(), [Source::Them]);

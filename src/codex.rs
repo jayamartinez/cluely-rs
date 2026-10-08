@@ -30,7 +30,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use base64::Engine;
 use serde_json::{Map, Value, json};
 
-use crate::chat::{ChatRequest, SubscriptionStatus};
+use crate::chat::{ChatRequest, Effort, SubscriptionStatus};
 use crate::providers::{Message, Part, Role};
 
 const MAX_LINE_BYTES: usize = 8 * 1024 * 1024;
@@ -1427,6 +1427,42 @@ pub struct CodexClient {
     launcher: Box<dyn Launcher>,
     current: Mutex<Option<Arc<Connection>>>,
     limits: Limits,
+    /// Reasoning efforts each model advertises (from `model/list`), read once.
+    catalog: Mutex<Option<Catalog>>,
+}
+
+/// What `model/list` says about reasoning: the default model and each model's efforts.
+#[derive(Clone, Debug, Default)]
+struct Catalog {
+    default_model: Option<String>,
+    efforts: HashMap<String, Vec<String>>,
+}
+
+/// The model and reasoning effort a turn runs with.
+#[derive(Clone, Copy)]
+struct ModelChoice<'a> {
+    /// `None` keeps the account's default model.
+    model: Option<&'a str>,
+    effort: &'static str,
+}
+
+/// Reasoning efforts from least to most thinking, as the app-server names them.
+const EFFORT_ORDER: [&str; 8] = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
+
+/// The reasoning effort a turn asks for. Normal answers take the least the model offers, so the
+/// first words arrive quickly (the user's own Codex config may ask for far more, which suits
+/// coding but not live answers); Smart mode takes `high`, or the nearest level the model has.
+fn pick_effort(supported: &[String], effort: Effort) -> &'static str {
+    let rank = |level: &str| EFFORT_ORDER.iter().position(|known| *known == level);
+    let mut known: Vec<usize> = supported.iter().filter_map(|level| rank(level)).collect();
+    known.sort_unstable();
+    let high = rank("high").expect("high is a known level");
+    let chosen = match effort {
+        Effort::Fast => known.first().copied(),
+        Effort::Smart => known.iter().rev().find(|level| **level <= high).or(known.first()).copied(),
+    };
+    // Every current model takes low and high; they are the safe defaults when nothing is known.
+    EFFORT_ORDER[chosen.unwrap_or(match effort { Effort::Fast => rank("low").expect("known"), Effort::Smart => high })]
 }
 
 impl CodexClient {
@@ -1435,7 +1471,7 @@ impl CodexClient {
     }
 
     fn with_launcher(launcher: Box<dyn Launcher>, limits: Limits) -> Self {
-        Self { launcher, current: Mutex::new(None), limits }
+        Self { launcher, current: Mutex::new(None), limits, catalog: Mutex::new(None) }
     }
 
     /// Starts the app-server if needed and reads account state. Never panics; errors go in `error`.
@@ -1454,6 +1490,7 @@ impl CodexClient {
                 status.account = email;
                 status.plan = plan;
                 status.models = self.models(&connection).unwrap_or_default();
+                status.default_model = self.catalog.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref().and_then(|catalog| catalog.default_model.clone());
             }
             Ok((Account::Other, _)) => status.error = Some(err(Kind::AuthUnsupported).message),
             Ok((Account::None, _)) => {}
@@ -1535,8 +1572,9 @@ impl CodexClient {
 
     fn models(&self, connection: &Connection) -> Result<Vec<(String, String)>, CodexError> {
         let mut models = Vec::new();
+        let mut catalog = Catalog::default();
         let mut cursor: Option<String> = None;
-        for _ in 0..10 {
+        'pages: for _ in 0..10 {
             let mut params = json!({ "includeHidden": false });
             if let Some(cursor) = &cursor {
                 params["cursor"] = json!(cursor);
@@ -1547,10 +1585,15 @@ impl CodexClient {
                 if model.get("hidden") == Some(&Value::Bool(true)) || models.iter().any(|(known, _)| known == id) {
                     continue;
                 }
+                let efforts = model.get("supportedReasoningEfforts").and_then(Value::as_array).into_iter().flatten()
+                    .filter_map(|option| option.get("reasoningEffort").and_then(Value::as_str))
+                    .filter(|level| EFFORT_ORDER.contains(level)).map(str::to_string).collect();
+                catalog.efforts.insert(id.to_string(), efforts);
+                if model.get("isDefault") == Some(&Value::Bool(true)) { catalog.default_model = Some(id.to_string()); }
                 let name = model.get("displayName").and_then(Value::as_str).map(str::trim).filter(|name| !name.is_empty()).unwrap_or(id);
                 models.push((id.to_string(), name.chars().take(80).collect()));
                 if models.len() >= MAX_MODELS {
-                    return Ok(models);
+                    break 'pages;
                 }
             }
             cursor = response.get("nextCursor").and_then(Value::as_str).filter(|cursor| !cursor.is_empty()).map(str::to_string);
@@ -1558,7 +1601,21 @@ impl CodexClient {
                 break;
             }
         }
+        *self.catalog.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(catalog);
         Ok(models)
+    }
+
+    /// The reasoning effort for a turn of `model` (`None`: the account's default model). The
+    /// model list is read once per client (it costs no usage); without it, `pick_effort`
+    /// falls back to levels every current model accepts.
+    fn effort_for(&self, connection: &Connection, model: Option<&str>, effort: Effort) -> &'static str {
+        let known = self.catalog.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+        let catalog = match known {
+            Some(catalog) => catalog,
+            None => { let _ = self.models(connection); self.catalog.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone().unwrap_or_default() }
+        };
+        let id = model.map(str::to_string).or(catalog.default_model.clone()).unwrap_or_default();
+        pick_effort(catalog.efforts.get(&id).map(Vec::as_slice).unwrap_or(&[]), effort)
     }
 
     fn login_inner(&self) -> Result<(), CodexError> {
@@ -1637,7 +1694,8 @@ impl CodexClient {
             return Err(err(Kind::Cancelled));
         }
         let thread_id = self.start_thread(&connection, &req.system)?;
-        let result = self.run_turn(&connection, &thread_id, input, model, cancel, on_delta);
+        let effort = self.effort_for(&connection, model, req.effort);
+        let result = self.run_turn(&connection, &thread_id, input, ModelChoice { model, effort }, cancel, on_delta);
         if connection.usable() {
             connection.send_detached("thread/unsubscribe", json!({ "threadId": thread_id }));
         }
@@ -1675,6 +1733,31 @@ impl CodexClient {
         self.stream_turn_inner(thread, req, cancel, on_delta).map_err(|error| error.message)
     }
 
+    /// Free preparation for a Live session: start the app-server, read the model list and open
+    /// the session's restricted thread now, so the first answer pays only for its turn. Opening
+    /// a thread runs no model turn and costs no usage. Does nothing if a usable thread with the
+    /// same instructions is already open.
+    pub fn prepare_thread(&self, thread: &mut Option<CodexThread>, system: &str) -> Result<(), String> {
+        let mut prepare = || -> Result<(), CodexError> {
+            if system.len() > MAX_INSTRUCTIONS {
+                return Err(err(Kind::RequestTooLarge));
+            }
+            let connection = self.connection()?;
+            self.require_chatgpt(&connection)?;
+            if self.catalog.lock().unwrap_or_else(std::sync::PoisonError::into_inner).is_none() {
+                let _ = self.models(&connection);
+            }
+            if thread.as_ref().is_some_and(|open| Arc::ptr_eq(&open.connection, &connection) && open.system == system) {
+                return Ok(());
+            }
+            *thread = None;
+            let thread_id = self.start_thread(&connection, system)?;
+            *thread = Some(CodexThread { connection: connection.clone(), thread_id, system: system.to_string(), turns: 0 });
+            Ok(())
+        };
+        prepare().map_err(|error| error.message)
+    }
+
     fn stream_turn_inner(&self, thread: &mut Option<CodexThread>, req: &ChatRequest, cancel: &AtomicBool, on_delta: &mut dyn FnMut(&str)) -> Result<String, CodexError> {
         if cancel.load(Ordering::Relaxed) {
             return Err(err(Kind::Cancelled));
@@ -1701,7 +1784,8 @@ impl CodexClient {
         // A reused thread already holds the earlier exchanges; only the new message goes in.
         let messages = if open.turns > 0 { &req.messages[req.messages.len().saturating_sub(1)..] } else { &req.messages[..] };
         let input = fold_input(messages)?;
-        let result = self.run_turn(&connection, &open.thread_id, input, model, cancel, on_delta);
+        let effort = self.effort_for(&connection, model, req.effort);
+        let result = self.run_turn(&connection, &open.thread_id, input, ModelChoice { model, effort }, cancel, on_delta);
         match &result {
             Ok(_) => open.turns += 1,
             // The server never heard the message (or the connection is gone); don't count on it.
@@ -1716,7 +1800,7 @@ impl CodexClient {
         connection: &Connection,
         thread_id: &str,
         input: Vec<Value>,
-        model: Option<&str>,
+        choice: ModelChoice,
         cancel: &AtomicBool,
         on_delta: &mut dyn FnMut(&str),
     ) -> Result<String, CodexError> {
@@ -1724,8 +1808,11 @@ impl CodexClient {
         let mut params = json!({
             "threadId": thread_id, "input": input, "cwd": connection.cwd, "approvalPolicy": "never",
             "sandboxPolicy": { "type": "readOnly", "networkAccess": false },
+            // Overrides the reasoning inherited from the user's own Codex config for this turn;
+            // summaries are never shown, so none are generated.
+            "effort": choice.effort, "summary": "none",
         });
-        if let Some(model) = model {
+        if let Some(model) = choice.model {
             params["model"] = json!(model);
         }
         let start = connection.send_request("turn/start", params, tx)?;
@@ -1975,7 +2062,9 @@ mod tests {
                 }))],
                 "account/read" => vec![ok(json!({ "account": account.clone(), "requiresOpenaiAuth": true }))],
                 "model/list" => vec![ok(json!({ "data": [
-                    { "id": "gpt-5", "displayName": "GPT-5", "hidden": false },
+                    { "id": "gpt-5", "displayName": "GPT-5", "hidden": false, "isDefault": true,
+                      "supportedReasoningEfforts": [{ "reasoningEffort": "minimal", "description": "" }, { "reasoningEffort": "low", "description": "" },
+                          { "reasoningEffort": "medium", "description": "" }, { "reasoningEffort": "high", "description": "" }, { "reasoningEffort": "xhigh", "description": "" }] },
                     { "id": "secret", "displayName": "Hidden", "hidden": true },
                 ], "nextCursor": null }))],
                 "config/read" => vec![ok(json!({ "config": { "mcp_servers": { "docs": {} } }, "origins": {} }))],
@@ -2012,7 +2101,7 @@ mod tests {
     }
 
     fn request() -> ChatRequest {
-        ChatRequest { system: "Be brief.".into(), messages: vec![user("Hi")], model: Some("gpt-5".into()) }
+        ChatRequest { system: "Be brief.".into(), messages: vec![user("Hi")], model: Some("gpt-5".into()), effort: Effort::Fast }
     }
 
     fn methods(launcher: &FakeLauncher) -> Vec<String> {
@@ -2398,7 +2487,7 @@ mod tests {
         let status = client(&launcher).status();
         assert_eq!(status, SubscriptionStatus {
             installed: true, signed_in: true, account: Some("me@example.com".into()), plan: Some("plus".into()),
-            models: vec![("gpt-5".into(), "GPT-5".into())], error: None,
+            models: vec![("gpt-5".into(), "GPT-5".into())], default_model: Some("gpt-5".into()), error: None,
         });
         assert_eq!(methods(&launcher), ["initialize", "initialized", "account/read", "model/list"]);
         let init = lock(&launcher.received)[0].clone();
@@ -2447,6 +2536,8 @@ mod tests {
         let turn = find("turn/start")["params"].clone();
         assert_eq!(turn["sandboxPolicy"], json!({ "type": "readOnly", "networkAccess": false }));
         assert_eq!(turn["model"], "gpt-5");
+        // The least reasoning the model advertises, overriding the user's own Codex config.
+        assert_eq!((turn["effort"].clone(), turn["summary"].clone()), (json!("minimal"), json!("none")));
         assert_eq!(turn["input"][0]["text"], "Conversation so far:\n\nUser: Before\n\nAssistant: Earlier");
         let denial = received.iter().find(|m| m["id"] == "srv-1").unwrap();
         assert_eq!(denial["result"]["decision"], "decline");
@@ -2454,6 +2545,55 @@ mod tests {
         assert!(codex.stream(&request(), &AtomicBool::new(false), &mut |_| {}).is_ok());
         assert_eq!(launcher.launches.load(Ordering::SeqCst), 1);
         assert!(methods(&launcher).contains(&"thread/unsubscribe".to_string()));
+    }
+
+    /// Live start opens the thread ahead of time; the first answer then runs only its turn.
+    #[test]
+    fn a_prepared_thread_is_used_by_the_first_turn() {
+        let events = vec![delta("turn_1", "m", "Answer"), completed("completed")];
+        let launcher = Arc::new(FakeLauncher::new(server(chatgpt(), good_thread(), events)));
+        let codex = client(&launcher);
+        let mut thread = None;
+        codex.prepare_thread(&mut thread, "Be brief.").unwrap();
+        assert_eq!(methods(&launcher).iter().filter(|m| *m == "thread/start").count(), 1);
+        assert!(!methods(&launcher).contains(&"turn/start".to_string()), "preparing runs no turn");
+        codex.prepare_thread(&mut thread, "Be brief.").unwrap();
+        assert_eq!(codex.stream_turn(&mut thread, &request(), &AtomicBool::new(false), &mut |_| {}).unwrap(), "Answer");
+        let started = methods(&launcher);
+        assert_eq!(started.iter().filter(|m| *m == "thread/start").count(), 1);
+        assert_eq!(started.iter().filter(|m| *m == "model/list").count(), 1);
+        // Different instructions (the answer style changed) need their own thread.
+        codex.prepare_thread(&mut thread, "Explain clearly.").unwrap();
+        assert_eq!(methods(&launcher).iter().filter(|m| *m == "thread/start").count(), 2);
+    }
+
+    #[test]
+    fn effort_is_the_least_for_normal_answers_and_high_for_smart_mode() {
+        let levels = |list: &[&str]| list.iter().map(|level| level.to_string()).collect::<Vec<_>>();
+        let sol = levels(&["low", "medium", "high", "xhigh", "max", "ultra"]);
+        assert_eq!((pick_effort(&sol, Effort::Fast), pick_effort(&sol, Effort::Smart)), ("low", "high"));
+        let mini = levels(&["minimal", "low", "medium"]);
+        assert_eq!((pick_effort(&mini, Effort::Fast), pick_effort(&mini, Effort::Smart)), ("minimal", "medium"));
+        let deep = levels(&["xhigh", "max"]);
+        assert_eq!((pick_effort(&deep, Effort::Fast), pick_effort(&deep, Effort::Smart)), ("xhigh", "xhigh"));
+        // Unknown or unlisted levels: the levels every current model accepts.
+        assert_eq!((pick_effort(&[], Effort::Fast), pick_effort(&levels(&["turbo"]), Effort::Smart)), ("low", "high"));
+    }
+
+    #[test]
+    fn smart_mode_and_the_default_model_choose_their_effort_from_the_model_list() {
+        let events = vec![delta("turn_1", "m", "Answer"), completed("completed")];
+        let launcher = Arc::new(FakeLauncher::new(server(chatgpt(), good_thread(), events)));
+        let codex = client(&launcher);
+        let smart = ChatRequest { effort: Effort::Smart, model: None, ..request() };
+        assert!(codex.stream(&smart, &AtomicBool::new(false), &mut |_| {}).is_ok());
+        let turn = lock(&launcher.received).iter().rev().find(|m| m["method"] == "turn/start").cloned().unwrap();
+        // No model chosen: the account's default model (gpt-5 here) decides what "high" maps to.
+        assert_eq!((turn["params"]["effort"].clone(), turn["params"].get("model").cloned()), (json!("high"), None));
+        // The model list was read once to learn the efforts; it costs no usage.
+        assert_eq!(methods(&launcher).iter().filter(|m| *m == "model/list").count(), 1);
+        assert!(codex.stream(&request(), &AtomicBool::new(false), &mut |_| {}).is_ok());
+        assert_eq!(methods(&launcher).iter().filter(|m| *m == "model/list").count(), 1);
     }
 
     /// A Live session keeps one thread: later turns send only the new message, the

@@ -74,7 +74,7 @@ pub struct Overlay {
     shape: Rc<RefCell<Vec<win::Shape>>>,
     /// Interactive areas laid out this frame; everything else is click-through.
     pub(crate) hits: Hits,
-    composer: Entity<TextInput>,
+    pub(crate) composer: Entity<TextInput>,
     pub(crate) key_input: Entity<TextInput>,
     pub(crate) model_input: Entity<TextInput>,
     pub(crate) base_url_input: Entity<TextInput>,
@@ -127,6 +127,8 @@ pub struct Overlay {
     pub(crate) archive_bytes: Option<u64>,
     /// Where the open dropdown's face was laid out, so a click on it closes rather than reopens.
     pub(crate) picker_face: Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
+    /// The pointer is over the composer's Smart pill (shows its tooltip).
+    pub(crate) smart_hover: bool,
 }
 
 impl Overlay {
@@ -153,7 +155,7 @@ impl Overlay {
         if let Some(hwnd) = hwnd { win::enable_passthrough(hwnd); }
         cx.spawn_in(window, async move |this, cx| loop {
             cx.background_executor().timer(Duration::from_millis(30)).await;
-            if this.update(cx, |this, _| this.update_passthrough()).is_err() { break; }
+            if this.update(cx, |this, cx| this.update_passthrough(cx)).is_err() { break; }
         }).detach();
         // One-second tick for the live timer; idle ticks do no work.
         cx.spawn_in(window, async move |this, cx| loop {
@@ -197,7 +199,7 @@ impl Overlay {
             motion: None, live_since: None, turns: Vec::new(), scroll: ScrollHandle::new(),
             listening: None, listening_status: None, listening_epoch: 0, transcript: Vec::new(), provisional: Default::default(),
             model_installed: false, model_download: None, model_notice: None,
-            open_picker: None, reveal_accounts: false, devices: None, devices_loading: false, archive_bytes: None, picker_face: Rc::default() };
+            open_picker: None, reveal_accounts: false, devices: None, devices_loading: false, archive_bytes: None, picker_face: Rc::default(), smart_hover: false };
         overlay.refresh_model_status();
         if start_live { overlay.set_live(true, window, cx); }
         overlay
@@ -287,6 +289,8 @@ impl Overlay {
     fn set_live(&mut self, live: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.live_since = live.then(Instant::now);
         self.hotkeys.set_live(live);
+        // The composer's model switcher lists the subscription's models; fetch them up front.
+        if live && self.codex_status.is_none() { self.refresh_subscriptions(window, cx); }
         if !live {
             // Dropping the session cancels the running request; its late replies are stale.
             self.reasoning = None;
@@ -304,6 +308,7 @@ impl Overlay {
             self.hotkeys.set_panel_open(false);
             self.metrics = listening::Metrics::for_session(self.live_since.unwrap_or_else(Instant::now));
             self.reasoning = Some(ReasoningSession::new(self.codex.clone(), self.metrics.as_ref().map(|metrics| metrics.recorder.clone())));
+            if let Some(session) = &self.reasoning { session.prewarm(&self.store.value); }
             self.start_listening(window, cx);
         }
         self.fit(window);
@@ -327,12 +332,24 @@ impl Overlay {
         }
     }
 
-    fn update_passthrough(&mut self) {
+    fn update_passthrough(&mut self, cx: &mut Context<Self>) {
         let Some(hwnd) = self.hwnd else { return };
         let over_control = win::cursor_in_window(hwnd).is_some_and(|point| self.hits.contains(point));
         if over_control != self.catching_mouse {
             self.catching_mouse = over_control;
             win::set_mouse_passthrough(hwnd, !over_control);
+        }
+        // A press anywhere that isn't one of the overlay's controls (the click-through answer
+        // area, or another app) never reaches the overlay, so an open list closes from here.
+        if self.open_picker.is_some() && !over_control && win::left_button_down() {
+            self.open_picker = None;
+            cx.notify();
+        }
+        // Likewise, leaving a control for the click-through area sends the overlay no "hover
+        // ended", so a hover tooltip is cleared here.
+        if self.smart_hover && !over_control {
+            self.smart_hover = false;
+            cx.notify();
         }
     }
 
@@ -403,7 +420,7 @@ impl Overlay {
         }).detach();
     }
 
-    fn send_composer(&mut self, input: Entity<TextInput>, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn send_composer(&mut self, input: Entity<TextInput>, window: &mut Window, cx: &mut Context<Self>) {
         let question = input.read(cx).text().trim().to_string();
         if question.is_empty() { return; }
         input.update(cx, |input, cx| input.clear(cx));
@@ -480,6 +497,7 @@ impl Overlay {
             }
             Err(reason) => turn.status = Status::Failed(reason.into()),
         }
+        self.remember_claude_models();
         cx.notify();
     }
 
@@ -487,6 +505,19 @@ impl Overlay {
     /// tab, the API-key answer provider on the Model tab.
     pub(crate) fn key_target(&self) -> String {
         if self.settings_tab == Some(Tab::Listening) { crate::stt::deepgram::PROVIDER_ID.to_string() } else { self.store.value.api_provider.clone() }
+    }
+
+    /// Keep the Claude versions the CLI has reported (e.g. "opus" → claude-opus-5-5), so the pickers
+    /// show real version numbers, also on the next launch before any answer.
+    fn remember_claude_models(&mut self) {
+        let mut changed = false;
+        for (alias, id) in crate::claude_cli::resolved_models() {
+            if self.store.value.claude_models.get(&alias) != Some(&id) {
+                self.store.value.claude_models.insert(alias, id);
+                changed = true;
+            }
+        }
+        if changed { self.store.save(); }
     }
 
     pub fn save_key(&mut self, cx: &mut Context<Self>) {
@@ -531,19 +562,6 @@ impl Overlay {
     pub fn choose_model(&mut self, model: String, window: &mut Window, cx: &mut Context<Self>) {
         self.model_input.update(cx, |input, cx| input.set_text(model.clone(), cx));
         self.update_settings(|s| { s.api_models.insert(s.api_provider.clone(), model); }, window, cx);
-    }
-
-    /// Label for the composer's provider chip.
-    fn provider_label(&self) -> String {
-        let s = &self.store.value;
-        match s.provider {
-            Provider::Codex => "ChatGPT".into(),
-            Provider::Claude => format!("Claude · {:?}", s.claude_model),
-            Provider::ApiKey => {
-                let name = crate::providers::preset(&s.api_provider).map(|p| p.label).unwrap_or("API");
-                if s.api_model().is_empty() { name.to_string() } else { format!("{name} · {}", s.api_model()) }
-            }
-        }
     }
 
     fn toggle_visible(&mut self) {
@@ -688,18 +706,7 @@ impl Overlay {
             .child(div().id("composer-input").cursor_text()
                 .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| window.focus(&this.composer.focus_handle(cx))))
                 .child(self.composer.clone()))
-            .child(div().flex().items_center().justify_between()
-                .child(div().flex().items_center().gap(px(6.0))
-                    .child(div().flex().items_center().gap(px(6.0)).px(px(9.0)).py(px(4.0)).rounded_full().border_1().border_color(theme::hairline())
-                        .child(div().size(px(6.0)).rounded_full().bg(theme::ok()))
-                        .child(div().text_size(px(12.0)).text_color(theme::body()).child(self.provider_label())))
-                    .when(self.store.value.screen_on_send, |row| row.child(div().px(px(9.0)).py(px(4.0)).rounded_full().border_1().border_color(theme::hairline())
-                        .text_size(px(12.0)).text_color(theme::body()).child("Screen on send")))
-                    .child(div().text_size(px(12.0)).text_color(theme::muted()).child("Enter to send ·"))
-                    .child(keycap(self.hotkeys.label(Action::Assist))).child(div().text_size(px(12.0)).text_color(theme::muted()).child("Assist")))
-                .child(div().id("send").size(px(30.0)).rounded_full().bg(theme::accent()).flex().items_center().justify_center().cursor_pointer()
-                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| { let input = this.composer.clone(); this.send_composer(input, window, cx); }))
-                    .text_color(theme::accent_ink()).font_weight(FontWeight::BOLD).child("↑")))
+            .child(self.composer_bar(cx))
             .child(self.hits.mark());
         div().w(px(560.0)).flex_1().min_h_0().flex().flex_col().rounded(px(18.0)).bg(theme::glass())
             .border_1().border_color(theme::hairline()).overflow_hidden()
