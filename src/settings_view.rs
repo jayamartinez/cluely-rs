@@ -68,6 +68,32 @@ fn switch(name: &'static str, on: bool, set: fn(&mut Settings, bool), cx: &mut C
         .child(ui::switch(on))
 }
 
+/// A toggle row: title and one line of detail on the left, the switch on the right.
+fn switch_row(title: &'static str, detail: &'static str, control: impl IntoElement) -> Div {
+    div().flex().items_center().gap(px(12.0))
+        .child(div().flex().flex_col().gap(px(2.0)).flex_1().min_w_0()
+            .child(div().text_size(px(13.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child(title))
+            .child(div().text_size(px(12.0)).text_color(theme::muted()).child(detail)))
+        .child(control)
+}
+
+/// Settings → Model → Answer early: speculative answers, what they use and send, and showing
+/// them without a press.
+fn answer_early(s: &Settings, cx: &mut Context<Overlay>) -> Div {
+    let note = div().flex().gap(px(10.0)).px(px(12.0)).py(px(10.0)).rounded(px(10.0)).bg(gpui::rgb(0x16171a)).border_1().border_color(theme::hairline())
+        .child(div().pt(px(1.0)).child(ui::icon("icons/info.svg", 14.0, theme::muted())))
+        .child(div().flex().flex_col().gap(px(4.0)).flex_1().min_w_0().text_size(px(12.0)).line_height(px(16.0))
+            .child(div().text_color(gpui::rgb(0xd9d5cc)).child("Each one is a real request to your selected model, on your subscription or API key. It counts toward your usage and rate limits, even when you don't open it."))
+            .child(div().text_color(theme::muted()).child("The conversation and a screenshot are sent to your provider before you press. At most 4 a minute; a newer question replaces the one in progress.")));
+    div().flex().flex_col().gap(px(12.0)).pt(px(16.0)).border_t_1().border_color(gpui::rgb(0x23262a))
+        .child(ui::section_label("ANSWER EARLY"))
+        .child(switch_row("Speculative answers", "Start answering their question before you press Assist, so it's ready",
+            switch("speculative-answers", s.speculative_answers, |s, v| s.speculative_answers = v, cx)))
+        .child(note)
+        .child(switch_row("Show answers automatically", "Speculative answers appear as they're written, without pressing anything",
+            switch("auto-answer", s.auto_answer, |s, v| s.auto_answer = v, cx)))
+}
+
 fn button(id: &'static str, label: impl Into<SharedString>, primary: bool) -> gpui::Stateful<Div> {
     let base = div().id(id).flex_none().px(px(12.0)).py(px(6.0)).rounded(px(9.0)).cursor_pointer().text_size(px(12.0)).font_weight(FontWeight::SEMIBOLD).child(label.into());
     if primary { base.bg(theme::accent()).text_color(theme::accent_ink()) } else { base.border_1().border_color(theme::hairline()).text_color(theme::body()) }
@@ -137,7 +163,7 @@ impl Overlay {
         let mut panel = div().relative().w(px(560.0)).flex().flex_col().rounded(px(18.0)).bg(theme::glass())
             .border_1().border_color(theme::hairline()).overflow_hidden()
             .child(header)
-            .child(div().id("settings-body").flex().flex_col().px(px(18.0)).pt(px(14.0)).pb(px(20.0)).max_h(px(470.0)).overflow_y_scroll().child(body));
+            .child(div().id("settings-body").flex().flex_col().px(px(18.0)).pt(px(14.0)).pb(px(20.0)).max_h(px(652.0)).overflow_y_scroll().child(body));
         if let Some(warning) = self.store.warning {
             panel = panel.child(div().px(px(18.0)).pb(px(12.0)).text_size(px(12.0)).text_color(gpui::rgb(0xffb4a8)).child(warning));
         }
@@ -222,7 +248,8 @@ impl Overlay {
             styles.iter().map(|(st, l)| (format!("{st:?}"), l.to_string())).collect(), &format!("{:?}", s.answer_style),
             |s, v| s.answer_style = if v == "Standard" { AnswerStyle::Standard } else { AnswerStyle::Spoken }, cx));
         let smart = ui::setting_row("Smart mode · slower, deeper reasoning", switch("smart-mode", s.smart_mode, |s, v| s.smart_mode = v, cx)).border_b_0();
-        let mut tab = div().flex().flex_col().gap(px(16.0)).child(list).child(div().flex().gap(px(12.0)).child(model).child(style)).child(smart);
+        let mut tab = div().flex().flex_col().gap(px(16.0)).child(list).child(div().flex().gap(px(12.0)).child(model).child(style)).child(smart)
+            .child(answer_early(s, cx));
         if s.provider == Provider::ApiKey { tab = tab.child(self.api_key_section(cx)); }
         tab
     }
