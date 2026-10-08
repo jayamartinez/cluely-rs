@@ -106,7 +106,12 @@ benchmarks speed, latency, CPU, memory and long-run reliability (usage at the to
 speech from `dev/make-bench-audio.ps1`). `cargo run --example transcript_replay -- <wav>` replays a recording (the
 bench clip, or a session's exported capture) through the whole pipeline at real-time pace and prints where speech
 starts and stops against every partial, end-of-utterance and commit, which is how endpointing problems from real
-sessions are reproduced and tuned. Changes to third-party code and builds are documented in [PATCHES.md](PATCHES.md).
+sessions are reproduced. `cargo run --example endpoint_eval` scores endpointing over every capture in the metrics
+folder plus the bench clip: commits, fragments, merged questions, commit latency after speech stops and the reason
+mix, per file. It runs Parakeet once per file (cached) and replays on the audio clock, so it is fast, deterministic
+and makes no paid calls; `--config` compares settings side by side and `--stall` / `--slow` / `--lag` simulate a
+recognizer falling behind a busy CPU (usage at the top of `examples/endpoint_eval.rs`). Changes to third-party code
+and builds are documented in [PATCHES.md](PATCHES.md).
 
 `CLUELYRS_ALLOW_CAPTURE=1` lets the overlay appear in screenshots while developing. Live provider tests are ignored by
 default (`cargo test -- --ignored` with the variables documented in `claude_cli.rs` and `codex.rs`).
@@ -118,8 +123,10 @@ on-device transcription of Me and Them with the transcript saved per session, an
 heard so far (the last 10 minutes or 40 lines, plus what is being said right now). During a Live session the ChatGPT
 provider keeps one restricted Codex thread, so each answer only sends what is new; a newer request cancels the one in
 flight, and nothing from a cancelled request reaches the screen.
-Transcription runs on this PC with Parakeet, or optionally through Deepgram with your own key.
-Not yet: endpointing tuned on real conversations, and speculative answers.
+Transcription runs on this PC with Parakeet, or optionally through Deepgram with your own key. Endpointing is
+evaluated on recorded sessions, and a recognizer that falls behind (a busy CPU) is endpointed on its own clock, so
+it neither cuts lines into fragments nor merges questions while it catches up.
+Not yet: speculative answers.
 
 ## Third-party
 

@@ -18,11 +18,17 @@ pub struct EndpointConfig {
     pub max_silence_ms: f64,
     /// Questions commit this much sooner, so answers can start earlier.
     pub question_discount: f64,
+    /// While the recognizer is this far behind the audio, silence in the live audio says nothing
+    /// about its text from seconds earlier, so silence is measured on the recognizer's own clock
+    /// (audio it has processed without a word). A recognizer that keeps up is behind by one
+    /// chunk's processing (tens of ms); a second means it is starved (a busy CPU).
+    pub backlog_hold_ms: f64,
 }
 
 impl Default for EndpointConfig {
     fn default() -> Self {
-        Self { after_eou_ms: 200.0, eou_unfinished_ms: 1200.0, finished_ms: 700.0, max_silence_ms: 1500.0, question_discount: 0.8 }
+        Self { after_eou_ms: 200.0, eou_unfinished_ms: 1200.0, finished_ms: 700.0, max_silence_ms: 1500.0, question_discount: 0.8,
+            backlog_hold_ms: 1000.0 }
     }
 }
 
@@ -79,14 +85,19 @@ pub struct SilenceTracker {
     min_speech_rms: f32,
     last_voice_end_ms: Option<f64>,
     latest_end_ms: f64,
+    /// Voiced stretches (start, end) of the last `VOICE_HISTORY_MS`, so silence can also be read
+    /// as of an earlier moment: where a lagging recognizer has got to.
+    voiced: std::collections::VecDeque<(f64, f64)>,
 }
 
 /// How far back the floor looks. Long enough to span a word, short enough that a hum that
 /// starts (a fan, a call's noise bed) stops counting as voice within a few seconds.
 const FLOOR_WINDOW_MS: f64 = 2500.0;
+/// How far back voiced stretches are kept: well beyond any backlog worth endpointing through.
+const VOICE_HISTORY_MS: f64 = 60_000.0;
 
 impl Default for SilenceTracker {
-    fn default() -> Self { Self { recent: Default::default(), min_speech_rms: 0.01, last_voice_end_ms: None, latest_end_ms: 0.0 } }
+    fn default() -> Self { Self { recent: Default::default(), min_speech_rms: 0.01, last_voice_end_ms: None, latest_end_ms: 0.0, voiced: Default::default() } }
 }
 
 impl SilenceTracker {
@@ -97,7 +108,14 @@ impl SilenceTracker {
         self.recent.push_back((end_ms, rms));
         while self.recent.front().is_some_and(|(at, _)| end_ms - at > FLOOR_WINDOW_MS) { self.recent.pop_front(); }
         let voiced = rms >= self.min_speech_rms.max(self.noise_floor() * 3.0);
-        if voiced { self.last_voice_end_ms = Some(end_ms); }
+        if voiced {
+            self.last_voice_end_ms = Some(end_ms);
+            match self.voiced.back_mut() {
+                Some(last) if chunk.start_ms <= last.1 + 1e-6 => last.1 = end_ms,
+                _ => self.voiced.push_back((chunk.start_ms, end_ms)),
+            }
+        }
+        while self.voiced.front().is_some_and(|(_, end)| end_ms - end > VOICE_HISTORY_MS) { self.voiced.pop_front(); }
         self.latest_end_ms = self.latest_end_ms.max(end_ms);
         voiced
     }
@@ -116,6 +134,13 @@ impl SilenceTracker {
     /// so an utterance isn't over while its text is still arriving.
     pub fn silence_since(&self, text_end_ms: f64) -> f64 {
         self.last_voice_end_ms.map(|end| (self.latest_end_ms - end.max(text_end_ms)).max(0.0)).unwrap_or(0.0)
+    }
+
+    /// [`SilenceTracker::silence_since`] as it read at audio time `at_ms` (within the last
+    /// minute): silence up to that moment, ignoring anything heard after it.
+    pub fn silence_at(&self, at_ms: f64, text_end_ms: f64) -> f64 {
+        let voice_end = self.voiced.iter().rev().find(|(start, _)| *start < at_ms).map(|(_, end)| end.min(at_ms));
+        voice_end.map(|end| (at_ms - end.max(text_end_ms)).max(0.0)).unwrap_or(0.0)
     }
 }
 
@@ -198,6 +223,22 @@ mod tests {
         for i in 0..100 { assert!(tracker.observe(&chunk(3010.0 + i as f64 * 10.0, 0.15))); }
         for i in 0..80 { tracker.observe(&chunk(4010.0 + i as f64 * 10.0, 0.03)); }
         assert!((tracker.silence_ms() - 800.0).abs() < 1e-6, "{}", tracker.silence_ms());
+    }
+
+    #[test]
+    fn silence_can_be_read_as_of_an_earlier_moment() {
+        let mut tracker = SilenceTracker::default();
+        for i in 0..20 { tracker.observe(&chunk(i as f64 * 10.0, 0.002)); }
+        for i in 20..50 { tracker.observe(&chunk(i as f64 * 10.0, 0.2)); }
+        for i in 50..100 { tracker.observe(&chunk(i as f64 * 10.0, 0.002)); }
+        for i in 100..150 { tracker.observe(&chunk(i as f64 * 10.0, 0.2)); }
+        // Speaking now, but 300 ms into the pause that ended at 1 s.
+        assert_eq!(tracker.silence_ms(), 0.0);
+        assert!((tracker.silence_at(800.0, 0.0) - 300.0).abs() < 1e-6, "{}", tracker.silence_at(800.0, 0.0));
+        assert!((tracker.silence_at(800.0, 700.0) - 100.0).abs() < 1e-6);
+        assert_eq!(tracker.silence_at(400.0, 0.0), 0.0);
+        assert_eq!(tracker.silence_at(100.0, 0.0), 0.0);
+        assert_eq!(tracker.silence_at(1500.0, 0.0), 0.0);
     }
 
     #[test]

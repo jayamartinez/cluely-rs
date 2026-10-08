@@ -6,3 +6,4 @@ pub mod intent;
 pub mod state;
 pub mod endpoint;
 pub mod live;
+pub mod replay;

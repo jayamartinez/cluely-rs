@@ -107,9 +107,12 @@ impl TranscriptState {
         let split = if text.trim().is_empty() { track.provisional.as_ref().map(|p| p.split.clone()).unwrap_or_else(|| track.tracker.update("", None)) }
             else { joined(&track.closed, track.tracker.update(&text, stable_hint)) };
         let previous = track.provisional.take();
+        // A recognizer that is still extending the hypothesis a commit came from reports that
+        // hypothesis's start; the new utterance can't have started before the last one ended.
+        let after_last = track.committed.last().map(|c| c.end_ms).unwrap_or(f64::NEG_INFINITY);
         let mut provisional = Provisional {
             id, source, split,
-            start_ms: previous.as_ref().map(|p| p.start_ms).unwrap_or(event.start_ms),
+            start_ms: previous.as_ref().map(|p| p.start_ms).unwrap_or(event.start_ms.max(after_last)),
             end_ms: event.end_ms.max(previous.as_ref().map(|p| p.end_ms).unwrap_or(0.0)),
             end_of_utterance_ms: previous.as_ref().and_then(|p| p.end_of_utterance_ms),
             provider_final: previous.as_ref().is_some_and(|p| p.provider_final),
@@ -251,6 +254,8 @@ mod tests {
         state.commit(Source::Them);
         state.apply(&partial(Source::Them, 700.0, "would you use redis here or avoid caching"));
         assert_eq!(state.provisional(Source::Them).unwrap().text(), "here or avoid caching");
+        // The hypothesis still starts at 0 ms, but this utterance began after the commit.
+        assert_eq!(state.provisional(Source::Them).unwrap().start_ms, 400.0);
         state.commit(Source::Them);
         state.apply(&partial(Source::Them, 900.0, "next question"));
         assert_eq!(state.provisional(Source::Them).unwrap().text(), "next question");
