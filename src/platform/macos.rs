@@ -227,17 +227,19 @@ pub fn set_visible(window: NativeWindow, visible: bool) {
     SHOWN.store(visible, Ordering::Relaxed);
     let native = window.get();
     if visible {
-        let rest = native.frame().origin;
+        let rest = native.frame();
         if !native.isVisible() {
             native.setAlphaValue(0.0);
-            native.setFrameOrigin(NSPoint::new(rest.x, rest.y + POP_DISTANCE));
+            native.setFrame_display(NSRect::new(NSPoint::new(rest.origin.x, rest.origin.y + POP_DISTANCE), rest.size), false);
         }
         native.orderFrontRegardless();
+        // Only the frame as a whole animates (setFrame), not the origin alone, so the overlay always
+        // ends exactly where it was.
         let changes = RcBlock::new(move |context: NonNull<NSAnimationContext>| {
             unsafe { context.as_ref() }.setDuration(FADE_SECONDS);
             let animator = window.get().animator();
             animator.setAlphaValue(1.0);
-            animator.setFrameOrigin(rest);
+            animator.setFrame_display(rest, true);
         });
         NSAnimationContext::runAnimationGroup(&changes);
     } else {
