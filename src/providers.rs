@@ -435,7 +435,9 @@ fn anthropic_body(req: &Request) -> Value {
     }).collect();
     let mut body = json!({"model": req.model.trim(), "max_tokens": req.max_tokens, "stream": true, "messages": messages});
     if !req.system.trim().is_empty() {
-        body["system"] = json!(req.system);
+        // Cached: the instructions (with the active mode's context and files) are the same for
+        // every answer, so later requests read them from the cache instead of paying for them again.
+        body["system"] = json!([{"type": "text", "text": req.system, "cache_control": {"type": "ephemeral"}}]);
     }
     if req.effort == Effort::Smart {
         // Extended thinking: the budget must fit inside max_tokens, so the answer keeps its room.
@@ -850,7 +852,7 @@ data: [DONE]\n\n";
         assert_eq!(body["model"], "model-x");
         assert_eq!(body["stream"], true);
         assert_eq!(body["max_tokens"], 1024);
-        assert_eq!(body["system"], "Be brief.");
+        assert_eq!(body["system"], json!([{"type": "text", "text": "Be brief.", "cache_control": {"type": "ephemeral"}}]));
         let messages = body["messages"].as_array().unwrap();
         assert_eq!(messages.len(), 3);
         assert_eq!(messages[0]["role"], "user");
