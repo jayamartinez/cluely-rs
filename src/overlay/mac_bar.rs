@@ -7,6 +7,7 @@
 use gpui::{Context, Focusable, InteractiveElement, IntoElement, MouseButton, ParentElement, Styled, div, prelude::*, px, rgb, rgba};
 
 use super::{Overlay, WIDTH};
+use crate::platform;
 use crate::settings_view::Tab;
 use crate::toggles::{Toggle, ToggleStyle};
 use crate::{theme, ui};
@@ -54,10 +55,18 @@ impl Overlay {
             .when(!live, |row| row.rounded_t(px(19.0)))
             .when(live, |row| row.border_t_1().border_color(rgba(EDGE)))
             .child(div().id("composer-input").flex_1().min_w_0().cursor_text()
-                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| window.focus(&this.composer.focus_handle(cx))))
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| this.focus_text_box(window, cx)))
                 .child(self.composer.clone()))
             .child(send)
             .child(self.hits.mark())
+    }
+
+    /// A click in the text box gives it the keyboard. The overlay is a non-activating panel, so a
+    /// click alone leaves the keyboard with the app underneath; take it as ⌘⇧Space does (Esc or
+    /// sending hands it back).
+    fn focus_text_box(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) {
+        if let Some(native) = self.native && let Some(previous) = platform::take_focus(native) { self.return_focus = Some(previous); }
+        window.focus(&self.composer.focus_handle(cx));
     }
 
     fn toolbar(&self, live: bool, cx: &mut Context<Self>) -> impl IntoElement {
