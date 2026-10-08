@@ -307,6 +307,8 @@ impl Overlay {
     /// Refresh what a settings tab shows (accounts, devices, history size) as it opens.
     pub(crate) fn prepare_tab(&mut self, tab: Tab, window: &mut Window, cx: &mut Context<Self>) {
         self.open_picker = None;
+        // A key shown while typing is hidden again whenever a tab opens.
+        self.key_input.update(cx, |input, cx| input.set_revealed(false, cx));
         if tab == Tab::Model { self.refresh_subscriptions(window, cx); }
         if tab == Tab::Listening { self.refresh_model_status(); self.load_devices(window, cx); }
         if tab == Tab::History { self.refresh_archive_size(window, cx); }

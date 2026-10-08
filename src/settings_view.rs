@@ -126,6 +126,20 @@ fn button(id: &'static str, label: impl Into<SharedString>, primary: bool) -> gp
     if primary { base.bg(theme::accent()).text_color(theme::accent_ink()) } else { base.border_1().border_color(theme::hairline()).text_color(theme::body()) }
 }
 
+/// The eye in an API key field: shows what was typed or pasted so it can be checked before saving.
+/// Never shows a saved key; saving empties the field and hides it again.
+fn key_eye(input: &gpui::Entity<crate::input::TextInput>, cx: &App) -> impl IntoElement {
+    let revealed = input.read(cx).is_revealed();
+    let target = input.clone();
+    div().id("key-eye").flex_none().size(px(20.0)).flex().items_center().justify_center().rounded(px(5.0)).cursor_pointer()
+        .when(revealed, |eye| eye.bg(gpui::rgb(0x25282c)))
+        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+            cx.stop_propagation();
+            target.update(cx, |input, cx| input.set_revealed(!revealed, cx));
+        })
+        .child(ui::icon(if revealed { "icons/eye-off.svg" } else { "icons/eye.svg" }, 14.0, if revealed { theme::body() } else { theme::muted() }))
+}
+
 /// GPT version of a Codex model id: "gpt-6.1-sol" → (6, 1), "gpt-6-luna" → (6, 0); `None` for other shapes.
 fn gpt_version(id: &str) -> Option<(u32, u32)> {
     let version = id.to_ascii_lowercase().strip_prefix("gpt-")?.split('-').next()?.to_string();
@@ -408,7 +422,7 @@ impl Overlay {
             }
             top = top.child(field("API key", div().flex().flex_col().gap(px(6.0))
                 .child(div().flex().items_center().gap(px(8.0))
-                    .child(input_box(self.key_input.clone(), "key-box"))
+                    .child(input_box(self.key_input.clone(), "key-box").flex().items_center().gap(px(6.0)).pr(px(5.0)).child(key_eye(&self.key_input, cx)))
                     .child(button("save-key", "Save", true).on_mouse_down(MouseButton::Left, listen(cx, |this, _, _, cx| this.save_key(cx)))))
                 .child(status)));
         }

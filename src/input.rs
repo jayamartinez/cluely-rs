@@ -38,6 +38,9 @@ pub struct TextInput {
     masked: bool,
     /// Text size and line height, in pixels.
     text_size: (f32, f32),
+    /// A masked input showing its text for the user to check. Copy, cut and the platform text
+    /// services still treat the text as secret.
+    revealed: bool,
     selected_range: Range<usize>,
     selection_reversed: bool,
     marked_range: Option<Range<usize>>,
@@ -89,6 +92,7 @@ impl TextInput {
             placeholder: placeholder.into(),
             masked: false,
             text_size: (TEXT_SIZE, LINE_HEIGHT),
+            revealed: false,
             selected_range: 0..0,
             selection_reversed: false,
             marked_range: None,
@@ -163,9 +167,26 @@ impl TextInput {
         self.marked_range = None;
         self.scroll_x = px(0.0);
         self.is_selecting = false;
+        self.revealed = false;
         cx.notify();
     }
 
+    /// Shows or hides a masked input's text. Emptying the input hides it again.
+    pub fn set_revealed(&mut self, revealed: bool, cx: &mut Context<Self>) {
+        if self.revealed != revealed {
+            self.revealed = revealed;
+            cx.notify();
+        }
+    }
+
+    pub fn is_revealed(&self) -> bool {
+        self.revealed
+    }
+
+    /// Whether the text is drawn as bullets.
+    fn shows_bullets(&self) -> bool {
+        self.masked && !self.revealed
+    }
 
     fn left(&mut self, _: &Left, _: &mut Window, cx: &mut Context<Self>) {
         if self.selected_range.is_empty() {
@@ -274,12 +295,12 @@ impl TextInput {
 
     /// Content offset to the offset in the rendered (possibly masked) line.
     fn display_offset(&self, offset: usize) -> usize {
-        if self.masked { masked_display_offset(&self.content, offset) } else { offset }
+        if self.shows_bullets() { masked_display_offset(&self.content, offset) } else { offset }
     }
 
     /// Offset in the rendered line back to a content offset.
     fn content_offset(&self, display_offset: usize) -> usize {
-        if self.masked { masked_content_offset(&self.content, display_offset) } else { display_offset }
+        if self.shows_bullets() { masked_content_offset(&self.content, display_offset) } else { display_offset }
     }
 
     fn index_for_mouse_position(&self, position: Point<Pixels>) -> usize {
@@ -477,7 +498,7 @@ impl Element for TextElement {
         let showing_placeholder = input.content.is_empty();
         let (display_text, text_color): (SharedString, _) = if showing_placeholder {
             (input.placeholder.clone(), theme::placeholder().into())
-        } else if input.masked {
+        } else if input.shows_bullets() {
             (MASK.repeat(input.content.chars().count()).into(), style.color)
         } else {
             (input.content.clone(), style.color)
