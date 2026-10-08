@@ -14,7 +14,7 @@ use gpui::{Pixels, Size, Window};
 use objc2::MainThreadMarker;
 use objc2::rc::Retained;
 use objc2_app_kit::{
-    NSApplicationActivationOptions, NSEvent, NSEventModifierFlags, NSRunningApplication, NSScreen, NSView, NSWindow, NSWindowCollectionBehavior,
+    NSApplication, NSApplicationActivationOptions, NSApplicationActivationPolicy, NSEvent, NSEventModifierFlags, NSRunningApplication, NSScreen, NSView, NSWindow, NSWindowCollectionBehavior,
     NSWindowSharingType, NSWindowStyleMask, NSWorkspace,
 };
 use objc2_foundation::{NSPoint, NSRect, NSSize};
@@ -199,6 +199,14 @@ pub fn is_visible(window: NativeWindow) -> bool { window.get().isVisible() }
 pub fn set_visible(window: NativeWindow, visible: bool) {
     let window = window.get();
     if visible { window.orderFrontRegardless() } else { window.orderOut(None) }
+}
+
+/// Show or hide CluelyRS in the Dock and ⌘Tab. Hidden, it is an accessory app: no Dock icon and
+/// no menu bar of its own.
+pub fn set_in_dock(shown: bool) {
+    let Some(mtm) = MainThreadMarker::new() else { return };
+    let policy = if shown { NSApplicationActivationPolicy::Regular } else { NSApplicationActivationPolicy::Accessory };
+    NSApplication::sharedApplication(mtm).setActivationPolicy(policy);
 }
 
 /// Open a folder in Finder.

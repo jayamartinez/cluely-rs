@@ -224,6 +224,8 @@ impl Overlay {
             model_installed: false, model_download: None, model_notice: None,
             open_picker: None, reveal_accounts: false, devices: None, devices_loading: false, archive_bytes: None, picker_face: Rc::default(), smart_hover: false };
         overlay.refresh_model_status();
+        #[cfg(target_os = "macos")]
+        overlay.update_dock();
         if start_live { overlay.set_live(true, window, cx); }
         overlay
     }
@@ -236,6 +238,8 @@ impl Overlay {
         if let Some(native) = self.native && previous.hide_from_capture != self.store.value.hide_from_capture {
             apply_capture_setting(native, &self.store.value);
         }
+        #[cfg(target_os = "macos")]
+        if previous.show_in_dock != self.store.value.show_in_dock { self.update_dock(); }
         if previous.api_provider != self.store.value.api_provider {
             // Each provider keeps its own model; show the one saved for the new provider.
             let model = self.store.value.api_model().to_string();
@@ -260,6 +264,13 @@ impl Overlay {
             self.settings_tab = Some(tab);
             self.open_panel(window, cx);
         }
+    }
+
+    /// In the Dock while "Show in Dock" is on, and while the Settings window is open so the menu bar
+    /// (Settings…, Quit) is CluelyRS's own.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn update_dock(&self) {
+        platform::set_in_dock(self.store.value.show_in_dock || self.settings_window.is_some());
     }
 
     /// Refresh what a settings tab shows (accounts, devices, history size) as it opens.

@@ -67,9 +67,18 @@ pub fn open(overlay: &mut Overlay, tab: Tab, cx: &mut Context<Overlay>) {
         };
         let opened = cx.open_window(options, |window, cx| cx.new(|cx| SettingsWindow::new(entity.clone(), page, window, cx)));
         match opened {
-            Ok(handle) => entity.update(cx, |overlay, _| overlay.settings_window = Some(handle)),
+            Ok(handle) => entity.update(cx, |overlay, _| { overlay.settings_window = Some(handle); overlay.update_dock(); }),
             Err(error) => eprintln!("settings window could not open: {error}"),
         }
+    });
+}
+
+/// The window is about to close. Leave the Dock first (unless "Show in Dock" is on), so CluelyRS
+/// is never a regular app left without a window.
+fn closed(overlay: &Entity<Overlay>, cx: &mut App) {
+    overlay.update(cx, |overlay, _| {
+        overlay.settings_window = None;
+        overlay.update_dock();
     });
 }
 
@@ -77,6 +86,11 @@ impl SettingsWindow {
     fn new(overlay: Entity<Overlay>, page: Page, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus = cx.focus_handle();
         window.focus(&focus);
+        let closing = overlay.downgrade();
+        window.on_window_should_close(cx, move |_, cx| {
+            if let Some(overlay) = closing.upgrade() { closed(&overlay, cx); }
+            true
+        });
         let _overlay_changed = cx.observe(&overlay, |_, _, cx| cx.notify());
         Self { overlay, page, focus, native: platform::native_window(window), capture_hidden: None, _overlay_changed }
     }
@@ -145,7 +159,10 @@ impl Render for SettingsWindow {
         };
         div().size_full().flex().flex_col().bg(rgb(0x0f1012)).font_family(theme::FONT).text_color(theme::text())
             .key_context("SettingsWindow").track_focus(&self.focus)
-            .on_action(cx.listener(|_, _: &CloseSettings, window, _| window.remove_window()))
+            .on_action(cx.listener(|this, _: &CloseSettings, window, cx| {
+                closed(&this.overlay, cx);
+                window.remove_window();
+            }))
             .child(self.toolbar(title, cx))
             .child(div().id("settings-page").flex_1().min_h_0().overflow_y_scroll()
                 .child(div().w(px(600.0)).mx_auto().pt(px(22.0)).pb(px(28.0)).child(body)))
