@@ -56,8 +56,9 @@ and `advapi32` below are MSVC-only; macOS differences are listed after them.
 - **macOS, Metal on:** `PARAKEET_GGML_METAL=ON` (upstream ships it off) with `GGML_METAL_EMBED_LIBRARY=ON`, so the
   Metal shaders are compiled into the binary and nothing has to ship beside it. `ggml-metal` and the Foundation, Metal and
   MetalKit frameworks are linked. On an M1, streams reach about the CPU's end-of-utterance latency with a ninth of its
-  CPU time, although raw decoding is slower than 4 CPU threads (measurements below). parakeet.cpp picks the GPU by itself; `PARAKEET_DEVICE=cpu` still forces the CPU backend. Metal
-  needs the backend shutdown in section 4. To undo, set `PARAKEET_GGML_METAL` back to `OFF` and drop `ggml-metal`, the
+  CPU time, although raw decoding is slower than 4 CPU threads (measurements below). Settings › Listening › Use GPU
+  (Metal), on by default, chooses between Metal and the CPU (section 5); `PARAKEET_DEVICE`, when set, overrides it.
+  Metal needs the backend shutdown in section 4. To undo, set `PARAKEET_GGML_METAL` back to `OFF` and drop `ggml-metal`, the
   three frameworks and `GGML_METAL_EMBED_LIBRARY`; the shutdown can stay, it is harmless on the CPU.
 
 ### 3. Stream reset after each utterance (provider behaviour)
@@ -89,6 +90,22 @@ and `advapi32` below are MSVC-only; macOS differences are listed after them.
   Metal resources before exiting").
 - **To remove:** when upstream's C API frees the backend itself (for example with the last context), call that from
   `ffi::shutdown_backend`, or drop the call if nothing is needed, and delete the export from the shim.
+
+### 5. Choosing the device (shim, macOS)
+
+- **What:** parakeet.cpp picks its compute device once, when it creates its process-wide backend during the first model
+  load: the device named by `PARAKEET_DEVICE` ("cpu" forces the CPU), otherwise the first GPU, and the CPU if the GPU
+  can't start. The model's weights stay on that device. `stt::parakeet::ffi` sets `PARAKEET_DEVICE` from the Use GPU
+  setting before a load. When the setting changed since the backend was created, it first waits for the old models to
+  be dropped and frees the backend, so a change applies at the next Live start (Settings restarts a running Live
+  session). If `PARAKEET_DEVICE` was already set when CluelyRS started, CluelyRS leaves it alone. The shim also exports
+  `cluelyrs_parakeet_device_name()` (the backend's `device_name()`), so a GPU load that ended up on the CPU is noticed.
+  Such a load, or one that fails on the GPU and is retried on the CPU, is logged and shown under the switch. Windows
+  never sets the variable.
+- **Why:** upstream's C API has no device parameter; the environment variable is the only way to choose. Setting it at
+  run time is serialized with every model load (see the safety comment in `ffi.rs`).
+- **To remove:** when the C API takes a device per context, pass it there and drop the variable handling and the
+  device-name export.
 
 ### Measurements
 
