@@ -146,6 +146,7 @@ impl ClaudeCli {
         let ready = spare.take().and_then(|mut ready| if ready.usable_for(&args) { ready.running.take() } else { None });
         let mut running = match ready { Some(running) => running, None => launch(&exe, &args, true, true)? };
         let result = run_stream(&mut running, line, cancel, on_delta);
+        if let Some(id) = running.model.take() { remember_model(model.unwrap_or(DEFAULT_ALIAS), &id); }
         // After a complete turn the CLI may exit on its own within a grace period;
         // on failure or cancellation it is killed immediately.
         reap(running, if result.is_ok() { EXIT_GRACE } else { Duration::ZERO });
@@ -179,6 +180,43 @@ impl Drop for Spare {
     fn drop(&mut self) {
         if let Some(running) = self.running.take() { reap(running, Duration::ZERO); }
     }
+}
+
+/// The alias a request without `--model` is recorded under (the CLI picks its default model).
+pub const DEFAULT_ALIAS: &str = "default";
+
+/// Model ids the CLI resolved each alias to, as seen in answers this run (see [`resolved_models`]).
+static RESOLVED: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
+
+fn remember_model(alias: &str, id: &str) {
+    let mut resolved = RESOLVED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    resolved.retain(|(known, _)| known != alias);
+    resolved.push((alias.to_string(), id.to_string()));
+}
+
+/// (alias, model id) for every alias the CLI has resolved during this run, e.g. ("opus", "claude-opus-5-5").
+/// The CLI only reports the model once it has a prompt, so an alias appears after its first answer.
+pub fn resolved_models() -> Vec<(String, String)> {
+    RESOLVED.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+}
+
+/// A model id from the CLI's `init` line, accepted only if it looks like one (it is shown in the UI).
+fn plausible_model_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 100 && id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'[' | b']'))
+}
+
+/// A readable name for a Claude model id: "claude-opus-5-5" → "Opus 5.5", "claude-haiku-4-5-20251001" →
+/// "Haiku 4.5", "claude-sonnet-5-5[1m]" → "Sonnet 5.5". Ids in any other shape are returned unchanged.
+pub fn model_label(id: &str) -> String {
+    let base = id.split('[').next().unwrap_or(id);
+    let Some(rest) = base.strip_prefix("claude-") else { return id.to_string() };
+    let parts: Vec<&str> = rest.split('-').collect();
+    let Some((family, version)) = parts.split_first() else { return id.to_string() };
+    let numbers: Vec<&str> = version.iter().copied().take_while(|part| part.len() <= 2 && part.bytes().all(|b| b.is_ascii_digit())).collect();
+    if family.is_empty() || !family.bytes().all(|b| b.is_ascii_alphabetic()) || numbers.is_empty() { return id.to_string() }
+    let mut name = family[..1].to_ascii_uppercase();
+    name.push_str(&family[1..]);
+    format!("{name} {}", numbers.join("."))
 }
 
 fn models() -> Vec<(String, String)> {
@@ -375,6 +413,8 @@ fn fold_history(messages: &[Message]) -> Value {
 #[derive(Debug, PartialEq)]
 enum LineEvent {
     Text(String),
+    /// The `system`/`init` line: the model id the CLI resolved this session to.
+    Model(String),
     /// Final `result`: the fallback answer text on success, or a user-safe error.
     Finished(Result<Option<String>, String>),
     Ignore,
@@ -406,6 +446,10 @@ fn classify(message: &Value) -> Result<LineEvent, String> {
             }
             Ok(LineEvent::Finished(Ok(message["result"].as_str().map(String::from))))
         }
+        Some("system") if message["subtype"] == "init" => Ok(match message["model"].as_str().filter(|id| plausible_model_id(id)) {
+            Some(id) => LineEvent::Model(id.to_string()),
+            None => LineEvent::Ignore,
+        }),
         // System, assistant snapshots, thinking and tool events are never forwarded.
         _ => Ok(LineEvent::Ignore),
     }
@@ -447,6 +491,8 @@ fn result_failure(message: &Value) -> String {
 struct StreamParser {
     buffer: Vec<u8>,
     text: String,
+    /// The model the CLI reported in its `init` line.
+    model: Option<String>,
     chars: usize,
     max_line: usize,
     max_chars: usize,
@@ -458,7 +504,7 @@ impl StreamParser {
     }
 
     fn with_limits(max_line: usize, max_chars: usize) -> Self {
-        Self { buffer: Vec::new(), text: String::new(), chars: 0, max_line, max_chars }
+        Self { buffer: Vec::new(), text: String::new(), model: None, chars: 0, max_line, max_chars }
     }
 
     /// Returns `Ok(true)` once the final successful result has been seen.
@@ -473,6 +519,7 @@ impl StreamParser {
             let message: Value = serde_json::from_str(decoded).map_err(|_| MALFORMED.to_string())?;
             match classify(&message)? {
                 LineEvent::Ignore => {}
+                LineEvent::Model(id) => self.model = Some(id),
                 LineEvent::Text(text) => self.deliver(&text, on_delta)?,
                 LineEvent::Finished(Err(message)) => return Err(message),
                 LineEvent::Finished(Ok(fallback)) => {
@@ -639,6 +686,8 @@ impl Drop for Workspace {
 struct Running {
     child: Child,
     workspace: Workspace,
+    /// The model the CLI reported for this process (from its `init` line), once seen.
+    model: Option<String>,
 }
 
 fn launch(exe: &Path, args: &[String], stdin: bool, stdout: bool) -> Result<Running, String> {
@@ -660,7 +709,7 @@ fn launch(exe: &Path, args: &[String], stdin: bool, stdout: bool) -> Result<Runn
     let child = command.spawn().map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound { NOT_FOUND.to_string() } else { COULD_NOT_START.to_string() }
     })?;
-    Ok(Running { child, workspace })
+    Ok(Running { child, workspace, model: None })
 }
 
 /// Kills the child, then kills again after `KILL_GRACE` if it is still alive.
@@ -732,7 +781,9 @@ fn run_stream(running: &mut Running, line: String, cancel: &AtomicBool, on_delta
         }
         match receiver.recv_timeout(POLL) {
             Ok(chunk) => {
-                if parser.feed(&chunk, on_delta)? {
+                let finished = parser.feed(&chunk, on_delta);
+                if let Some(id) = parser.model.take() { running.model = Some(id); }
+                if finished? {
                     return Ok(parser.text);
                 }
             }
@@ -1202,5 +1253,33 @@ mod tests {
         let answer = ClaudeCli::stream(&req, &AtomicBool::new(false), &mut |_| {});
         println!("live_image: {answer:?}");
         assert!(answer.is_ok());
+    }
+
+    #[test]
+    fn model_ids_read_as_family_and_version() {
+        assert_eq!(model_label("claude-opus-5-5"), "Opus 5.5");
+        assert_eq!(model_label("claude-sonnet-5-5"), "Sonnet 5.5");
+        assert_eq!(model_label("claude-haiku-4-5-20251001"), "Haiku 4.5");
+        assert_eq!(model_label("claude-sonnet-5-5[1m]"), "Sonnet 5.5");
+        assert_eq!(model_label("claude-fable-5-1"), "Fable 5.1");
+        for unknown in ["gpt-6.1-sol", "claude-", "claude-opus", "claude-opus-latest", "something"] {
+            assert_eq!(model_label(unknown), unknown);
+        }
+    }
+
+    #[test]
+    fn the_init_line_reports_the_resolved_model_and_odd_ids_are_ignored() {
+        let mut parser = StreamParser::new();
+        let input = format!("{}{}{}", line(json!({ "type": "system", "subtype": "init", "model": "claude-opus-5-5", "tools": [] })),
+            line(delta("Hi")), line(json!({ "type": "result", "subtype": "success", "is_error": false, "result": "Hi" })));
+        assert_eq!(parser.feed(input.as_bytes(), &mut |_| {}), Ok(true));
+        assert_eq!(parser.model.as_deref(), Some("claude-opus-5-5"));
+        let odd = line(json!({ "type": "system", "subtype": "init", "model": "<script>alert(1)</script>" }));
+        let mut parser = StreamParser::new();
+        assert_eq!(parser.feed(odd.as_bytes(), &mut |_| {}), Ok(false));
+        assert_eq!(parser.model, None);
+        remember_model("opus", "claude-opus-5-5");
+        remember_model("opus", "claude-opus-5-6");
+        assert_eq!(resolved_models().iter().filter(|(alias, _)| alias == "opus").collect::<Vec<_>>(), [&("opus".to_string(), "claude-opus-5-6".to_string())]);
     }
 }

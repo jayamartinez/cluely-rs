@@ -32,6 +32,8 @@ pub struct SubscriptionStatus {
     pub plan: Option<String>,
     /// (id, display name) pairs offered in Settings.
     pub models: Vec<(String, String)>,
+    /// The model "Default" means, when the provider reports it.
+    pub default_model: Option<String>,
     /// User-safe explanation when something is wrong.
     pub error: Option<String>,
 }

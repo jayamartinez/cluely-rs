@@ -39,6 +39,9 @@ pub enum SttProvider { #[default] Parakeet, Deepgram }
 pub struct Settings {
     pub provider: Provider,
     pub claude_model: ClaudeModel,
+    /// The model id Claude Code last reported for each alias ("opus" → "claude-opus-5-5"), so the
+    /// pickers can show real version numbers before this run's first answer.
+    pub claude_models: BTreeMap<String, String>,
     /// Codex model id from the account's model list; empty uses the Codex default.
     pub codex_model: String,
     /// Preset id from `providers::PRESETS` used with "Your API key".
@@ -72,7 +75,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            provider: Provider::default(), claude_model: ClaudeModel::default(), codex_model: String::new(),
+            provider: Provider::default(), claude_model: ClaudeModel::default(), claude_models: BTreeMap::new(), codex_model: String::new(),
             api_provider: "anthropic".into(), api_models: BTreeMap::new(), custom_base_url: String::new(),
             answer_style: AnswerStyle::default(), smart_mode: false, transcribe: true, stt_provider: SttProvider::default(),
             listen_mic: true, listen_desktop: true,

@@ -497,6 +497,7 @@ impl Overlay {
             }
             Err(reason) => turn.status = Status::Failed(reason.into()),
         }
+        self.remember_claude_models();
         cx.notify();
     }
 
@@ -504,6 +505,19 @@ impl Overlay {
     /// tab, the API-key answer provider on the Model tab.
     pub(crate) fn key_target(&self) -> String {
         if self.settings_tab == Some(Tab::Listening) { crate::stt::deepgram::PROVIDER_ID.to_string() } else { self.store.value.api_provider.clone() }
+    }
+
+    /// Keep the Claude versions the CLI has reported (e.g. "opus" → claude-opus-5-5), so the pickers
+    /// show real version numbers, also on the next launch before any answer.
+    fn remember_claude_models(&mut self) {
+        let mut changed = false;
+        for (alias, id) in crate::claude_cli::resolved_models() {
+            if self.store.value.claude_models.get(&alias) != Some(&id) {
+                self.store.value.claude_models.insert(alias, id);
+                changed = true;
+            }
+        }
+        if changed { self.store.save(); }
     }
 
     pub fn save_key(&mut self, cx: &mut Context<Self>) {

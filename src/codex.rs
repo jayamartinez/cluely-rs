@@ -1490,6 +1490,7 @@ impl CodexClient {
                 status.account = email;
                 status.plan = plan;
                 status.models = self.models(&connection).unwrap_or_default();
+                status.default_model = self.catalog.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref().and_then(|catalog| catalog.default_model.clone());
             }
             Ok((Account::Other, _)) => status.error = Some(err(Kind::AuthUnsupported).message),
             Ok((Account::None, _)) => {}
@@ -2486,7 +2487,7 @@ mod tests {
         let status = client(&launcher).status();
         assert_eq!(status, SubscriptionStatus {
             installed: true, signed_in: true, account: Some("me@example.com".into()), plan: Some("plus".into()),
-            models: vec![("gpt-5".into(), "GPT-5".into())], error: None,
+            models: vec![("gpt-5".into(), "GPT-5".into())], default_model: Some("gpt-5".into()), error: None,
         });
         assert_eq!(methods(&launcher), ["initialize", "initialized", "account/read", "model/list"]);
         let init = lock(&launcher.received)[0].clone();

@@ -73,6 +73,24 @@ fn button(id: &'static str, label: impl Into<SharedString>, primary: bool) -> gp
     if primary { base.bg(theme::accent()).text_color(theme::accent_ink()) } else { base.border_1().border_color(theme::hairline()).text_color(theme::body()) }
 }
 
+/// GPT version of a Codex model id: "gpt-6.1-sol" → (6, 1), "gpt-6-luna" → (6, 0); `None` for other shapes.
+fn gpt_version(id: &str) -> Option<(u32, u32)> {
+    let version = id.to_ascii_lowercase().strip_prefix("gpt-")?.split('-').next()?.to_string();
+    let mut parts = version.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = match parts.next() { Some(minor) => minor.parse().ok()?, None => 0 };
+    Some((major, minor))
+}
+
+/// The models worth offering: only the newest GPT generation (every 6.x once GPT-6 exists, so a
+/// future 6.2 appears on its own), without Astra variants. If no id carries a GPT version the list
+/// is returned as is, rather than leaving the picker empty.
+pub(crate) fn latest_gpt_models(models: &[(String, String)]) -> Vec<(String, String)> {
+    let Some(newest) = models.iter().filter_map(|(id, _)| gpt_version(id)).map(|(major, _)| major).max() else { return models.to_vec() };
+    models.iter().filter(|(id, name)| gpt_version(id).is_some_and(|(major, _)| major == newest)
+        && !id.to_ascii_lowercase().contains("astra") && !name.to_ascii_lowercase().contains("astra")).cloned().collect()
+}
+
 /// "plus" → "ChatGPT Plus", "max_5x" → "Max 5x": the plan as the CLI reports it, made readable.
 fn plan_label(provider: Provider, plan: &str) -> String {
     let words: Vec<String> = plan.split(['_', '-', ' ']).filter(|w| !w.is_empty()).map(|word| {
@@ -253,17 +271,27 @@ impl Overlay {
         let s = &self.store.value;
         match s.provider {
             Provider::Codex => {
-                let models = self.codex_status.as_ref().map(|st| st.models.clone()).unwrap_or_default();
-                let mut options = vec![(String::new(), "Default".to_string())];
-                options.extend(models.iter().cloned());
-                let value = models.iter().find(|(id, _)| *id == s.codex_model).map(|(_, name)| name.clone())
-                    .unwrap_or_else(|| if s.codex_model.is_empty() { "Default".into() } else { s.codex_model.clone() });
+                let status = self.codex_status.as_ref();
+                let models = status.map(|st| st.models.clone()).unwrap_or_default();
+                let name = |id: &str| models.iter().find(|(known, _)| known == id).map(|(_, name)| name.clone());
+                let default = match status.and_then(|st| st.default_model.as_deref()) {
+                    Some(id) => format!("Default · {}", name(id).unwrap_or_else(|| id.to_string())),
+                    None => "Default".to_string(),
+                };
+                let mut options = vec![(String::new(), default.clone())];
+                options.extend(latest_gpt_models(&models));
+                // A saved model that is no longer offered (e.g. an older generation) still shows as
+                // the current choice until another is picked.
+                let value = if s.codex_model.is_empty() { default } else { name(&s.codex_model).unwrap_or_else(|| s.codex_model.clone()) };
                 ModelChoice { picker: Picker::CodexModel, value, options, selected: s.codex_model.clone(), set: |s, v| s.codex_model = v }
             }
             Provider::Claude => {
                 let models = [(ClaudeModel::Sonnet, "Sonnet"), (ClaudeModel::Opus, "Opus"), (ClaudeModel::Haiku, "Haiku")];
-                let value = models.iter().find(|(m, _)| *m == s.claude_model).map(|(_, l)| *l).unwrap_or("Sonnet").to_string();
-                ModelChoice { picker: Picker::ClaudeModel, value, options: models.iter().map(|(m, l)| (m.id().to_string(), l.to_string())).collect(),
+                // The version each alias resolves to, once Claude Code has reported it.
+                let label = |model: ClaudeModel, alias_label: &str| s.claude_models.get(model.id())
+                    .map(|id| crate::claude_cli::model_label(id)).unwrap_or_else(|| alias_label.to_string());
+                let value = models.iter().find(|(m, _)| *m == s.claude_model).map(|(m, l)| label(*m, l)).unwrap_or_else(|| "Sonnet".into());
+                ModelChoice { picker: Picker::ClaudeModel, value, options: models.iter().map(|(m, l)| (m.id().to_string(), label(*m, l))).collect(),
                     selected: s.claude_model.id().to_string(),
                     set: |s, v| s.claude_model = match v.as_str() { "opus" => ClaudeModel::Opus, "haiku" => ClaudeModel::Haiku, _ => ClaudeModel::Sonnet } }
             }
@@ -512,6 +540,23 @@ fn folder_bytes(root: &std::path::Path) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_newest_gpt_generation_is_offered_without_astra() {
+        let models: Vec<(String, String)> = ["gpt-6.1-sol", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]
+            .iter().map(|id| (id.to_string(), id.to_uppercase())).collect();
+        assert_eq!(latest_gpt_models(&models).into_iter().map(|(id, _)| id).collect::<Vec<_>>(), ["gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna"]);
+        // A future minor version shows up on its own; a new major version replaces the old ones.
+        let mut later = models.clone();
+        later.push(("gpt-6.2-sol".into(), "GPT-6.2-Sol".into()));
+        assert!(latest_gpt_models(&later).iter().any(|(id, _)| id == "gpt-6.2-sol"));
+        later.push(("gpt-7-sol".into(), "GPT-7-Sol".into()));
+        assert_eq!(latest_gpt_models(&later).into_iter().map(|(id, _)| id).collect::<Vec<_>>(), ["gpt-7-sol"]);
+        // Unrecognised ids are left alone rather than emptying the picker.
+        let other = vec![("codex-mini".to_string(), "Codex Mini".to_string())];
+        assert_eq!(latest_gpt_models(&other), other);
+        assert_eq!((gpt_version("gpt-6.1-sol"), gpt_version("GPT-6-Luna"), gpt_version("gpt-x")), (Some((6, 1)), Some((6, 0)), None));
+    }
 
     #[test]
     fn plans_and_accounts_read_as_intended() {
