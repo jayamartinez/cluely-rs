@@ -53,11 +53,29 @@ impl Action {
     fn always(self) -> bool { !self.only_while_visible() && !self.only_while_panel() && !self.only_while_live() }
 }
 
+#[cfg(not(target_os = "macos"))]
 pub const DEFAULTS: &[(Action, &str)] = &[
     (Action::Assist, "control+Enter"),
     (Action::Live, "control+shift+Enter"),
     (Action::Focus, "control+shift+Space"),
     (Action::Toggle, "control+Backslash"),
+    (Action::MoveUp, "control+alt+ArrowUp"),
+    (Action::MoveDown, "control+alt+ArrowDown"),
+    (Action::MoveLeft, "control+alt+ArrowLeft"),
+    (Action::MoveRight, "control+alt+ArrowRight"),
+    (Action::ScrollUp, "control+alt+shift+ArrowUp"),
+    (Action::ScrollDown, "control+alt+shift+ArrowDown"),
+    (Action::Close, "Escape"),
+];
+
+/// macOS: Command for CluelyRS's own chords, as Mac apps use it; moving and scrolling keep
+/// Control+Option, which Mac apps rarely claim.
+#[cfg(target_os = "macos")]
+pub const DEFAULTS: &[(Action, &str)] = &[
+    (Action::Assist, "super+Enter"),
+    (Action::Live, "super+shift+Enter"),
+    (Action::Focus, "super+shift+Space"),
+    (Action::Toggle, "super+Backslash"),
     (Action::MoveUp, "control+alt+ArrowUp"),
     (Action::MoveDown, "control+alt+ArrowDown"),
     (Action::MoveLeft, "control+alt+ArrowLeft"),
@@ -147,9 +165,19 @@ impl Hotkeys {
     pub fn action(&self, id: u32) -> Option<Action> { self.by_id.get(&id).copied() }
 }
 
+#[cfg(not(target_os = "macos"))]
 fn pretty(accelerator: &str) -> String {
     accelerator.split('+').map(|part| match part {
         "control" => "Ctrl", "alt" => "Alt", "shift" => "Shift", "Enter" => "↵", "Backslash" => "\\",
+        "ArrowUp" => "↑", "ArrowDown" => "↓", "ArrowLeft" => "←", "ArrowRight" => "→", "Escape" => "Esc", other => other,
+    }).collect::<Vec<_>>().join(" ")
+}
+
+/// Mac menus write chords as symbols: "⌘ ⇧ ↵" (spaces separate the keys; `ui::keys` draws them).
+#[cfg(target_os = "macos")]
+fn pretty(accelerator: &str) -> String {
+    accelerator.split('+').map(|part| match part {
+        "super" => "⌘", "control" => "⌃", "alt" => "⌥", "shift" => "⇧", "Enter" => "↵", "Backslash" => "\\",
         "ArrowUp" => "↑", "ArrowDown" => "↓", "ArrowLeft" => "←", "ArrowRight" => "→", "Escape" => "Esc", other => other,
     }).collect::<Vec<_>>().join(" ")
 }
