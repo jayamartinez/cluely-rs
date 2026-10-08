@@ -7,6 +7,8 @@
 //!   cargo run --example answer_latency -- --warm  # after Live start's preparation (prewarm)
 //!   cargo run --example answer_latency -- --smart # Smart mode
 //!   cargo run --example answer_latency -- --provider claude   # override the saved provider (claude|codex)
+//!   cargo run --example answer_latency -- --provider claude --model opus   # opus|sonnet|haiku, or a Codex model id / "default"
+//!   cargo run --example answer_latency -- --list   # the Codex model list and default (no prompt sent)
 //!
 //! Every run makes ONE real request through your ChatGPT/Claude subscription or API key and
 //! counts against its usage. Never run it automatically.
@@ -25,12 +27,30 @@ use cluely_rs::settings::Store;
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut settings = Store::load().value;
+    if args.iter().any(|a| a == "--list") {
+        // The account's model list and default, as the pickers see them. Sends no prompt.
+        let status = CodexClient::new().status();
+        println!("default: {:?}", status.default_model);
+        for (id, name) in &status.models { println!("{id}\t{name}"); }
+        return;
+    }
     if args.iter().any(|a| a == "--smart") { settings.smart_mode = true; }
     match args.iter().position(|a| a == "--provider").and_then(|i| args.get(i + 1)).map(String::as_str) {
         Some("claude") => settings.provider = cluely_rs::settings::Provider::Claude,
         Some("codex") => settings.provider = cluely_rs::settings::Provider::Codex,
         Some(other) => panic!("unknown provider {other} (claude or codex)"),
         None => {}
+    }
+    if let Some(model) = args.iter().position(|a| a == "--model").and_then(|i| args.get(i + 1)) {
+        use cluely_rs::settings::{ClaudeModel, Provider};
+        match settings.provider {
+            Provider::Claude => settings.claude_model = match model.as_str() {
+                "opus" => ClaudeModel::Opus, "haiku" => ClaudeModel::Haiku, "sonnet" => ClaudeModel::Sonnet,
+                other => panic!("unknown Claude model {other} (opus, sonnet or haiku)"),
+            },
+            Provider::Codex => settings.codex_model = if model == "default" { String::new() } else { model.clone() },
+            Provider::ApiKey => { settings.api_models.insert(settings.api_provider.clone(), model.clone()); }
+        }
     }
     let mut session = ReasoningSession::new(CodexClient::new(), None);
     if args.iter().any(|a| a == "--warm") {
@@ -61,6 +81,12 @@ fn main() {
                     Ok(answer) => println!("first words: {:.2} s, full answer: {:.2} s, {} words\n---\n{}",
                         first.unwrap_or(total).as_secs_f64(), total.as_secs_f64(), answer.split_whitespace().count(), answer.trim()),
                     Err(error) => println!("failed after {:.2} s: {error}", total.as_secs_f64()),
+                }
+                for (alias, id) in cluely_rs::claude_cli::resolved_models() {
+                    println!("claude model: {alias} -> {id} ({})", cluely_rs::claude_cli::model_label(&id));
+                }
+                if settings.provider == cluely_rs::settings::Provider::Codex {
+                    println!("codex model: {}", if settings.codex_model.is_empty() { "default" } else { &settings.codex_model });
                 }
                 break;
             }
