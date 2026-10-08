@@ -17,28 +17,114 @@ const MAX_KEY_LEN: usize = 512;
 
 /// Returns the stored key for `provider_id`, or `None` when absent, invalid or unreadable.
 pub fn get(provider_id: &str) -> Option<String> {
-    let entry = entry(provider_id).ok()?;
-    let key = entry.get_password().ok()?;
-    normalize_key(&key).ok()
+    cache::get_or_load(provider_id, read_store)
 }
 
 /// Stores `key` (trimmed) for `provider_id`, replacing any previous key.
 pub fn set(provider_id: &str, key: &str) -> Result<()> {
     let key = normalize_key(key)?;
-    entry(provider_id)?.set_password(&key).map_err(|error| store_error("save", &error))
+    match entry(provider_id)?.set_password(&key) {
+        Ok(()) => {
+            cache::put(provider_id, Some(key));
+            Ok(())
+        }
+        Err(error) => {
+            cache::forget(provider_id);
+            Err(store_error("save", &error))
+        }
+    }
 }
 
 /// Deletes the stored key; succeeds when there was nothing to delete.
 pub fn remove(provider_id: &str) -> Result<()> {
     match entry(provider_id)?.delete_credential() {
-        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-        Err(error) => Err(store_error("remove", &error)),
+        Ok(()) | Err(keyring::Error::NoEntry) => {
+            cache::put(provider_id, None);
+            Ok(())
+        }
+        Err(error) => {
+            cache::forget(provider_id);
+            Err(store_error("remove", &error))
+        }
     }
 }
 
 /// A display-safe hint such as `••••3f9a` for a stored key, or `None` when no key is stored.
 pub fn hint(provider_id: &str) -> Option<String> {
     get(provider_id).map(|key| mask_hint(&key))
+}
+
+/// Reads the key from the credential store itself, bypassing the cache.
+fn read_store(provider_id: &str) -> Option<String> {
+    let entry = entry(provider_id).ok()?;
+    let key = entry.get_password().ok()?;
+    normalize_key(&key).ok()
+}
+
+/// macOS keeps each lookup for the life of the process. Settings reads keys on every render, and
+/// every Keychain lookup is a round trip to `securityd` (about 1.3 ms) that can also show an access
+/// prompt when the binary was rebuilt or re-signed; caching a denied or failed lookup as `None`
+/// keeps one prompt from turning into one per frame. `set` and `remove` keep it current; changes
+/// made outside the app show after a restart.
+#[cfg(target_os = "macos")]
+mod cache {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, PoisonError};
+
+    static CACHE: Mutex<Option<KeyCache>> = Mutex::new(None);
+
+    pub fn get_or_load(provider_id: &str, load: impl FnOnce(&str) -> Option<String>) -> Option<String> {
+        // The lock is held while loading so concurrent readers wait for one lookup (and one prompt).
+        with(|cache| cache.get_or_load(provider_id, load))
+    }
+
+    pub fn put(provider_id: &str, key: Option<String>) {
+        with(|cache| cache.put(provider_id, key));
+    }
+
+    pub fn forget(provider_id: &str) {
+        with(|cache| cache.forget(provider_id));
+    }
+
+    fn with<T>(f: impl FnOnce(&mut KeyCache) -> T) -> T {
+        let mut guard = CACHE.lock().unwrap_or_else(PoisonError::into_inner);
+        f(guard.get_or_insert_with(KeyCache::default))
+    }
+
+    /// Known lookups by provider id; `None` records that no usable key is stored.
+    #[derive(Default)]
+    pub(super) struct KeyCache(HashMap<String, Option<String>>);
+
+    impl KeyCache {
+        pub(super) fn get_or_load(&mut self, provider_id: &str, load: impl FnOnce(&str) -> Option<String>) -> Option<String> {
+            if let Some(known) = self.0.get(provider_id) {
+                return known.clone();
+            }
+            let key = load(provider_id);
+            self.0.insert(provider_id.to_owned(), key.clone());
+            key
+        }
+
+        pub(super) fn put(&mut self, provider_id: &str, key: Option<String>) {
+            self.0.insert(provider_id.to_owned(), key);
+        }
+
+        pub(super) fn forget(&mut self, provider_id: &str) {
+            self.0.remove(provider_id);
+        }
+    }
+}
+
+/// Other platforms read the credential store directly every time.
+#[cfg(not(target_os = "macos"))]
+mod cache {
+    pub fn get_or_load(provider_id: &str, load: impl FnOnce(&str) -> Option<String>) -> Option<String> {
+        load(provider_id)
+    }
+
+    pub fn put(_provider_id: &str, _key: Option<String>) {}
+
+    pub fn forget(_provider_id: &str) {}
 }
 
 fn entry(provider_id: &str) -> Result<keyring::Entry> {
@@ -158,10 +244,16 @@ mod tests {
         set(PROVIDER, key).unwrap();
         #[cfg(target_os = "macos")]
         assert!(keychain_has_item(PROVIDER), "the key should be a persistent Keychain item");
+        assert_eq!(read_store(PROVIDER).as_deref(), Some(key));
         assert_eq!(get(PROVIDER).as_deref(), Some(key));
         assert_eq!(hint(PROVIDER).as_deref(), Some("••••abcd"));
         // A Settings render reads up to two keys (`get` for the badge, `hint` for the key row).
         const READS: u32 = 50;
+        let started = std::time::Instant::now();
+        for _ in 0..READS {
+            assert!(read_store(PROVIDER).is_some());
+        }
+        eprintln!("store read: {:?} per read over {READS} reads", started.elapsed() / READS);
         let started = std::time::Instant::now();
         for _ in 0..READS {
             assert!(get(PROVIDER).is_some());
@@ -170,8 +262,43 @@ mod tests {
 
         remove(PROVIDER).unwrap();
         assert_eq!(get(PROVIDER), None);
+        assert_eq!(read_store(PROVIDER), None);
         #[cfg(target_os = "macos")]
         assert!(!keychain_has_item(PROVIDER), "the Keychain item should be gone");
+    }
+
+    #[cfg(target_os = "macos")]
+    mod cache {
+        use std::cell::Cell;
+
+        use super::super::cache::KeyCache;
+
+        #[test]
+        fn lookups_load_once_including_absent_keys() {
+            let mut cache = KeyCache::default();
+            let loads = Cell::new(0);
+            let load = |id: &str| {
+                loads.set(loads.get() + 1);
+                (id == "openai").then(|| "sk-a".to_owned())
+            };
+            assert_eq!(cache.get_or_load("openai", load).as_deref(), Some("sk-a"));
+            assert_eq!(cache.get_or_load("openai", load).as_deref(), Some("sk-a"));
+            assert_eq!(cache.get_or_load("groq", load), None);
+            assert_eq!(cache.get_or_load("groq", load), None);
+            assert_eq!(loads.get(), 2);
+        }
+
+        #[test]
+        fn put_replaces_and_forget_reloads() {
+            let mut cache = KeyCache::default();
+            let unreachable = |_: &str| -> Option<String> { panic!("should be served from the cache") };
+            cache.put("openai", Some("sk-new".to_owned()));
+            assert_eq!(cache.get_or_load("openai", unreachable).as_deref(), Some("sk-new"));
+            cache.put("openai", None);
+            assert_eq!(cache.get_or_load("openai", unreachable), None);
+            cache.forget("openai");
+            assert_eq!(cache.get_or_load("openai", |_| Some("sk-store".to_owned())).as_deref(), Some("sk-store"));
+        }
     }
 
     /// Looks the item up from another process by its attributes only (no `-g`/`-w`), so the secret
