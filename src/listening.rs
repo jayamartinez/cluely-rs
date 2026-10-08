@@ -150,7 +150,11 @@ pub fn run(provider: Arc<dyn StreamingAsr>, audio: Receiver<AudioChunk>, sources
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
         }
+        // How far each recognizer has got, read before draining its events, so everything it
+        // said about that audio has been applied when the position is reported.
+        let positions: Vec<(Source, f64)> = sources.iter().filter_map(|&source| transcriber.processed_until(source).map(|ms| (source, ms))).collect();
         let updates: Vec<Update> = inbox.try_iter().flat_map(|event| live.on_event(&event)).collect();
+        for (source, ms) in positions { live.set_recognized_until(source, ms); }
         if !send(updates) { break; }
     }
     // Flush the recognizers, apply their last events, then commit anything still in progress.

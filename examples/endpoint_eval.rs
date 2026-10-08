@@ -9,7 +9,7 @@
 //!
 //!   --bench <wav>         the clip from dev/make-bench-audio.ps1 (default %TEMP%\cluelyrs-bench.wav)
 //!   --config "name k=v…"  endpoint with these settings (repeatable; a bare name = defaults). Keys:
-//!                         after_eou, eou_unfinished, finished, max_silence, discount, text_lag
+//!                         after_eou, eou_unfinished, finished, max_silence, discount, backlog_hold, text_lag
 //!   --lag <ms>            simulate a recognizer this far behind the audio
 //!   --stall <a>-<b>       simulate CPU starvation: the recognizer stops at a seconds, resumes at b,
 //!                         then catches up at twice real time
@@ -152,6 +152,7 @@ fn parse_config(spec: &str) -> anyhow::Result<Config> {
             "finished" => e.finished_ms = v,
             "max_silence" => e.max_silence_ms = v,
             "discount" => e.question_discount = v,
+            "backlog_hold" => e.backlog_hold_ms = v,
             "text_lag" => config.text_lag = Some(v),
             other => bail!("unknown key {other}"),
         }

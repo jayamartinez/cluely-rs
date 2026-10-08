@@ -38,6 +38,8 @@ pub struct LiveTranscript {
     /// Audio time observed when each source's recognizer last sent anything (Me, Them).
     last_event_ms: [f64; 2],
     text_lag_ms: f64,
+    /// Audio time each source's recognizer has processed up to, when the pipeline reports it.
+    recognized_until_ms: [Option<f64>; 2],
 }
 
 fn slot(source: Source) -> usize { match source { Source::Me => 0, Source::Them => 1 } }
@@ -45,13 +47,19 @@ fn slot(source: Source) -> usize { match source { Source::Me => 0, Source::Them 
 impl LiveTranscript {
     pub fn new(config: EndpointConfig, recorder: Option<LatencyRecorder>) -> Self {
         Self { state: TranscriptState::new(), silence: Default::default(), config, generation: None, provider: String::new(),
-            recorder, questions: HashSet::new(), last_event_ms: [0.0; 2], text_lag_ms: DEFAULT_TEXT_LAG_MS }
+            recorder, questions: HashSet::new(), last_event_ms: [0.0; 2], text_lag_ms: DEFAULT_TEXT_LAG_MS, recognized_until_ms: [None; 2] }
     }
 
     pub fn state(&self) -> &TranscriptState { &self.state }
 
     /// The running provider's `Capabilities::text_lag_ms`.
     pub fn set_text_lag(&mut self, ms: f64) { self.text_lag_ms = ms; }
+
+    /// How much of `source`'s audio its recognizer has processed, in audio time. Report it after
+    /// applying every event the recognizer produced for that audio. The gap to the audio observed
+    /// here is the recognizer's backlog: beyond `EndpointConfig::backlog_hold_ms`, silence is
+    /// measured on the recognizer's clock. Unreported, the recognizer is assumed to keep up.
+    pub fn set_recognized_until(&mut self, source: Source, audio_ms: f64) { self.recognized_until_ms[slot(source)] = Some(audio_ms); }
 
     /// A provider (re)started: only its generation's events count, and in-progress text from
     /// the previous one is dropped.
@@ -71,7 +79,7 @@ impl LiveTranscript {
         if self.generation != Some(event.generation) { return Vec::new(); }
         let source = event.source;
         self.last_event_ms[slot(source)] = self.silence[slot(source)].latest_end_ms();
-        let mut updates = Vec::new();
+        let mut updates: Vec<Update> = self.commit_before_new_words(event).into_iter().collect();
         match self.state.apply(event) {
             None => {}
             Some(Change::Error { source, message, fatal }) => updates.push(Update::Error { source, message, fatal }),
@@ -108,10 +116,27 @@ impl LiveTranscript {
 
     fn evaluate(&mut self, source: Source) -> Option<Update> {
         let provisional = self.state.provisional(source)?;
+        let silence_ms = self.silence_for(source, provisional.end_ms, provisional.end_of_utterance_ms.is_some());
+        self.commit_if_over(source, silence_ms)
+    }
+
+    /// Catching up on a backlog, a recognizer delivers seconds of words in one burst, before
+    /// any silence could be measured between them. Before new words join the utterance in
+    /// progress, check whether it had already ended as of where they were produced.
+    fn commit_before_new_words(&mut self, event: &TranscriptEvent) -> Option<Update> {
+        let EventKind::Partial { text, .. } = &event.kind else { return None };
+        if text.trim().is_empty() || self.recognizer_behind(event.source) <= self.config.backlog_hold_ms { return None; }
+        let provisional = self.state.provisional(event.source)?;
+        let silence_ms = self.silence_as_recognized(event.source, event.end_ms, provisional.end_ms, provisional.end_of_utterance_ms.is_some());
+        self.commit_if_over(event.source, silence_ms)
+    }
+
+    fn commit_if_over(&mut self, source: Source, silence_ms: f64) -> Option<Update> {
+        let provisional = self.state.provisional(source)?;
         let signals = Signals {
             has_text: !provisional.text().trim().is_empty(),
             end_of_utterance: provisional.end_of_utterance_ms.is_some(),
-            silence_ms: self.silence_for(source, provisional.end_ms, provisional.end_of_utterance_ms.is_some()),
+            silence_ms,
             assessment: assess(provisional.text()),
         };
         let Decision::Commit(reason) = decide(&signals, &self.config) else { return None };
@@ -121,11 +146,20 @@ impl LiveTranscript {
         Some(Update::Committed { utterance, reason })
     }
 
+    fn recognizer_behind(&self, source: Source) -> f64 {
+        let latest = self.silence[slot(source)].latest_end_ms();
+        self.recognized_until_ms[slot(source)].map(|until| (latest - until).max(0.0)).unwrap_or(0.0)
+    }
+
     /// How long the speaker has been quiet, from two independent signals: audio energy since
     /// the later of the last voice and the last text (so words still arriving aren't cut off),
     /// and the recognizer producing nothing new. The second one allows for its normal lag,
     /// and covers microphones whose noise bed hides the energy gaps.
     fn silence_for(&self, source: Source, text_end_ms: f64, end_of_utterance: bool) -> f64 {
+        // Far behind the audio (a starved CPU), live silence says nothing about this text.
+        if self.recognizer_behind(source) > self.config.backlog_hold_ms && let Some(until) = self.recognized_until_ms[slot(source)] {
+            return self.silence_as_recognized(source, until, text_end_ms, end_of_utterance);
+        }
         let tracker = &self.silence[slot(source)];
         // Until the recognizer has been quiet for its own lag, more words for this stretch may
         // still be on the way (Deepgram's last segment arrives ~0.6 s after speech stops); an
@@ -141,6 +175,17 @@ impl LiveTranscript {
         // report a window that ends well before the audio they have already consumed.
         let no_new_text = (tracker.latest_end_ms() - text_end_ms.max(self.last_event_ms[slot(source)]) - self.text_lag_ms).max(0.0);
         energy.max(no_new_text)
+    }
+
+    /// The two signals of [`LiveTranscript::silence_for`], read as of `until` on the recognizer's
+    /// own clock instead of now: the audio's silence at that point, and how much audio it had
+    /// processed since this text without another word.
+    fn silence_as_recognized(&self, source: Source, until: f64, text_end_ms: f64, end_of_utterance: bool) -> f64 {
+        let quiet = (until - text_end_ms).max(0.0);
+        let energy = self.silence[slot(source)].silence_at(until, text_end_ms);
+        if end_of_utterance { return energy.max(quiet); }
+        if quiet < self.text_lag_ms { return 0.0; }
+        energy.max(quiet - self.text_lag_ms)
     }
 
     fn mark(&self, stage: Stage, source: Source, id: UtteranceId, audio_ms: Option<f64>) {

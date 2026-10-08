@@ -123,8 +123,10 @@ on-device transcription of Me and Them with the transcript saved per session, an
 heard so far (the last 10 minutes or 40 lines, plus what is being said right now). During a Live session the ChatGPT
 provider keeps one restricted Codex thread, so each answer only sends what is new; a newer request cancels the one in
 flight, and nothing from a cancelled request reaches the screen.
-Transcription runs on this PC with Parakeet, or optionally through Deepgram with your own key.
-Not yet: endpointing tuned on real conversations, and speculative answers.
+Transcription runs on this PC with Parakeet, or optionally through Deepgram with your own key. Endpointing is
+evaluated on recorded sessions, and a recognizer that falls behind (a busy CPU) is endpointed on its own clock, so
+it neither cuts lines into fragments nor merges questions while it catches up.
+Not yet: speculative answers.
 
 ## Third-party
 

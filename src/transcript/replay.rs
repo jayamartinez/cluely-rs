@@ -88,6 +88,10 @@ pub fn endpoint(recognized: &Recognized, pcm: &[f32], config: EndpointConfig, te
     let duration_ms = pcm.len() as f64 * 1000.0 / SAMPLE_RATE as f64;
     let mut run = Run { live, pending: VecDeque::new(), timeline: Timeline { duration_ms, ..Default::default() } };
     let mut produced = recognized.events.iter().peekable();
+    // (when the recognizer is done with a chunk, the chunk's end): its position on the audio clock.
+    let mut processing: VecDeque<(f64, f64)> = VecDeque::new();
+    // Like `Transcriber::processed_until`, nothing is processed until the first chunk is.
+    run.live.set_recognized_until(recognized.source, 0.0);
     let mut released_ms: f64 = 0.0;
     let mut now = 0.0;
     for chunk in chunks(recognized.source, pcm) {
@@ -98,6 +102,11 @@ pub fn endpoint(recognized: &Recognized, pcm: &[f32], config: EndpointConfig, te
         run.record(updates, now);
         while let Some((_, event)) = produced.next_if(|(at, _)| *at <= now) { run.pending.push_back((ready, event.clone())); }
         run.deliver(now);
+        // As the pipeline does: the position is reported once the events for it are applied.
+        processing.push_back((ready, now));
+        while let Some((_, until)) = processing.pop_front_if(|(done, _)| *done <= now) {
+            run.live.set_recognized_until(recognized.source, until);
+        }
     }
     // Listening stopped: the recognizer's last events, then whatever is still in progress.
     run.pending.extend(produced.map(|(_, event)| (now, event.clone())));
@@ -341,6 +350,81 @@ mod tests {
         let timeline = replay(&asr, Source::Them, &pcm, EndpointConfig::default(), None, &|_| 1000.0).unwrap();
         let first = timeline.partials.first().unwrap();
         assert_eq!(first, &(1500.0, "so".to_string()));
+    }
+
+    /// The "a new" / "age" fragments (#9): with the CPU saturated the recognizer fell far behind
+    /// the audio. When the live speaker paused, the energy silence was applied to text from
+    /// seconds earlier, and the backlog was committed a few words at a time.
+    #[test]
+    fn a_recognizer_far_behind_the_audio_does_not_fragment_its_backlog() {
+        let (mut pcm, asr, text) = long_sentence();
+        // Quiet long enough for the recognizer, 6 s behind, to get past the end of the sentence.
+        quiet(&mut pcm, 6000);
+        let six_seconds_behind = |_| 6000.0;
+        // Without the hold (as before), the sentence is cut into pieces once the live audio goes quiet.
+        let unheld = EndpointConfig { backlog_hold_ms: f64::INFINITY, ..EndpointConfig::default() };
+        let timeline = replay(&asr, Source::Them, &pcm, unheld, None, &six_seconds_behind).unwrap();
+        assert!(timeline.commits.len() >= 3, "{:?}", timeline.commits.iter().map(|c| &c.utterance.text).collect::<Vec<_>>());
+        assert!(timeline.commits.iter().all(|c| c.utterance.text != text));
+
+        let timeline = replay(&asr, Source::Them, &pcm, EndpointConfig::default(), None, &six_seconds_behind).unwrap();
+        let commits: Vec<(&str, Reason)> = timeline.commits.iter().map(|c| (c.utterance.text.as_str(), c.reason)).collect();
+        assert_eq!(commits, [(text.as_str(), Reason::EndOfUtterance)]);
+    }
+
+    /// Rapid consecutive questions merged into one line after a stall: catching up, the
+    /// recognizer delivers the first question's end-of-utterance and the next question's words
+    /// within a few milliseconds, so the end-of-utterance was never confirmed by silence.
+    #[test]
+    fn questions_a_recognizer_catches_up_on_stay_separate_lines() {
+        let first = "so how would you design a distributed cache".split(' ').collect::<Vec<_>>();
+        let second = "what is the difference between a mutex and a semaphore".split(' ').collect::<Vec<_>>();
+        let mut steps: Vec<Step> = (1..=first.len()).map(|n| Step::partial(Source::Them, n as f64 * 300.0, &first[..n].join(" "))).collect();
+        steps.push(Step::eou(Source::Them, 2600.0, &first.join(" ")));
+        steps.extend((1..=second.len()).map(|n| Step::partial(Source::Them, 4000.0 + n as f64 * 300.0, &second[..n].join(" "))));
+        steps.push(Step::eou(Source::Them, 7300.0, &second.join(" ")));
+        let asr = ScriptedAsr::new(steps);
+        let mut pcm = Vec::new();
+        speech(&mut pcm, 2500);
+        quiet(&mut pcm, 1500);
+        // The second question, and the speaker carrying on while the recognizer catches up.
+        speech(&mut pcm, 8000);
+        quiet(&mut pcm, 3000);
+        // Stalled from the start, then everything up to 9 s is recognized at once.
+        let stalled_then_caught_up = |at: f64| if at < 9000.0 { 9000.0 - at } else { 0.0 };
+        let commits = |config| -> Vec<String> {
+            replay(&asr, Source::Them, &pcm, config, None, &stalled_then_caught_up).unwrap().commits.into_iter().map(|c| c.utterance.text).collect()
+        };
+        let unheld = EndpointConfig { backlog_hold_ms: f64::INFINITY, ..EndpointConfig::default() };
+        assert_eq!(commits(unheld).len(), 1, "as before, the two questions merge");
+        assert_eq!(commits(EndpointConfig::default()), [first.join(" "), second.join(" ")]);
+    }
+
+    /// The same without end-of-utterance signals (as on desktop audio, where Parakeet often
+    /// sends none): sentences a pause apart are split by the silence as the recognizer heard it.
+    /// Without an end-of-utterance the recognizer keeps extending one hypothesis.
+    #[test]
+    fn sentences_a_recognizer_catches_up_on_are_split_by_the_silence_it_heard() {
+        let first = "so the cache sits in front of the database".split(' ').collect::<Vec<_>>();
+        let second = "and every read goes there before it goes to disk".split(' ').collect::<Vec<_>>();
+        let mut steps: Vec<Step> = (1..=first.len()).map(|n| Step::partial(Source::Them, n as f64 * 300.0, &first[..n].join(" "))).collect();
+        steps.extend((1..=second.len()).map(|n| Step::partial(Source::Them, 3900.0 + n as f64 * 300.0, &format!("{} {}", first.join(" "), second[..n].join(" ")))));
+        let asr = ScriptedAsr::new(steps);
+        let mut pcm = Vec::new();
+        speech(&mut pcm, 2400);
+        quiet(&mut pcm, 1500);
+        speech(&mut pcm, 8600);
+        quiet(&mut pcm, 3000);
+        let stalled_then_caught_up = |at: f64| if at < 9000.0 { 9000.0 - at } else { 0.0 };
+        let commits = |config| -> Vec<String> {
+            replay(&asr, Source::Them, &pcm, config, None, &stalled_then_caught_up).unwrap().commits.into_iter().map(|c| c.utterance.text).collect()
+        };
+        let unheld = EndpointConfig { backlog_hold_ms: f64::INFINITY, ..EndpointConfig::default() };
+        assert_eq!(commits(unheld).len(), 1, "as before, the two sentences merge");
+        assert_eq!(commits(EndpointConfig::default()), [first.join(" "), second.join(" ")]);
+        // Keeping up, the same audio and words give the same two lines.
+        let timeline = replay(&asr, Source::Them, &pcm, EndpointConfig::default(), None, &no_lag).unwrap();
+        assert_eq!(timeline.commits.iter().map(|c| c.utterance.text.clone()).collect::<Vec<_>>(), [first.join(" "), second.join(" ")]);
     }
 
     #[test]

@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::JoinHandle;
 
@@ -12,7 +13,12 @@ use crate::audio::{AudioChunk, Source};
 
 enum Message { Audio(AudioChunk), Finish }
 
-struct Worker { audio: Sender<Message>, thread: JoinHandle<()> }
+struct Worker {
+    audio: Sender<Message>,
+    thread: JoinHandle<()>,
+    /// Audio time (f64 bits) the session has processed up to.
+    processed: Arc<AtomicU64>,
+}
 
 pub struct Transcriber {
     events: Sender<TranscriptEvent>,
@@ -44,10 +50,12 @@ impl Transcriber {
             let (audio, inbox) = channel();
             let sink = EventSink::new(source, self.generation, self.events.clone());
             let provider = provider.clone();
+            let processed = Arc::new(AtomicU64::new(0f64.to_bits()));
+            let progress = processed.clone();
             let thread = std::thread::Builder::new().name(format!("cluelyrs-asr-{}", source.label()))
-                .spawn(move || run(provider, sink, inbox))
+                .spawn(move || run(provider, sink, inbox, &progress))
                 .map_err(|error| AsrError::Failed(format!("Couldn't start transcription: {error}")))?;
-            self.workers.insert(source, Worker { audio, thread });
+            self.workers.insert(source, Worker { audio, thread, processed });
         }
         Ok(self.generation)
     }
@@ -55,6 +63,13 @@ impl Transcriber {
     /// Route a chunk to its source's session. Chunks for sources that aren't running are dropped.
     pub fn feed(&self, chunk: AudioChunk) {
         if let Some(worker) = self.workers.get(&chunk.source) { let _ = worker.audio.send(Message::Audio(chunk)); }
+    }
+
+    /// Audio time `source`'s session has processed up to. Behind the audio fed so far when the
+    /// recognizer can't keep up (a saturated CPU). Every event from that audio has been sent
+    /// before the position is published, so draining events after reading it sees them all.
+    pub fn processed_until(&self, source: Source) -> Option<f64> {
+        self.workers.get(&source).map(|worker| f64::from_bits(worker.processed.load(Ordering::Acquire)))
     }
 
     /// Flush and end every session, waiting for their final events.
@@ -72,7 +87,7 @@ impl Drop for Transcriber {
     fn drop(&mut self) { self.stop(); }
 }
 
-fn run(provider: Arc<dyn StreamingAsr>, sink: EventSink, inbox: Receiver<Message>) {
+fn run(provider: Arc<dyn StreamingAsr>, sink: EventSink, inbox: Receiver<Message>, processed: &AtomicU64) {
     let mut session = match provider.start_session(sink.clone()) {
         Ok(session) => session,
         Err(error) => { sink.emit(0.0, 0.0, EventKind::Error { message: error.to_string(), fatal: true }); return; }
@@ -86,6 +101,7 @@ fn run(provider: Arc<dyn StreamingAsr>, sink: EventSink, inbox: Receiver<Message
                     sink.emit(chunk.start_ms, last_end, EventKind::Error { message: error.to_string(), fatal: true });
                     return;
                 }
+                processed.store(last_end.to_bits(), Ordering::Release);
             }
             Ok(Message::Finish) | Err(_) => {
                 if let Err(error) = session.finish() {
@@ -137,6 +153,19 @@ mod tests {
         let eou = events.iter().find(|e| matches!(e.kind, EventKind::EndOfUtterance { .. })).unwrap();
         assert_eq!((eou.start_ms, eou.end_ms), (0.0, 300.0));
         assert!(events.iter().all(|e| e.generation == generation));
+    }
+
+    #[test]
+    fn the_position_each_session_has_processed_is_reported() {
+        let (sender, _events) = channel();
+        let mut transcriber = Transcriber::new(sender);
+        transcriber.start(Arc::new(ScriptedAsr::new(vec![])), &[Source::Them]).unwrap();
+        assert_eq!(transcriber.processed_until(Source::Them), Some(0.0));
+        assert_eq!(transcriber.processed_until(Source::Me), None);
+        for t in (0..400).step_by(50) { transcriber.feed(chunk(Source::Them, t as f64, 50)); }
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while transcriber.processed_until(Source::Them) != Some(400.0) && std::time::Instant::now() < deadline { std::thread::yield_now(); }
+        assert_eq!(transcriber.processed_until(Source::Them), Some(400.0));
     }
 
     #[test]
