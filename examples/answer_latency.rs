@@ -9,6 +9,8 @@
 //!   cargo run --example answer_latency -- --provider claude   # override the saved provider (claude|codex)
 //!   cargo run --example answer_latency -- --provider claude --model opus   # opus|sonnet|haiku, or a Codex model id / "default"
 //!   cargo run --example answer_latency -- --list   # the Codex model list and default (no prompt sent)
+//!   cargo run --example answer_latency -- --speculate 1500   # a speculative answer starts when the
+//!       question is committed and Assist is pressed 1500 ms later: times press → first visible words
 //!
 //! Every run makes ONE real request through your ChatGPT/Claude subscription or API key and
 //! counts against its usage. Never run it automatically.
@@ -68,10 +70,38 @@ fn main() {
         action: "Assist".into(), question: String::new(), history: Vec::new(),
         conversation: conversation.render(), screenshot: Some(screenshot()), utterance: None,
     };
-    let started = Instant::now();
-    let (_, mut replies) = session.ask(&settings, request).unwrap_or_else(|error| panic!("couldn't start: {error}"));
-    let mut first: Option<Duration> = None;
-    let mut text = String::new();
+    let speculate = args.iter().position(|a| a == "--speculate").and_then(|i| args.get(i + 1)).map(|ms| ms.parse::<u64>().expect("--speculate <ms>"));
+    let (started, mut replies, mut first, mut text) = match speculate {
+        None => {
+            let started = Instant::now();
+            let (_, replies) = session.ask(&settings, request).unwrap_or_else(|error| panic!("couldn't start: {error}"));
+            (started, replies, None, String::new())
+        }
+        Some(press_after) => {
+            // The question was just committed: speculation starts on its own prepared thread or
+            // process. The user presses Assist `press_after` ms later and the answer is claimed.
+            prewarm_speculation(&session, &settings);
+            let committed = Instant::now();
+            session.speculate(&settings, request, 1).unwrap_or_else(|error| panic!("couldn't start: {error}"));
+            std::thread::sleep(Duration::from_millis(press_after));
+            let pressed = Instant::now();
+            let claimed = session.claim(1).expect("same context");
+            println!("pressed {:.2} s after the commit; {} words were ready", (pressed - committed).as_secs_f64(), claimed.text.split_whitespace().count());
+            let first = (!claimed.text.is_empty()).then(|| pressed.elapsed());
+            if let Some(result) = claimed.done {
+                // Finished before the press: all of it shows at once.
+                match result {
+                    Ok(answer) => println!("first visible words: {:.3} s after pressing (finished before the press), {} words
+---
+{}",
+                        first.unwrap_or_default().as_secs_f64(), answer.split_whitespace().count(), answer.trim()),
+                    Err(error) => println!("speculative answer failed: {error}"),
+                }
+                return;
+            }
+            (pressed, claimed.replies, first, claimed.text)
+        }
+    };
     while let Some(reply) = futures::executor::block_on(replies.next()) {
         match reply.event {
             Event::Delta(delta) => { first.get_or_insert(started.elapsed()); text.push_str(&delta); }
@@ -104,6 +134,14 @@ fn prewarm(session: &ReasoningSession, settings: &cluely_rs::settings::Settings)
     println!("prepared in {:.2} s (Codex: app-server, model list, thread; Claude: process started)", started.elapsed().as_secs_f64());
     // Live has been on for a moment before anyone presses Assist; a prepared Claude process
     // finishes booting in that time.
+    std::thread::sleep(Duration::from_secs(2));
+}
+
+/// The speculation's own thread or process, prepared as when a question is first heard.
+fn prewarm_speculation(session: &ReasoningSession, settings: &cluely_rs::settings::Settings) {
+    session.prewarm_speculation(settings);
+    std::thread::sleep(Duration::from_millis(100));
+    session.wait_prepared();
     std::thread::sleep(Duration::from_secs(2));
 }
 
