@@ -104,9 +104,13 @@ impl TextInput {
         self.blink = None;
     }
 
-    /// Blink while focused; stop (with the caret shown) once focus leaves.
+    /// Whether typing goes here: the box has focus in a window that has the keyboard. The overlay
+    /// keeps the box focused after handing the keyboard back to another app, so focus alone isn't enough.
+    fn has_keyboard(&self, window: &Window) -> bool { self.focus_handle.is_focused(window) && window.is_window_active() }
+
+    /// Blink while it has the keyboard; stop (ready to show at once next time) when it doesn't.
     fn keep_blinking(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.focus_handle.is_focused(window) {
+        if !self.has_keyboard(window) {
             self.show_cursor();
             return;
         }
@@ -518,7 +522,7 @@ impl Element for TextElement {
         window.handle_input(&focus_handle, ElementInputHandler::new(bounds, self.input.clone()), cx);
         let Some(line) = prepaint.line.take() else { return };
         let scroll_x = prepaint.scroll_x;
-        let focused = focus_handle.is_focused(window) && self.input.read(cx).cursor_visible;
+        let focused = self.input.read(cx).has_keyboard(window) && self.input.read(cx).cursor_visible;
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
             if let Some(selection) = prepaint.selection.take() {
                 window.paint_quad(selection)
