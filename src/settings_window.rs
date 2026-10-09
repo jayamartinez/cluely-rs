@@ -20,9 +20,10 @@ gpui::actions!(settings_window, [CloseSettings]);
 enum Page { Settings(Tab), About }
 
 /// The toolbar: page, label, icon.
-const PAGES: [(Page, &str, &str); 6] = [
+const PAGES: [(Page, &str, &str); 7] = [
     (Page::Settings(Tab::Model), "Model", "icons/tab-model.svg"),
     (Page::Settings(Tab::Listening), "Listening", "icons/tab-listening.svg"),
+    (Page::Settings(Tab::Modes), "Modes", "icons/tab-modes.svg"),
     (Page::Settings(Tab::Keys), "Shortcuts", "icons/tab-shortcuts.svg"),
     (Page::Settings(Tab::Window), "Window", "icons/tab-window.svg"),
     (Page::Settings(Tab::History), "Sessions", "icons/tab-sessions.svg"),
@@ -164,7 +165,9 @@ impl Render for SettingsWindow {
                 window.remove_window();
             }))
             .child(self.toolbar(title, cx))
-            .child(div().id("settings-page").flex_1().min_h_0().overflow_y_scroll()
-                .child(div().w(px(600.0)).mx_auto().pt(px(22.0)).pb(px(28.0)).child(body)))
+            // Modes fills the window with its own scrolling columns; other pages are a centred column.
+            .child(if self.page == Page::Settings(Tab::Modes) { div().id("settings-page").flex_1().min_h_0().flex().child(body) }
+                else { div().id("settings-page").flex_1().min_h_0().overflow_y_scroll()
+                    .child(div().w(px(600.0)).mx_auto().pt(px(22.0)).pb(px(28.0)).child(body)) })
     }
 }
