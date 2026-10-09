@@ -45,8 +45,6 @@ const MIN_HEIGHT: f32 = 420.0;
 const MAX_HEIGHT: f32 = 640.0;
 /// Room the window always leaves on the screen.
 const SCREEN_MARGIN: f32 = 120.0;
-/// The Modes page's window height (its columns scroll).
-const MODES_HEIGHT: f32 = 640.0;
 
 pub struct SettingsWindow {
     overlay: Entity<Overlay>,
@@ -128,8 +126,8 @@ impl SettingsWindow {
     fn fit_to_tab(&self, window: &mut Window, cx: &App) {
         let (toolbar, tab) = self.heights.get();
         if toolbar <= 0.0 { return; }
-        // Modes lays out its own scrolling columns in the window it is given.
-        let tab = if self.page == Page::Settings(Tab::Modes) { MODES_HEIGHT - toolbar } else { tab };
+        // Modes lays out its own scrolling columns in the tallest window allowed.
+        let tab = if self.page == Page::Settings(Tab::Modes) { MAX_HEIGHT - toolbar } else { tab };
         if tab <= 0.0 { return; }
         let screen = window.display(cx).map_or(f32::MAX, |display| f32::from(display.bounds().size.height) - SCREEN_MARGIN);
         let wanted = (toolbar + tab).ceil().clamp(MIN_HEIGHT, MAX_HEIGHT.min(screen).max(MIN_HEIGHT));
