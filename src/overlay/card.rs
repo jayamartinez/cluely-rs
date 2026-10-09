@@ -16,11 +16,11 @@ use crate::settings_view::Tab;
 use crate::toggles::Toggle;
 use crate::{theme, ui};
 
-/// The card behind the conversation and the toolbar, translucent so the desktop shows faintly through
-/// it.
-const CARD: u32 = 0x121315cc;
+/// The card behind the conversation and the toolbar, as see-through as Settings › Window › Background
+/// opacity makes it (`Overlay::card_fill`).
+const CARD: u32 = 0x121315;
 /// The text box row, lighter than the rest of the card.
-const INPUT_ROW: u32 = 0x2e3034cc;
+const INPUT_ROW: u32 = 0x2e3034;
 const EDGE: u32 = 0xffffff14;
 /// The return button while there is nothing to send.
 const RETURN_IDLE: u32 = 0x43464b;
@@ -30,7 +30,7 @@ const HOVER: u32 = 0xffffff0f;
 /// The conversation (transcript strip, answers, quick actions) grows to this height, then the
 /// answers scroll.
 const CONVERSATION_MAX_HEIGHT: f32 = 418.0;
-/// The card's width; the Settings panel under it matches.
+/// The card's default width (Settings › Window › Card width); the Settings panel under it matches.
 pub(crate) const CARD_WIDTH: f32 = WIDTH - 40.0;
 
 impl Overlay {
@@ -42,7 +42,7 @@ impl Overlay {
         let conversation_shown = live && (self.settings_tab.is_none() || collapse.is_some());
         // Each section paints its own translucent background, so none is stacked on another and the
         // whole card stays equally see-through.
-        let mut card = div().id("card").relative().w(px(CARD_WIDTH)).flex().flex_col().rounded(px(20.0))
+        let mut card = div().id("card").relative().w(px(self.store.value.card_width.card())).flex().flex_col().rounded(px(20.0))
             .border_1().border_color(rgba(EDGE));
         if conversation_shown {
             let (ticker, thread, actions) = self.live_parts(cx);
@@ -50,7 +50,7 @@ impl Overlay {
             // unlike the strip and the actions) scrolls.
             let grown = collapse.unwrap_or(1.0);
             let mut conversation = div().flex().flex_col().max_h(px(CONVERSATION_MAX_HEIGHT * grown)).overflow_hidden()
-                .bg(rgba(CARD)).rounded_t(px(19.0)).child(ticker.flex_none());
+                .bg(self.card_fill(CARD)).rounded_t(px(19.0)).child(ticker.flex_none());
             if collapse.is_some() { conversation = conversation.opacity(grown); }
             if !self.turns.is_empty() { conversation = conversation.child(thread.flex_initial().min_h_0()); }
             card = card.child(conversation.child(actions.flex_none()));
@@ -67,7 +67,7 @@ impl Overlay {
             .child(ui::icon("icons/return.svg", 14.0, if ready { theme::accent_ink() } else { theme::body() }));
         // Without the conversation the text box is the top of the card; under it a hairline
         // separates the two.
-        div().relative().flex().items_center().gap(px(10.0)).h(px(54.0)).pl(px(18.0)).pr(px(11.0)).bg(rgba(INPUT_ROW))
+        div().relative().flex().items_center().gap(px(10.0)).h(px(54.0)).pl(px(18.0)).pr(px(11.0)).bg(self.card_fill(INPUT_ROW))
             .when(!below_conversation, |row| row.rounded_t(px(19.0)))
             .when(below_conversation, |row| row.border_t_1().border_color(rgba(EDGE)))
             .child(div().id("composer-input").flex_1().min_w_0().cursor_text()
@@ -123,7 +123,7 @@ impl Overlay {
             }))
             .child(ui::icon("icons/gear.svg", 17.0, if settings_open { theme::text() } else { theme::muted() }));
         // The overlay moves with its shortcuts only (Ctrl Alt arrows, ⌃⌥ arrows on macOS), not by dragging.
-        div().flex().items_center().gap(px(6.0)).h(px(46.0)).pl(px(16.0)).pr(px(10.0)).bg(rgba(CARD)).rounded_b(px(19.0))
+        div().flex().items_center().gap(px(6.0)).h(px(46.0)).pl(px(16.0)).pr(px(10.0)).bg(self.card_fill(CARD)).rounded_b(px(19.0))
             .child(div().flex_1().flex().items_center().child(ui::mark(22.0)))
             .child(middle)
             .child(div().flex_1().flex().items_center().justify_end().gap(px(2.0)).child(sessions).child(settings))
@@ -132,6 +132,10 @@ impl Overlay {
 }
 
 impl Overlay {
+    /// One of the card's own fills at the chosen background opacity. Each section paints its own,
+    /// so the whole card is equally see-through.
+    fn card_fill(&self, rgb: u32) -> gpui::Rgba { crate::appearance::fill(rgb, self.store.value.background_opacity) }
+
     /// The waveform icon's five bars (same size and spacing as `tab-listening.svg`), driven by the
     /// last levels: the newest in the middle, older ones outwards, scaled by the icon's diamond so
     /// silence reads as a small, flat version of the icon.

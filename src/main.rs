@@ -33,12 +33,14 @@ fn main() {
             Err(error) => { eprintln!("global shortcuts unavailable: {error}"); cx.quit(); return; }
         };
         let display = cx.primary_display();
+        // As wide as Settings › Window › Card width makes it, centred.
+        let width = px(cluely_rs::settings::Store::load().value.card_width.window());
         let origin = display.as_ref().map(|display| {
             let bounds = display.bounds();
-            point(bounds.origin.x + (bounds.size.width - px(overlay::WIDTH)) / 2.0, bounds.origin.y + px(24.0))
+            point(bounds.origin.x + (bounds.size.width - width) / 2.0, bounds.origin.y + px(24.0))
         }).unwrap_or(point(px(200.0), px(24.0)));
         let options = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(Bounds::new(origin, size(px(overlay::WIDTH), px(overlay::IDLE_HEIGHT))))),
+            window_bounds: Some(WindowBounds::Windowed(Bounds::new(origin, size(width, px(overlay::IDLE_HEIGHT))))),
             titlebar: None,
             window_background: WindowBackgroundAppearance::Transparent,
             kind: WindowKind::PopUp,

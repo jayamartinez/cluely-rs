@@ -148,6 +148,8 @@ pub struct Overlay {
     pub(crate) model_download: Option<Download>,
     /// Feedback under the model row in Settings → Listening.
     pub(crate) model_notice: Option<SharedString>,
+    /// Background opacity's slider is being dragged; settings.json is written on release.
+    pub(crate) opacity_drag: bool,
     /// The dropdown that is open in Settings, if any.
     pub(crate) open_picker: Option<crate::settings_view::Picker>,
     /// Show subscription account names in Settings → Model (masked by default; never saved).
@@ -251,7 +253,7 @@ impl Overlay {
             recorder: None, shape: Rc::default(), hits: Hits::default(), composer, key_input, model_input, base_url_input,
             #[cfg(target_os = "macos")]
             model_ui,
-            key_reveal: Default::default(),
+            key_reveal: Default::default(), opacity_drag: false,
             key_notice: None, loaded_models: Vec::new(), models_loading: false, reasoning: None, planner: Planner::new(false, Budget::default()), prepared_shot: PreparedShot::default(), answer_action: "Assist", speculation_attempt: 0,
             metrics: None, next_turn: 0, catching_mouse: true, return_focus: None,
             codex: crate::codex::CodexClient::new(), codex_status: None, claude_status: None, signing_in: false,
@@ -282,6 +284,7 @@ impl Overlay {
         }
         #[cfg(target_os = "macos")]
         if previous.show_in_dock != self.store.value.show_in_dock { self.update_dock(); }
+        if previous.card_width != self.store.value.card_width { self.fit(window); }
         if previous.screen_on_send != self.store.value.screen_on_send {
             let placeholder = composer_placeholder(&self.store.value);
             self.composer.update(cx, |input, cx| input.set_placeholder(placeholder, cx));
@@ -402,7 +405,7 @@ impl Overlay {
     /// Size the window to its content state; transparent area outside the content still takes clicks.
     fn fit(&self, window: &mut Window) {
         let height = if self.settings_tab.is_some() { SETTINGS_HEIGHT } else if self.live_since.is_some() { LIVE_HEIGHT } else { IDLE_HEIGHT };
-        platform::resize(window, self.native, size(px(WIDTH), px(height)));
+        platform::resize(window, self.native, size(px(self.store.value.card_width.window()), px(height)));
     }
 
     fn handle(&mut self, action: Action, window: &mut Window, cx: &mut Context<Self>) {
@@ -1063,7 +1066,7 @@ impl Overlay {
             let body: AnyElement = match &turn.status {
                 Status::Failed(reason) => div().text_size(px(13.0)).line_height(px(20.0)).text_color(gpui::rgb(0xffb4a8)).child(reason.clone()).into_any_element(),
                 Status::Streaming if turn.text.is_empty() => div().text_size(px(13.0)).text_color(theme::muted()).child("Thinking…").into_any_element(),
-                _ => div().id(("answer", turn.id as usize)).min_w_0().text_color(theme::text()).child(crate::markdown::render(&turn.text, 14.0)).into_any_element(),
+                _ => div().id(("answer", turn.id as usize)).min_w_0().text_color(theme::text()).child(crate::markdown::render(&turn.text, self.store.value.text_size.answer())).into_any_element(),
             };
             thread = thread.child(header).child(body);
         }
