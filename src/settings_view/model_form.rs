@@ -239,21 +239,20 @@ impl Overlay {
                 window.focus(&key.focus_handle(cx));
             });
             return column.child(div().flex().items_center().gap(px(6.0)).child(field).child(replace))
-                .child(div().flex().gap(px(10.0)).text_size(px(11.0))
-                    .child(status)
-                    .child(div().id("remove-key").cursor_pointer().text_color(rgb(0xffb4a8))
+                .child(note_line().child(status.min_w_0())
+                    .child(div().id("remove-key").flex_none().cursor_pointer().text_color(rgb(0xffb4a8))
                         .on_mouse_down(MouseButton::Left, listen(cx, |this, _, window, cx| this.remove_key_and_reset(window, cx))).child("Remove")));
         }
         let input = text_box(&self.key_input, "key-box").flex().items_center().gap(px(6.0)).pr(px(5.0)).child(key_eye(&self.key_input, cx));
         let save = button("save-key", "Save", true).on_mouse_down(MouseButton::Left, listen(cx, |this, _, window, cx| this.save_key(window, cx)));
-        let mut note = div().flex().gap(px(10.0)).text_size(px(11.0)).text_color(theme::muted());
+        let mut note = note_line().text_color(theme::muted());
         if let Some(notice) = self.key_notice.clone() {
-            note = note.child(div().text_color(theme::accent_soft()).child(notice));
+            note = note.child(div().min_w_0().text_color(theme::accent_soft()).child(notice));
         } else if self.key_input.read(cx).is_revealed() {
-            note = note.child("Shown while you check it. Saved keys stay hidden.");
+            note = note.child(div().min_w_0().child("Shown while you check it. Saved keys stay hidden."));
         }
         if saved.is_some() {
-            note = note.child(div().id("cancel-key").cursor_pointer().text_color(theme::accent_soft())
+            note = note.child(div().id("cancel-key").flex_none().cursor_pointer().text_color(theme::accent_soft())
                 .on_mouse_down(MouseButton::Left, listen(cx, |this, _, _, cx| {
                     this.model_ui.key_editing = false;
                     this.key_input.update(cx, |input, cx| input.clear(cx));
@@ -282,8 +281,9 @@ impl Overlay {
         let mut column = column.child(self.model_popover_picker(Picker::ApiModel, value, self.api_model_options(), s.api_model(), header, true,
             |s, v| { s.api_models.insert(s.api_provider.clone(), v); }, cx));
         if let Some(error) = self.model_ui.error.clone() {
-            column = column.child(div().flex().gap(px(12.0)).text_size(px(12.0))
-                .child(div().flex_1().min_w_0().text_color(rgb(0xffb4a8)).child(error))
+            // Retry sits at the end of the line when the message leaves room, else on its own line.
+            column = column.child(div().flex().flex_wrap().justify_between().gap_x(px(12.0)).gap_y(px(4.0)).text_size(px(12.0))
+                .child(div().min_w_0().text_color(rgb(0xffb4a8)).child(error))
                 .child(div().id("retry-models").flex_none().cursor_pointer().font_weight(FontWeight::SEMIBOLD).text_color(theme::accent_soft())
                     .on_mouse_down(MouseButton::Left, listen(cx, |this, _, window, cx| this.retry_models(window, cx))).child("Retry")));
         }
@@ -407,6 +407,12 @@ fn plain_row(text: &'static str, control: impl IntoElement) -> Div {
     div().flex().items_center().gap(px(16.0))
         .child(div().flex_1().min_w_0().child(label(text)))
         .child(div().w(px(CONTROL_WIDTH)).flex_none().child(control))
+}
+
+/// The small line under the key field: a status or notice, then its action (Remove, Cancel), which
+/// moves to its own line when both don't fit the column.
+fn note_line() -> Div {
+    div().flex().flex_wrap().gap_x(px(10.0)).gap_y(px(2.0)).text_size(px(11.0))
 }
 
 /// Local providers need no key: say where they run instead.
