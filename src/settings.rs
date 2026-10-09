@@ -109,6 +109,29 @@ impl Default for Settings {
 }
 
 impl Settings {
+    /// Providers that can have a saved key but have no marker: keys saved before markers existed
+    /// are looked for among these (`secrets::find_marker`).
+    pub fn unmarked_key_providers(&self) -> Vec<&'static str> {
+        crate::providers::PRESETS.iter()
+            .filter(|preset| preset.needs_key || preset.base_url.is_empty())
+            .map(|preset| preset.id)
+            .chain([crate::stt::deepgram::PROVIDER_ID])
+            .filter(|id| !self.saved_keys.contains_key(*id))
+            .collect()
+    }
+
+    /// Mark the keys found by that search, leaving markers set meanwhile alone. Whether any was added.
+    pub fn mark_found_keys(&mut self, found: Vec<(String, String)>) -> bool {
+        let mut added = false;
+        for (provider, hint) in found {
+            if let std::collections::btree_map::Entry::Vacant(entry) = self.saved_keys.entry(provider) {
+                entry.insert(hint);
+                added = true;
+            }
+        }
+        added
+    }
+
     /// Model for the selected API provider; empty until the user picks one.
     pub fn api_model(&self) -> &str { self.api_models.get(&self.api_provider).map(String::as_str).unwrap_or("") }
 
@@ -164,6 +187,24 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keys_saved_before_markers_are_looked_for_and_marked_once() {
+        let mut settings = Settings { saved_keys: [("anthropic".to_string(), "••••3f9a".to_string())].into(), ..Settings::default() };
+        let unmarked = settings.unmarked_key_providers();
+        assert!(unmarked.contains(&"openai") && unmarked.contains(&"custom") && unmarked.contains(&"deepgram"));
+        assert!(!unmarked.contains(&"anthropic"), "already marked");
+        assert!(!unmarked.contains(&"ollama"), "local providers have no key");
+
+        // A key marked meanwhile (saved while the search ran) keeps its own hint.
+        settings.saved_keys.insert("openai".into(), "••••new1".into());
+        let found = vec![("openai".to_string(), String::new()), ("deepgram".to_string(), String::new())];
+        assert!(settings.mark_found_keys(found.clone()));
+        assert_eq!(settings.saved_keys["openai"], "••••new1");
+        assert_eq!(settings.saved_keys["deepgram"], "");
+        assert!(!settings.mark_found_keys(found), "nothing new the second time");
+        assert!(!settings.unmarked_key_providers().contains(&"deepgram"));
+    }
 
     #[test]
     fn saved_keys_are_markers_with_hints_only() {

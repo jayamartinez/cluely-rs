@@ -212,7 +212,9 @@ impl Overlay {
             let revealed = self.revealed_key(preset.id);
             let shown: gpui::AnyElement = match revealed {
                 Some(key) => revealed_text(key).into_any_element(),
-                None => div().flex_1().min_w_0().font_family(theme::MONO).text_size(px(12.0)).text_color(theme::body()).child(hint.clone()).into_any_element(),
+                // A key found before its hint was known shows bullets only.
+                None => div().flex_1().min_w_0().font_family(theme::MONO).text_size(px(12.0)).text_color(theme::body())
+                    .child(if hint.is_empty() { "••••••••".to_string() } else { hint.clone() }).into_any_element(),
             };
             let field = div().flex_1().min_w_0().flex().items_center().gap(px(8.0)).h(px(36.0)).pl(px(10.0)).pr(px(5.0)).rounded(px(9.0)).border_1()
                 .when(revealed.is_some(), |field| field.bg(theme::field()).border_color(theme::accent()))

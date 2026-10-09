@@ -89,7 +89,12 @@ impl Overlay {
                 this.key_reveal.reading = false;
                 let shown = match key {
                     // Capture exclusion may have been turned off while the key was read.
-                    Some(key) if capture_excluded(&this.store.value) => { this.key_reveal.show(provider, key, Instant::now()); true }
+                    Some(key) if capture_excluded(&this.store.value) => {
+                        // A key marked before it was ever read gets its hint now.
+                        this.set_key_marker(provider, crate::secrets::masked(&key));
+                        this.key_reveal.show(provider, key, Instant::now());
+                        true
+                    }
                     Some(_) => false,
                     None => { this.key_notice = Some("Couldn't read the saved key.".into()); false }
                 };

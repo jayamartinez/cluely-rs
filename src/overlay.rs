@@ -261,6 +261,7 @@ impl Overlay {
             open_picker: None, reveal_accounts: false, devices: None, devices_loading: false, archive_bytes: None, picker_face: Rc::default(), toggle_hover: None,
             collapse: None, settings_height: Rc::default(), modes_ui, modes };
         overlay.refresh_model_status();
+        overlay.mark_existing_keys(window, cx);
         #[cfg(target_os = "macos")]
         overlay.update_dock();
         if start_live { overlay.set_live(true, window, cx); }
@@ -863,6 +864,25 @@ impl Overlay {
                     Err(_) => "No saved key to remove.".into(),
                 });
                 cx.notify();
+            });
+        }).detach();
+    }
+
+    /// Keys saved before `Settings::saved_keys` existed have no marker. Look for them once at
+    /// startup, in the background (on macOS by attributes only, which never shows a Keychain
+    /// prompt), and mark the ones found.
+    fn mark_existing_keys(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let unmarked = self.store.value.unmarked_key_providers();
+        if unmarked.is_empty() { return; }
+        cx.spawn_in(window, async move |this, cx| {
+            let found = cx.background_executor().spawn(async move {
+                unmarked.into_iter().filter_map(|id| crate::secrets::find_marker(id).map(|hint| (id.to_string(), hint))).collect::<Vec<_>>()
+            }).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.store.value.mark_found_keys(found) {
+                    this.store.save();
+                    cx.notify();
+                }
             });
         }).detach();
     }

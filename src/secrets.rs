@@ -57,6 +57,34 @@ pub fn masked(key: &str) -> Option<String> {
     normalize_key(key).ok().map(|key| mask_hint(&key))
 }
 
+/// The marker for a key saved before markers existed (`Settings::saved_keys`), or `None` when no
+/// key is stored. On macOS only the key's presence is looked up, by its attributes, which never
+/// shows a Keychain prompt, so the hint stays empty until the key is first read. Elsewhere the key
+/// is read for its hint.
+pub fn find_marker(provider_id: &str) -> Option<String> {
+    #[cfg(target_os = "macos")]
+    { is_stored(provider_id).then(String::new) }
+    #[cfg(not(target_os = "macos"))]
+    { get(provider_id).map(|key| mask_hint(&key)) }
+}
+
+/// Whether a key is stored, without reading it: attributes only, and no authentication UI, so the
+/// item's access list (and its prompt) never comes into play.
+#[cfg(target_os = "macos")]
+fn is_stored(provider_id: &str) -> bool {
+    use security_framework::item::{ItemClass, ItemSearchOptions, Limit};
+    if validate_provider_id(provider_id).is_err() { return false; }
+    ItemSearchOptions::new()
+        .class(ItemClass::generic_password())
+        .service(SERVICE)
+        .account(&account(provider_id))
+        .load_attributes(true)
+        .skip_authenticated_items(true)
+        .limit(Limit::Max(1))
+        .search()
+        .is_ok_and(|found| !found.is_empty())
+}
+
 /// Whether reading `provider_id`'s key may show a Keychain prompt: on macOS, until it has been
 /// read (or saved) in this run. Never on other platforms.
 pub fn may_prompt(provider_id: &str) -> bool {
@@ -275,6 +303,9 @@ mod tests {
         assert_eq!(read_store(PROVIDER).as_deref(), Some(key));
         assert_eq!(get(PROVIDER).as_deref(), Some(key));
         assert_eq!(get(PROVIDER).and_then(|key| masked(&key)).as_deref(), Some("••••abcd"));
+        // On macOS the presence check reads attributes only, so it gives no hint.
+        let expected_marker = if cfg!(target_os = "macos") { "" } else { "••••abcd" };
+        assert_eq!(find_marker(PROVIDER).as_deref(), Some(expected_marker));
         // A Settings render reads up to two keys (`get` for the badge, `hint` for the key row).
         const READS: u32 = 50;
         let started = std::time::Instant::now();
@@ -291,6 +322,7 @@ mod tests {
         remove(PROVIDER).unwrap();
         assert_eq!(get(PROVIDER), None);
         assert_eq!(read_store(PROVIDER), None);
+        assert_eq!(find_marker(PROVIDER), None);
         #[cfg(target_os = "macos")]
         assert!(!keychain_has_item(PROVIDER), "the Keychain item should be gone");
     }

@@ -133,6 +133,15 @@ fn button(id: &'static str, label: impl Into<SharedString>, primary: bool) -> gp
     if primary { base.bg(theme::accent()).text_color(theme::accent_ink()) } else { base.border_1().border_color(theme::hairline()).text_color(theme::body()) }
 }
 
+/// "Saved key ••••3f9a", "Saved key" for a key found before its hint was known, or "No key saved".
+fn saved_key_label(hint: Option<&str>) -> String {
+    match hint {
+        Some("") => "Saved key".to_string(),
+        Some(hint) => format!("Saved key {hint}"),
+        None => "No key saved".to_string(),
+    }
+}
+
 /// The eye in an API key field: shows what was typed or pasted so it can be checked before saving.
 /// Never shows a saved key; saving empties the field and hides it again.
 fn key_eye(input: &gpui::Entity<crate::input::TextInput>, cx: &App) -> impl IntoElement {
@@ -432,7 +441,7 @@ impl Overlay {
             if let Some(key) = self.revealed_key(preset.id) {
                 status = status.gap(px(10.0)).child(reveal::revealed_text(key)).child(self.saved_key_eye(preset.id, cx)).children(self.reveal_countdown(true));
             } else {
-                status = status.child(match &saved { Some(hint) => format!("Saved key {hint}"), None => "No key saved".to_string() });
+                status = status.child(saved_key_label(saved.as_deref()));
                 if saved.is_some() {
                     status = status.child(self.saved_key_eye(preset.id, cx))
                         .child(div().id("remove-key").cursor_pointer().text_color(gpui::rgb(0xffb4a8))
@@ -516,7 +525,7 @@ impl Overlay {
         let focus = self.key_input.clone();
         let saved = self.store.value.saved_keys.get(deepgram::PROVIDER_ID).cloned();
         let mut status = div().flex().items_center().gap(px(12.0)).text_size(px(12.0)).text_color(theme::muted())
-            .child(match &saved { Some(hint) => format!("Saved key {hint}"), None => "No key saved".to_string() });
+            .child(saved_key_label(saved.as_deref()));
         if saved.is_some() {
             status = status.child(div().id("remove-key").cursor_pointer().text_color(gpui::rgb(0xffb4a8))
                 .on_mouse_down(MouseButton::Left, listen(cx, |this, _, window, cx| this.remove_key(window, cx))).child("Remove"));
@@ -694,6 +703,13 @@ mod tests {
         let other = vec![("codex-mini".to_string(), "Codex Mini".to_string())];
         assert_eq!(latest_gpt_models(&other), other);
         assert_eq!((gpt_version("gpt-6.1-sol"), gpt_version("GPT-6-Luna"), gpt_version("gpt-x")), (Some((6, 1)), Some((6, 0)), None));
+    }
+
+    #[test]
+    fn saved_keys_read_with_or_without_their_hint() {
+        assert_eq!(saved_key_label(Some("••••3f9a")), "Saved key ••••3f9a");
+        assert_eq!(saved_key_label(Some("")), "Saved key", "a key found before it was ever read");
+        assert_eq!(saved_key_label(None), "No key saved");
     }
 
     #[test]
