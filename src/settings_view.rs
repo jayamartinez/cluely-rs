@@ -57,6 +57,18 @@ pub(crate) fn listen<E: ?Sized>(cx: &Context<Overlay>, f: impl Fn(&mut Overlay, 
 /// Taller lists scroll.
 pub(crate) const MENU_MAX_HEIGHT: f32 = 300.0;
 
+/// In macOS Settings › Model every row lines up with the rows inside its boxes: those sit
+/// `BOX_PADDING` inside a box's 1 px border, so rows outside a box are inset `ROW_INSET`. The
+/// Windows panel keeps its own edges (no inset, 12 px inside boxes).
+#[cfg(target_os = "macos")]
+const BOX_PADDING: f32 = 14.0;
+#[cfg(not(target_os = "macos"))]
+const BOX_PADDING: f32 = 12.0;
+#[cfg(target_os = "macos")]
+const ROW_INSET: f32 = BOX_PADDING + 1.0;
+#[cfg(not(target_os = "macos"))]
+const ROW_INSET: f32 = 0.0;
+
 /// The models offered for the selected provider (see `Overlay::model_choice`).
 pub(crate) struct ModelChoice {
     pub picker: Picker,
@@ -103,18 +115,18 @@ fn switch_row(title: &'static str, detail: &'static str, control: impl IntoEleme
 /// Settings → Model → Answer early: speculative answers, what they use and send, and showing
 /// them without a press.
 fn answer_early(s: &Settings, cx: &mut Context<Overlay>) -> Div {
-    let note = div().flex().gap(px(10.0)).px(px(12.0)).py(px(10.0)).rounded(px(10.0)).bg(gpui::rgb(0x16171a)).border_1().border_color(theme::hairline())
+    let note = div().flex().gap(px(10.0)).px(px(BOX_PADDING)).py(px(10.0)).rounded(px(10.0)).bg(gpui::rgb(0x16171a)).border_1().border_color(theme::hairline())
         .child(div().pt(px(1.0)).child(ui::icon("icons/info.svg", 14.0, theme::muted())))
         .child(div().flex().flex_col().gap(px(4.0)).flex_1().min_w_0().text_size(px(12.0)).line_height(px(16.0))
             .child(div().text_color(gpui::rgb(0xd9d5cc)).child("Each one is a real request to your selected model, on your subscription or API key. It counts toward your usage and rate limits, even when you don't open it."))
             .child(div().text_color(theme::muted()).child("The conversation and a screenshot are sent to your provider before you press. At most 4 a minute; a newer question replaces the one in progress.")));
     div().flex().flex_col().gap(px(12.0)).pt(px(16.0)).border_t_1().border_color(gpui::rgb(0x23262a))
-        .child(ui::section_label("ANSWER EARLY"))
+        .child(div().px(px(ROW_INSET)).child(ui::section_label("ANSWER EARLY")))
         .child(switch_row("Speculative answers", "Start answering their question before you press Assist, so it's ready",
-            switch("speculative-answers", s.speculative_answers, |s, v| s.speculative_answers = v, cx)))
+            switch("speculative-answers", s.speculative_answers, |s, v| s.speculative_answers = v, cx)).px(px(ROW_INSET)))
         .child(note)
         .child(switch_row("Show answers automatically", "Speculative answers appear as they're written, without pressing anything",
-            switch("auto-answer", s.auto_answer, |s, v| s.auto_answer = v, cx)))
+            switch("auto-answer", s.auto_answer, |s, v| s.auto_answer = v, cx)).px(px(ROW_INSET)))
 }
 
 /// Settings → Window → Dock (macOS).
@@ -306,10 +318,10 @@ impl Overlay {
             (Provider::Claude, "Claude subscription", detail(Provider::Claude, "Claude Code", self.claude_status.as_ref())),
             (Provider::ApiKey, "Your API key", "Anthropic, OpenAI, OpenRouter, Gemini, Ollama…".to_string()),
         ];
-        let mut list = div().flex().flex_col().gap(px(8.0)).child(ui::section_label("ANSWER WITH"));
+        let mut list = div().flex().flex_col().gap(px(8.0)).child(div().px(px(ROW_INSET)).child(ui::section_label("ANSWER WITH")));
         for (index, (provider, title, detail)) in providers.into_iter().enumerate() {
             let selected = s.provider == provider;
-            list = list.child(ui::row(("provider", index), title, detail, selected)
+            list = list.child(ui::row(("provider", index), title, detail, selected).px(px(BOX_PADDING))
                 .on_mouse_down(MouseButton::Left, listen(cx, move |this, _, window, cx| this.update_settings(|s| s.provider = provider, window, cx)))
                 .child(self.connection_badge(provider, index, cx)));
         }

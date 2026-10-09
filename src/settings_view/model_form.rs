@@ -12,7 +12,7 @@ use gpui::{
 };
 
 use super::reveal::revealed_text;
-use super::{Picker, answer_early, button, key_eye, listen, switch};
+use super::{BOX_PADDING, Picker, ROW_INSET, answer_early, button, key_eye, listen, switch};
 use crate::input::{InputEvent, TextInput};
 use crate::overlay::Overlay;
 use crate::providers::{self, Preset, ProviderError};
@@ -176,7 +176,7 @@ impl Overlay {
             form.child(plain_row("Model", self.model_popover_picker(choice.picker, choice.value, choice.options, &choice.selected, None, false, choice.set, cx)))
         };
         form.child(plain_row("Answer style", self.answer_style_picker(cx)))
-            .child(ui::setting_row("Smart mode · slower, deeper reasoning", switch("smart-mode", s.smart_mode, |s, v| s.smart_mode = v, cx)).border_b_0())
+            .child(ui::setting_row("Smart mode · slower, deeper reasoning", switch("smart-mode", s.smart_mode, |s, v| s.smart_mode = v, cx)).border_b_0().px(px(ROW_INSET)))
             .child(answer_early(s, cx))
     }
 
@@ -397,14 +397,14 @@ fn key_label(preset: &'static Preset, cx: &mut Context<Overlay>) -> Div {
 
 /// A row of the grouped box: label on the left, control on the right.
 fn group_row(label: impl IntoElement, control: impl IntoElement) -> Div {
-    div().flex().items_start().gap(px(16.0)).px(px(14.0)).py(px(10.0))
+    div().flex().items_start().gap(px(16.0)).px(px(BOX_PADDING)).py(px(10.0))
         .child(div().flex_1().min_w_0().pt(px(9.0)).child(label))
         .child(div().w(px(CONTROL_WIDTH)).flex_none().child(control))
 }
 
-/// A row outside the box, aligned with the toggle rows below it.
+/// A row outside the box, lined up with the box's labels and controls.
 fn plain_row(text: &'static str, control: impl IntoElement) -> Div {
-    div().flex().items_center().gap(px(16.0))
+    div().flex().items_center().gap(px(16.0)).px(px(ROW_INSET))
         .child(div().flex_1().min_w_0().child(label(text)))
         .child(div().w(px(CONTROL_WIDTH)).flex_none().child(control))
 }
@@ -417,7 +417,7 @@ fn note_line() -> Div {
 
 /// Local providers need no key: say where they run instead.
 fn local_line(preset: &'static Preset) -> Div {
-    div().flex().items_center().gap(px(8.0)).px(px(14.0)).py(px(12.0))
+    div().flex().items_center().gap(px(8.0)).px(px(BOX_PADDING)).py(px(12.0))
         .child(div().size(px(7.0)).flex_none().rounded_full().bg(theme::ok()))
         .child(div().text_size(px(12.0)).text_color(theme::body()).child("Runs on this computer · no key needed"))
         .child(div().font_family(theme::MONO).text_size(px(11.0)).text_color(theme::muted()).child(host(preset.base_url).to_string()))
