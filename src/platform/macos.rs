@@ -8,6 +8,7 @@ use std::path::Path;
 use std::process::Command;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+use std::time::Duration;
 
 use block2::RcBlock;
 use dispatch2::DispatchQueue;
@@ -265,8 +266,8 @@ pub fn set_in_dock(shown: bool) {
 }
 
 /// How long to wait for macOS to make CluelyRS the active app before showing a window anyway.
-const ACTIVATION_WAIT: std::time::Duration = std::time::Duration::from_millis(600);
-const ACTIVATION_POLL: std::time::Duration = std::time::Duration::from_millis(20);
+const ACTIVATION_WAIT: Duration = Duration::from_millis(600);
+const ACTIVATION_POLL: Duration = Duration::from_millis(20);
 
 fn app_is_active() -> bool {
     MainThreadMarker::new().is_some_and(|mtm| NSApplication::sharedApplication(mtm).isActive())
@@ -285,13 +286,22 @@ pub fn activate_then(cx: &mut App, show: impl FnOnce(bool, &mut App) + 'static) 
         return;
     }
     cx.spawn(async move |cx| {
-        let mut waited = std::time::Duration::ZERO;
-        while !app_is_active() && waited < ACTIVATION_WAIT {
-            cx.background_executor().timer(ACTIVATION_POLL).await;
-            waited += ACTIVATION_POLL;
-        }
-        let _ = cx.update(|cx| show(app_is_active(), cx));
+        let executor = cx.background_executor().clone();
+        let active = wait_until(app_is_active, ACTIVATION_WAIT, ACTIVATION_POLL, |poll| executor.timer(poll)).await;
+        let _ = cx.update(|cx| show(active, cx));
     }).detach();
+}
+
+/// Check `ready` every `poll` (waiting with `sleep`) until it holds or `limit` has passed, and
+/// return whether it held.
+async fn wait_until<Sleep: Future<Output = ()>>(ready: impl Fn() -> bool, limit: Duration, poll: Duration, sleep: impl Fn(Duration) -> Sleep) -> bool {
+    let mut waited = Duration::ZERO;
+    while !ready() {
+        if waited >= limit { return false; }
+        sleep(poll).await;
+        waited += poll;
+    }
+    true
 }
 
 /// Show `window` above other windows without making it key (see [`activate_then`]).
@@ -304,3 +314,45 @@ pub fn open_folder(path: &Path) -> std::io::Result<()> { Command::new("open").ar
 
 /// Open Finder at a file's folder with the file selected.
 pub fn reveal_file(path: &Path) -> std::io::Result<()> { Command::new("open").arg("-R").arg(path).spawn().map(drop) }
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+    use std::time::Duration;
+
+    use futures::executor::block_on;
+
+    use super::wait_until;
+
+    const LIMIT: Duration = Duration::from_millis(600);
+    const POLL: Duration = Duration::from_millis(20);
+
+    /// Waits until `ready` has been asked `ready_on` times (never when `None`); returns the result
+    /// and how many sleeps it took.
+    fn wait(ready_on: Option<u32>) -> (bool, u32) {
+        let (asked, slept) = (Cell::new(0), Cell::new(0));
+        let ready = || { asked.set(asked.get() + 1); ready_on.is_some_and(|n| asked.get() >= n) };
+        let sleep = |poll: Duration| { assert_eq!(poll, POLL); slept.set(slept.get() + 1); async {} };
+        (block_on(wait_until(ready, LIMIT, POLL, sleep)), slept.get())
+    }
+
+    #[test]
+    fn an_active_app_is_used_at_once() {
+        assert_eq!(wait(Some(1)), (true, 0));
+    }
+
+    #[test]
+    fn waits_for_the_app_to_become_active() {
+        assert_eq!(wait(Some(4)), (true, 3));
+    }
+
+    #[test]
+    fn activation_on_the_last_check_still_counts() {
+        assert_eq!(wait(Some(31)), (true, 30));
+    }
+
+    #[test]
+    fn gives_up_when_the_app_never_becomes_active() {
+        assert_eq!(wait(None), (false, 30));
+    }
+}
