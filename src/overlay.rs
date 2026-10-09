@@ -159,13 +159,18 @@ pub struct Overlay {
     collapse: Option<Instant>,
     /// The Settings panel's laid-out height, which the collapse starts from.
     settings_height: Rc<std::cell::Cell<f32>>,
+    /// The modes and which one is active (`modes`); its context and files are on `store.value.mode`.
+    pub(crate) modes: crate::modes::ModeStore,
+    /// Settings › Modes (`modes_view`).
+    pub(crate) modes_ui: crate::modes_view::ModesUi,
 }
 
 impl Overlay {
     pub fn new(hotkeys: Hotkeys, presses: UnboundedReceiver<Action>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let native = platform::native_window(window);
         let mut store = Store::load();
-        store.value.mode = crate::modes::ModeStore::load().active_material();
+        let modes = crate::modes::ModeStore::load();
+        store.value.mode = modes.active_material();
         if let Some(native) = native {
             // Failures here leave a visible, usable window; they are not fatal.
             apply_capture_setting(native, &store.value);
@@ -230,6 +235,7 @@ impl Overlay {
                 this.update_settings(|s| s.custom_base_url = url, window, cx);
             }
         }).detach();
+        let modes_ui = crate::modes_view::ModesUi::new(&modes, window, cx);
         let mut overlay = Self { native, own_window: window.window_handle(), hotkeys, store, settings_tab: None, sessions_window: None,
             #[cfg(target_os = "macos")]
             settings_window: None,
@@ -242,7 +248,7 @@ impl Overlay {
             listening: None, listening_status: None, listening_epoch: 0, transcript: Vec::new(), provisional: Default::default(), levels: Default::default(),
             model_installed: false, model_download: None, model_notice: None,
             open_picker: None, reveal_accounts: false, devices: None, devices_loading: false, archive_bytes: None, picker_face: Rc::default(), toggle_hover: None,
-            collapse: None, settings_height: Rc::default() };
+            collapse: None, settings_height: Rc::default(), modes_ui, modes };
         overlay.refresh_model_status();
         #[cfg(target_os = "macos")]
         overlay.update_dock();
@@ -304,6 +310,20 @@ impl Overlay {
         if tab == Tab::Model { self.refresh_subscriptions(window, cx); }
         if tab == Tab::Listening { self.refresh_model_status(); self.load_devices(window, cx); }
         if tab == Tab::History { self.refresh_archive_size(window, cx); }
+        if tab == Tab::Modes { self.prepare_modes_tab(cx); }
+    }
+
+    /// The active mode or its context or files changed: answers from now on use it. A running
+    /// answer finishes as it started; a speculative one (prepared with the old instructions) is
+    /// dropped, and during Live the provider is warmed up with the new instructions.
+    pub(crate) fn apply_mode(&mut self) {
+        let material = self.modes.active_material();
+        if self.store.value.mode == material { return; }
+        self.store.value.mode = material;
+        if let Some(session) = &mut self.reasoning {
+            session.cancel_speculation();
+            session.prewarm(&self.store.value);
+        }
     }
 
     /// Open (or focus) the full-size Sessions review window.
