@@ -45,6 +45,10 @@ pub struct Settings {
     pub claude_models: BTreeMap<String, String>,
     /// Codex model id from the account's model list; empty uses the Codex default.
     pub codex_model: String,
+    /// The Codex and Claude Code executables the user located; empty finds them automatically
+    /// (see `cli_path`). A location that is no longer usable is skipped.
+    pub codex_path: String,
+    pub claude_path: String,
     /// Preset id from `providers::PRESETS` used with "Your API key".
     pub api_provider: String,
     /// Model chosen per API provider, so switching providers keeps each choice.
@@ -98,6 +102,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             provider: Provider::default(), claude_model: ClaudeModel::default(), claude_models: BTreeMap::new(), codex_model: String::new(),
+            codex_path: String::new(), claude_path: String::new(),
             api_provider: "anthropic".into(), api_models: BTreeMap::new(), custom_base_url: String::new(), saved_keys: BTreeMap::new(),
             answer_style: AnswerStyle::default(), smart_mode: false, speculative_answers: false, auto_answer: false, transcribe: true, stt_provider: SttProvider::default(),
             use_gpu: true, listen_mic: true, listen_desktop: true,
@@ -166,11 +171,19 @@ impl Store {
                 None => store.warning = Some("Saved settings could not be read. Defaults are in use."),
             }
         }
+        store.publish_cli_paths();
         store
+    }
+
+    /// Hand the located CLIs to `cli_path`, which the CLIs resolve through.
+    fn publish_cli_paths(&self) {
+        crate::cli_path::set_chosen(crate::cli_path::Cli::Codex, &self.value.codex_path);
+        crate::cli_path::set_chosen(crate::cli_path::Cli::Claude, &self.value.claude_path);
     }
 
     /// Write to a temporary file, then rename over the old one so a crash never leaves half a file.
     pub fn save(&mut self) {
+        self.publish_cli_paths();
         let Some(path) = &self.path else { return };
         let result = (|| -> std::io::Result<()> {
             fs::create_dir_all(path.parent().expect("settings path has a parent"))?;
@@ -225,6 +238,7 @@ mod tests {
         assert!(!partial.speculative_answers && !partial.auto_answer, "speculative answers are opt-in");
         assert!(partial.transcribe);
         assert!(partial.use_gpu, "the GPU is on unless turned off");
+        assert!(partial.codex_path.is_empty() && partial.claude_path.is_empty(), "the CLIs are found automatically");
         assert_eq!(partial.sources(), Source::ALL);
         assert_eq!(Settings { listen_mic: false, ..Settings::default() }.sources(), [Source::Them]);
         assert_eq!(partial.devices(), crate::audio::Devices::default());
