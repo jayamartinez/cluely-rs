@@ -1,7 +1,8 @@
 //! The Modes page, laid out like the Paper "Modes v2" and "Modes v3" artboards: the modes in a
 //! sidebar by group, and the selected one's meeting context and files beside it, with a footer to
-//! make it active. macOS shows it in the Settings window ("macOS · Settings window · Modes"); Windows
-//! will show the same page in a Modes window of its own ("Modes v3 · Windows · Modes window").
+//! make it active. macOS shows it in the Settings window ("macOS · Settings window · Modes");
+//! Windows in its own Modes window (`modes_window`, "Modes v3 · Windows · Modes window"), with a
+//! short summary in the overlay's Settings panel.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -51,7 +52,7 @@ struct Look {
     context_hint: &'static str,
 }
 
-/// The macOS Settings window's layout, which the Windows Modes window shares.
+/// The macOS Settings window and the Windows Modes window share one layout.
 const LOOK: Look = Look {
     sidebar: 240.0, sidebar_bg: 0x121316, sidebar_pad: (12.0, 8.0, 12.0), sidebar_gap: 3.0, row_selected: 0x1f2124,
     detail_pad: (22.0, 28.0, 20.0), detail_gap: 20.0, title: (20.0, 24.0), title_icon: 40.0, more: 30.0,
@@ -184,8 +185,8 @@ fn primary_button(id: &'static str, text: &'static str) -> Stateful<Div> {
         .text_size(px(13.0)).line_height(px(16.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::accent_ink()).child(text)
 }
 
-/// Run `f` on the overlay from a click in any window (the overlay or the macOS Settings window),
-/// giving the keyboard to `focus` in the window that was clicked.
+/// Run `f` on the overlay from a click in any window (the overlay, the macOS Settings window or the
+/// Windows Modes window), giving the keyboard to `focus` in the window that was clicked.
 fn on_click(cx: &Context<Overlay>, focus: Option<FocusHandle>, f: impl Fn(&mut Overlay, &mut Context<Overlay>) + 'static)
     -> impl Fn(&gpui::MouseDownEvent, &mut Window, &mut App) + 'static {
     let this = cx.weak_entity();
@@ -547,6 +548,39 @@ impl Overlay {
         deferred(div().id("delete-scrim").absolute().inset_0().flex().items_center().justify_center().bg(rgba(0x0000008c))
             .on_mouse_down(MouseButton::Left, on_click(cx, None, |this, cx| { this.modes_ui.popover = None; cx.notify(); }))
             .child(card.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())))
+    }
+
+    /// Windows: Settings › Modes in the overlay's panel is a summary; the Modes window manages them.
+    pub(crate) fn modes_summary(&self, cx: &mut Context<Self>) -> AnyElement {
+        let active = self.modes.active();
+        let mut detail = subtitle(active);
+        if !active.files.is_empty() { detail.push_str(&format!(" · {} file{}", active.files.len(), if active.files.len() == 1 { "" } else { "s" })); }
+        let custom = self.modes.modes().iter().filter(|mode| mode.builtin.is_none()).count();
+        let count = format!("{} built-in modes and {custom} of yours · switch anytime from the mode chip", modes::BUILTINS.len());
+        div().flex().flex_col().gap(px(12.0))
+            .child(label("ACTIVE MODE"))
+            .child(div().flex().items_center().gap(px(12.0)).px(px(14.0)).py(px(12.0)).rounded(px(12.0)).bg(theme::field()).border_1().border_color(theme::hairline())
+                .child(div().size(px(40.0)).flex_none().flex().items_center().justify_center().rounded(px(10.0)).bg(theme::raised())
+                    .border_1().border_color(theme::hairline()).child(mode_icon(active.icon, 18.0, theme::text())))
+                .child(div().flex().flex_col().gap(px(2.0)).flex_1().min_w_0()
+                    .child(div().truncate().text_size(px(15.0)).line_height(px(20.0)).font_weight(FontWeight::BOLD).text_color(theme::text()).child(active.name.clone()))
+                    .child(div().text_size(px(12.0)).line_height(px(16.0)).text_color(theme::muted()).child(detail)))
+                .child(div().flex().flex_none().items_center().gap(px(6.0)).px(px(10.0)).py(px(4.0)).rounded_full().bg(theme::bubble())
+                    .border_1().border_color(theme::bubble_border())
+                    .child(ui::icon("icons/check.svg", 11.0, theme::accent_soft()))
+                    .child(div().text_size(px(12.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::accent_soft()).child("Active"))))
+            .child(div().flex().items_center().justify_between().gap(px(12.0)).pt(px(4.0))
+                .child(div().flex_1().min_w_0().text_size(px(12.0)).line_height(px(16.0)).text_color(theme::muted()).child(count))
+                .child(primary_button("open-modes", "Open Modes…")
+                    .on_mouse_down(MouseButton::Left, on_click(cx, None, |this, cx| this.open_modes_window(None, cx)))))
+            .into_any_element()
+    }
+
+    /// Open the Windows Modes window on `mode` (the active one when `None`), or bring it forward.
+    pub(crate) fn open_modes_window(&mut self, mode: Option<&str>, cx: &mut Context<Self>) {
+        let id = mode.map(str::to_string).unwrap_or_else(|| self.modes.active().id.clone());
+        self.select_mode(&id, cx);
+        crate::modes_window::open(self, cx);
     }
 
     /// The menu's shortcuts, while the tab itself (not a text field) has the keyboard.

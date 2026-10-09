@@ -174,6 +174,8 @@ pub struct Overlay {
     pub(crate) modes_ui: crate::modes_view::ModesUi,
     /// Update checks: what Settings › About shows and the notice above the text box (`update_notice`).
     pub(crate) updates: crate::update::Tracker,
+    /// Windows: the Modes window, while it's open.
+    pub(crate) modes_window: Option<gpui::WindowHandle<crate::modes_window::ModesWindow>>,
 }
 
 impl Overlay {
@@ -266,7 +268,7 @@ impl Overlay {
             listening: None, listening_status: None, listening_epoch: 0, transcript: Vec::new(), provisional: Default::default(), levels: Default::default(),
             model_installed: false, model_download: None, model_notice: None,
             open_picker: None, reveal_accounts: false, devices: None, devices_loading: false, archive_bytes: None, picker_face: Rc::default(), toggle_hover: None,
-            collapse: None, settings_height: Rc::default(), modes_ui, modes, updates: Default::default() };
+            collapse: None, settings_height: Rc::default(), modes_ui, modes, updates: Default::default(), modes_window: None };
         overlay.refresh_model_status();
         overlay.mark_existing_keys(window, cx);
         #[cfg(target_os = "macos")]

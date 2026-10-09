@@ -554,13 +554,13 @@ impl Render for SessionsWindow {
         };
         // A normal, opaque window with its own title bar: Sessions is a workspace, not an overlay.
         div().size_full().flex().flex_col().bg(rgb(0x0f1012)).font_family(theme::FONT).text_color(theme::text())
-            .child(title_bar())
+            .child(title_bar("Sessions"))
             .child(content)
     }
 }
 
 /// Drag area with the app mark, the window's name and its own minimize / maximize / close.
-fn title_bar() -> impl IntoElement {
+pub(crate) fn title_bar(title: &'static str) -> impl IntoElement {
     let control = |id: &'static str, icon: &'static str, danger: bool| {
         div().id(id).w(px(46.0)).h(px(36.0)).flex().items_center().justify_center().cursor_pointer()
             .hover(move |button| if danger { button.bg(rgb(0xc42b1c)).text_color(rgb(0xffffff)) } else { button.bg(theme::raised()) })
@@ -571,7 +571,7 @@ fn title_bar() -> impl IntoElement {
         .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())
         .child(div().flex().items_center().gap(px(8.0))
             .child(crate::ui::mark(16.0))
-            .child(div().text_size(px(12.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::body()).child("Sessions")))
+            .child(div().text_size(px(12.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::body()).child(title)))
         .child(div().flex().h_full()
             .child(control("minimize", "icons/minimize.svg", false).on_mouse_down(MouseButton::Left, |_, window, cx| { cx.stop_propagation(); window.minimize_window(); }))
             .child(control("maximize", "icons/maximize.svg", false).on_mouse_down(MouseButton::Left, |_, window, cx| { cx.stop_propagation(); window.zoom_window(); }))
