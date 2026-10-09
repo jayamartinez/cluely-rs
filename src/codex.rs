@@ -856,6 +856,11 @@ pub fn executable() -> Result<PathBuf, String> {
     SystemLauncher.resolve().map_err(|error| error.message)
 }
 
+/// Whether a file the user picked can be used as the Codex CLI, by the rules of the search.
+pub fn check_location(path: &Path) -> Result<(), String> {
+    located(path).map(drop).ok_or_else(|| "That isn't the Codex CLI.".to_string())
+}
+
 impl Launcher for SystemLauncher {
     fn resolve(&self) -> Result<PathBuf, CodexError> {
         let env = |key: &str| if key == "PATH" { Some(cli_path::search_path()) } else { std::env::var_os(key) };
@@ -1077,8 +1082,7 @@ fn resolve_candidate(file: &Path) -> Option<PathBuf> {
 /// only followed to the native binary of the official npm package; they are never executed.
 fn resolve_executable(env: &dyn Fn(&str) -> Option<OsString>, chosen: Option<&Path>) -> Result<PathBuf, CodexError> {
     target().ok_or_else(|| err(Kind::NotInstalled))?;
-    let accept = |candidate: &Path| resolve_candidate(candidate).filter(|path| !is_launcher_script(path));
-    if let Some(found) = chosen.filter(|path| path.is_absolute()).and_then(accept) {
+    if let Some(found) = chosen.and_then(located) {
         return Ok(found);
     }
     if let Some(supplied) = env("CODEX_PATH").filter(|value| !value.is_empty()) {
@@ -1087,8 +1091,9 @@ fn resolve_executable(env: &dyn Fn(&str) -> Option<OsString>, chosen: Option<&Pa
         if text.contains(['\0', '\r', '\n']) || !path.is_absolute() {
             return Err(err(Kind::PathInvalid));
         }
-        return accept(path).ok_or_else(|| err(Kind::NotInstalled));
+        return located(path).ok_or_else(|| err(Kind::NotInstalled));
     }
+    let accept = |candidate: &Path| resolve_candidate(candidate).filter(|path| !is_launcher_script(path));
     let names =
         if cfg!(windows) { cli_path::file_names("codex", &["exe", "cmd", "ps1", ""], env("PATHEXT").as_deref()) } else { vec!["codex".to_string()] };
     if let Some(found) = env("PATH").and_then(|path| cli_path::find_in(&path, &names, accept)) {
@@ -1104,6 +1109,12 @@ fn resolve_executable(env: &dyn Fn(&str) -> Option<OsString>, chosen: Option<&Pa
         }
     }
     Err(err(Kind::NotInstalled))
+}
+
+/// The native binary for a location given in full (Settings, CODEX_PATH): absolute, and a native
+/// binary or an official npm launcher, which is followed to its binary and never run.
+fn located(path: &Path) -> Option<PathBuf> {
+    path.is_absolute().then(|| resolve_candidate(path)).flatten().filter(|found| !is_launcher_script(found))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1483,11 +1494,15 @@ impl CodexClient {
     /// Starts the app-server if needed and reads account state. Never panics; errors go in `error`.
     pub fn status(&self) -> SubscriptionStatus {
         let mut status = SubscriptionStatus::default();
-        if let Err(error) = self.launcher.resolve() {
-            status.error = Some(error.message);
-            return status;
-        }
+        let path = match self.launcher.resolve() {
+            Ok(path) => path,
+            Err(error) => {
+                status.error = Some(error.message);
+                return status;
+            }
+        };
         status.installed = true;
+        status.custom_location = cli_path::chosen(Cli::Codex).and_then(|chosen| located(&chosen)).is_some_and(|chosen| chosen == path);
         let result = self.connection().and_then(|connection| Ok((self.read_account(&connection)?, connection)));
         match result {
             Err(error) => status.error = Some(error.message),
@@ -2539,6 +2554,14 @@ pub(crate) mod tests {
         for unusable in [dir.join("gone").join("codex"), PathBuf::from("codex"), dir.join("chosen")] {
             assert_eq!(resolve_executable(&env(None), Some(unusable.as_path())).unwrap(), on_path, "{unusable:?}");
         }
+        // A picked file is checked by the same rules: the executable passes; a folder, a missing
+        // file, a relative path or a launcher script doesn't, with a short reason.
+        assert_eq!(check_location(&chosen), Ok(()));
+        let script = dir.join("codex.ps1");
+        std::fs::write(&script, "").unwrap();
+        for unusable in [dir.join("chosen"), dir.join("gone").join("codex"), PathBuf::from("codex"), script] {
+            assert_eq!(check_location(&unusable), Err("That isn't the Codex CLI.".to_string()), "{unusable:?}");
+        }
         let nowhere = |key: &str| (key == "PATH").then(|| dir.join("empty").into_os_string());
         let missing = resolve_executable(&nowhere, None).unwrap_err();
         assert_eq!((missing.kind, missing.message.as_str()), (Kind::NotInstalled, "Install the Codex CLI, or set CODEX_PATH to its executable."));
@@ -2577,7 +2600,7 @@ pub(crate) mod tests {
         let launcher = Arc::new(FakeLauncher::new(server(chatgpt(), good_thread(), vec![])));
         let status = client(&launcher).status();
         assert_eq!(status, SubscriptionStatus {
-            installed: true, signed_in: true, account: Some("me@example.com".into()), plan: Some("plus".into()),
+            installed: true, custom_location: false, signed_in: true, account: Some("me@example.com".into()), plan: Some("plus".into()),
             models: vec![("gpt-5".into(), "GPT-5".into())], default_model: Some("gpt-5".into()), error: None,
         });
         assert_eq!(methods(&launcher), ["initialize", "initialized", "account/read", "model/list"]);

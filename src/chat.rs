@@ -26,6 +26,8 @@ pub struct ChatRequest {
 pub struct SubscriptionStatus {
     /// The official CLI was found on this PC.
     pub installed: bool,
+    /// The CLI in use is the one chosen in Settings, not one found automatically.
+    pub custom_location: bool,
     pub signed_in: bool,
     /// Email or account label, when the CLI reports one.
     pub account: Option<String>,

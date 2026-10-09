@@ -239,6 +239,8 @@ mod tests {
         assert!(partial.transcribe);
         assert!(partial.use_gpu, "the GPU is on unless turned off");
         assert!(partial.codex_path.is_empty() && partial.claude_path.is_empty(), "the CLIs are found automatically");
+        let located: Settings = serde_json::from_str(r#"{"codexPath":"/opt/tools/codex","claudePath":""}"#).unwrap();
+        assert_eq!((located.codex_path.as_str(), located.claude_path.as_str()), ("/opt/tools/codex", ""));
         assert_eq!(partial.sources(), Source::ALL);
         assert_eq!(Settings { listen_mic: false, ..Settings::default() }.sources(), [Source::Them]);
         assert_eq!(partial.devices(), crate::audio::Devices::default());

@@ -51,6 +51,7 @@ const POLL: Duration = Duration::from_millis(50);
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 const NOT_FOUND: &str = "Install the native Claude Code CLI, or set CLAUDE_PATH to its executable. Script launchers (.cmd, .bat, .ps1, .js) are not supported.";
+const NOT_CLAUDE: &str = "That isn't the Claude Code CLI.";
 const BAD_CLAUDE_PATH: &str = "CLAUDE_PATH must be the absolute path of the native Claude Code executable, without arguments.";
 const COULD_NOT_START: &str = "Claude Code could not start.";
 const INPUT_INVALID: &str = "Provide text or an attached image for the assistant.";
@@ -78,6 +79,11 @@ impl ClaudeCli {
         resolve_executable()
     }
 
+    /// Whether a file the user picked can be used as Claude Code, by the rules of the search.
+    pub fn check_location(path: &Path) -> Result<(), String> {
+        if path.is_absolute() && usable_on_disk(path) { Ok(()) } else { Err(NOT_CLAUDE.into()) }
+    }
+
     /// Reads the CLI's sign-in state with `claude auth status --json`.
     pub fn status() -> SubscriptionStatus {
         let mut status = SubscriptionStatus { models: models(), ..SubscriptionStatus::default() };
@@ -89,9 +95,10 @@ impl ClaudeCli {
             }
         };
         status.installed = true;
+        status.custom_location = cli_path::chosen(Cli::Claude).is_some_and(|chosen| chosen == exe);
         let args = ["auth", "status", "--json"].map(String::from);
         match collect(&exe, &args, STATUS_TIMEOUT) {
-            Ok(output) => parse_status(&output),
+            Ok(output) => SubscriptionStatus { custom_location: status.custom_location, ..parse_status(&output) },
             Err(message) => {
                 status.error = Some(message);
                 status
@@ -124,9 +131,9 @@ impl ClaudeCli {
         if system.chars().count() > MAX_SYSTEM { return Err("The assistant instructions are too large.".into()); }
         let exe = resolve_executable()?;
         let args = fit_command_line(&exe, stream_args(system, model, effort), COMMAND_LINE_LIMIT, prompt_dir().as_deref())?;
-        if spare.as_mut().is_some_and(|ready| ready.usable_for(&args)) { return Ok(()); }
+        if spare.as_mut().is_some_and(|ready| ready.usable_for(&exe, &args)) { return Ok(()); }
         *spare = None;
-        *spare = Some(Spare { running: Some(launch(&exe, &args, true, true)?), args, started: Instant::now() });
+        *spare = Some(Spare { running: Some(launch(&exe, &args, true, true)?), exe, args, started: Instant::now() });
         Ok(())
     }
 
@@ -147,7 +154,7 @@ impl ClaudeCli {
         if cancel.load(Ordering::SeqCst) {
             return Err(CANCELLED.into());
         }
-        let ready = spare.take().and_then(|mut ready| if ready.usable_for(&args) { ready.running.take() } else { None });
+        let ready = spare.take().and_then(|mut ready| if ready.usable_for(&exe, &args) { ready.running.take() } else { None });
         let mut running = match ready { Some(running) => running, None => launch(&exe, &args, true, true)? };
         let result = run_stream(&mut running, line, cancel, on_delta);
         if let Some(id) = running.model.take() { remember_model(model.unwrap_or(DEFAULT_ALIAS), &id); }
@@ -155,7 +162,7 @@ impl ClaudeCli {
         // on failure or cancellation it is killed immediately.
         reap(running, if result.is_ok() { EXIT_GRACE } else { Duration::ZERO });
         if refill && let Ok(next) = launch(&exe, &args, true, true) {
-            *spare = Some(Spare { running: Some(next), args, started: Instant::now() });
+            *spare = Some(Spare { running: Some(next), exe, args, started: Instant::now() });
         }
         result
     }
@@ -165,6 +172,8 @@ impl ClaudeCli {
 /// It holds no conversation; it is killed when dropped.
 pub struct Spare {
     running: Option<Running>,
+    /// The executable it runs: a spare from before the CLI's location changed is never used.
+    exe: PathBuf,
     args: Vec<String>,
     started: Instant,
 }
@@ -173,9 +182,9 @@ pub struct Spare {
 const SPARE_MAX_AGE: Duration = Duration::from_secs(10 * 60);
 
 impl Spare {
-    /// Started with exactly these arguments, recently, and still waiting.
-    fn usable_for(&mut self, args: &[String]) -> bool {
-        self.args == args && self.started.elapsed() < SPARE_MAX_AGE
+    /// Started from `exe` with exactly these arguments, recently, and still waiting.
+    fn usable_for(&mut self, exe: &Path, args: &[String]) -> bool {
+        self.exe == exe && self.args == args && self.started.elapsed() < SPARE_MAX_AGE
             && self.running.as_mut().is_some_and(|running| matches!(running.child.try_wait(), Ok(None)))
     }
 }
@@ -1011,24 +1020,25 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn a_spare_serves_only_matching_requests_and_dies_with_its_owner() {
+        let exe = PathBuf::from(std::env::var_os("ComSpec").unwrap_or_else(|| "C:\\Windows\\System32\\cmd.exe".into()));
         let waiting = |args: &[String]| {
-            let exe = PathBuf::from(std::env::var_os("ComSpec").unwrap_or_else(|| "C:\\Windows\\System32\\cmd.exe".into()));
             let running = launch(&exe, &["/c".into(), "ping".into(), "-n".into(), "30".into(), "127.0.0.1".into()], true, true).unwrap();
-            Spare { running: Some(running), args: args.to_vec(), started: Instant::now() }
+            Spare { running: Some(running), exe: exe.clone(), args: args.to_vec(), started: Instant::now() }
         };
         let fast = stream_args("Be brief.", Some("sonnet"), Effort::Fast);
         let smart = stream_args("Be brief.", Some("sonnet"), Effort::Smart);
         let mut spare = waiting(&fast);
-        assert!(spare.usable_for(&fast));
-        assert!(!spare.usable_for(&smart), "Smart mode or another model needs another process");
+        assert!(spare.usable_for(&exe, &fast));
+        assert!(!spare.usable_for(&exe, &smart), "Smart mode or another model needs another process");
+        assert!(!spare.usable_for(Path::new("C:\\Other\\claude.exe"), &fast), "a spare from another location isn't used");
         let mut stale = waiting(&fast);
         stale.started = Instant::now() - SPARE_MAX_AGE;
-        assert!(!stale.usable_for(&fast));
+        assert!(!stale.usable_for(&exe, &fast));
 
         let child = spare.running.as_mut().unwrap();
         let _ = child.child.kill();
         let _ = child.child.wait();
-        assert!(!spare.usable_for(&fast), "an exited process is never used");
+        assert!(!spare.usable_for(&exe, &fast), "an exited process is never used");
 
         let mut owned = Some(waiting(&fast));
         let pid = owned.as_ref().unwrap().running.as_ref().unwrap().child.id();
@@ -1298,8 +1308,16 @@ mod tests {
         std::fs::write(&claude, "#!/bin/sh\nexit 0\n").unwrap();
         let path_var = std::env::join_paths([dir.join("empty"), bin.clone()]).unwrap();
         assert_eq!(resolve_with(None, None, Some(dir.join("home")), Some(path_var.clone()), &usable_on_disk), Err(NOT_FOUND.into()), "not executable");
+        assert_eq!(ClaudeCli::check_location(&claude), Err(NOT_CLAUDE.into()), "a picked file is checked the same way");
         std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
-        assert_eq!(resolve_with(None, None, Some(dir.join("home")), Some(path_var), &usable_on_disk), Ok(claude));
+        assert_eq!(resolve_with(None, None, Some(dir.join("home")), Some(path_var), &usable_on_disk), Ok(claude.clone()));
+        assert_eq!(ClaudeCli::check_location(&claude), Ok(()));
+        let script = bin.join("claude.sh");
+        std::fs::write(&script, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        for unusable in [script, bin.clone(), PathBuf::from("claude")] {
+            assert_eq!(ClaudeCli::check_location(&unusable), Err(NOT_CLAUDE.into()), "{unusable:?}");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
