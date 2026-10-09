@@ -178,22 +178,26 @@ pub fn cursor_in_window(window: NativeWindow) -> Option<(i32, i32)> {
     Some((x.round() as i32, y.round() as i32))
 }
 
-/// Give the overlay the keyboard, returning the app that had it. Allowed because it follows a hotkey
-/// press or a click.
-pub fn take_focus(window: NativeWindow) -> Option<PreviousFocus> {
+/// Give the overlay the keyboard, then call `taken` with the app that had it. Allowed because it
+/// follows a hotkey press or a click. Keyboard input goes to the active app, so CluelyRS is activated
+/// first (as SetForegroundWindow does on Windows) and the panel becomes key only once it is, which also
+/// avoids GPUI's deadlock (see [`activate_then`]). If macOS doesn't activate CluelyRS, or the overlay
+/// was hidden meanwhile, the panel isn't made key: the app that had the keyboard keeps it and `taken`
+/// isn't called.
+pub fn take_focus(window: NativeWindow, cx: &mut App, taken: impl FnOnce(Option<PreviousFocus>, &mut App) + 'static) {
+    // Asked now: once CluelyRS is active, it is the frontmost app itself.
     let own = std::process::id() as i32;
     let previous = NSWorkspace::sharedWorkspace().frontmostApplication().map(|app| app.processIdentifier()).filter(|pid| *pid != own);
-    // Keyboard input goes to the active app, so activate CluelyRS (as SetForegroundWindow does on
-    // Windows) before making the panel key. Activating first also keeps GPUI from seeing a key
-    // window in an inactive app, which it handles by resigning key status under a lock (a deadlock).
-    if let Some(mtm) = MainThreadMarker::new() {
-        // `activate()` exists only from macOS 14.
-        #[allow(deprecated)]
-        NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
-    }
-    window.get().makeKeyAndOrderFront(None);
-    window.get().makeFirstResponder(Some(window.view()));
-    previous.map(|pid| PreviousFocus { pid, overlay: window })
+    activate_then(cx, move |active, cx| {
+        if !active {
+            eprintln!("CluelyRS was not made the active app, so the overlay can't take the keyboard");
+            return;
+        }
+        if !is_visible(window) { return; }
+        window.get().makeKeyAndOrderFront(None);
+        window.get().makeFirstResponder(Some(window.view()));
+        taken(previous.map(|pid| PreviousFocus { pid, overlay: window }), cx);
+    });
 }
 
 /// Hand the keyboard back to the app `take_focus` returned. That app usually stayed frontmost, so

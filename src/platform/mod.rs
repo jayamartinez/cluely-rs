@@ -4,7 +4,8 @@
 //! OS only through this module.
 //!
 //! Each platform file provides the same items: `NativeWindow`, `PreviousFocus`, `Shape` and
-//! the functions `overlay` and `sessions_window` call. macOS also provides system audio capture
+//! the functions `overlay` and `sessions_window` call, though macOS's `take_focus` calls back once
+//! CluelyRS is the active app rather than returning at once. macOS also provides system audio capture
 //! (`SystemAudio`), which `audio::capture` uses where Windows has WASAPI loopback.
 
 /// Showing and hiding the overlay fades it over this long; showing also settles it `POP_DISTANCE`
