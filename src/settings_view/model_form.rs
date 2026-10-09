@@ -59,11 +59,11 @@ impl ModelUi {
             }
         }).detach();
         cx.subscribe_in(key_input, window, |this, _, event, window, cx| {
-            if matches!(event, InputEvent::Submit) { this.save_key_and_load(window, cx); }
+            if matches!(event, InputEvent::Submit) { this.save_key(window, cx); }
         }).detach();
         // A custom endpoint's models load once its URL is entered, not on every keystroke.
         cx.subscribe_in(base_url_input, window, |this, _, event, window, cx| {
-            if matches!(event, InputEvent::Submit) { this.ensure_models(true, window, cx); }
+            if matches!(event, InputEvent::Submit) { this.ensure_models(true, true, window, cx); }
         }).detach();
         Self { search, key_editing: false, other: false, target: None, loaded_for: None, error: None, face: Rc::default() }
     }
@@ -80,7 +80,9 @@ impl Overlay {
 
     /// Load the selected provider's models when they aren't loaded yet and can be: a key is saved
     /// (or none is needed) and, for a custom endpoint, its URL was entered (`include_custom`).
-    pub(crate) fn ensure_models(&mut self, include_custom: bool, window: &mut Window, cx: &mut Context<Self>) {
+    /// Loading reads a saved key, which can show a Keychain prompt, so for providers that need one
+    /// it happens only after a user action (`user_action`), never because Settings opened.
+    pub(crate) fn ensure_models(&mut self, include_custom: bool, user_action: bool, window: &mut Window, cx: &mut Context<Self>) {
         if self.store.value.provider != Provider::ApiKey { return; }
         let Some((preset, base)) = self.endpoint() else { return };
         let target = format!("{}\n{base}", preset.id);
@@ -93,7 +95,7 @@ impl Overlay {
         }
         if self.models_loading || base.is_empty() || self.model_ui.loaded_for.as_deref() == Some(target.as_str()) { return; }
         if preset.base_url.is_empty() && !include_custom { return; }
-        if preset.needs_key && crate::secrets::get(preset.id).is_none() { return; }
+        if preset.needs_key && (!user_action || !self.store.value.saved_keys.contains_key(preset.id)) { return; }
         self.model_ui.loaded_for = Some(target);
         self.load_models(window, cx);
     }
@@ -101,7 +103,7 @@ impl Overlay {
     /// A list finished loading after the provider changed: load the current provider's instead.
     pub(crate) fn models_stale(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.model_ui.loaded_for = None;
-        self.ensure_models(false, window, cx);
+        self.ensure_models(false, true, window, cx);
     }
 
     pub(crate) fn models_loaded(&mut self, preset: &Preset, result: Result<Vec<String>, ProviderError>) {
@@ -119,22 +121,20 @@ impl Overlay {
     fn retry_models(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.model_ui.loaded_for = None;
         self.model_ui.error = None;
-        self.ensure_models(true, window, cx);
+        self.ensure_models(true, true, window, cx);
     }
 
-    /// Save the typed key; once it is stored, leave the key field and load the provider's models.
-    fn save_key_and_load(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.key_input.read(cx).text().trim().is_empty() { return; }
-        self.save_key(cx);
-        // `save_key` empties the field only when the key was stored.
-        if !self.key_input.read(cx).text().is_empty() { return; }
-        self.key_notice = None;
+    /// A key was stored: leave the key field and, for the API provider, load its models.
+    pub(crate) fn key_saved(&mut self, provider: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.model_ui.key_editing = false;
-        self.retry_models(window, cx);
+        if provider == self.store.value.api_provider {
+            self.key_notice = None;
+            self.retry_models(window, cx);
+        }
     }
 
-    fn remove_key_and_reset(&mut self, cx: &mut Context<Self>) {
-        self.remove_key(cx);
+    fn remove_key_and_reset(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.remove_key(window, cx);
         self.model_ui.key_editing = false;
         self.model_ui.loaded_for = None;
         self.model_ui.error = None;
@@ -207,7 +207,7 @@ impl Overlay {
     /// The saved key (masked) with Replace and Remove, or the key field with its eye and Save.
     fn key_control(&self, preset: &'static Preset, cx: &mut Context<Self>) -> Div {
         let column = div().flex().flex_col().gap(px(6.0));
-        let saved = crate::secrets::hint(preset.id);
+        let saved = self.store.value.saved_keys.get(preset.id).cloned();
         if let Some(hint) = saved.as_ref().filter(|_| !self.model_ui.key_editing) {
             let revealed = self.revealed_key(preset.id);
             let shown: gpui::AnyElement = match revealed {
@@ -240,10 +240,10 @@ impl Overlay {
                 .child(div().flex().gap(px(10.0)).text_size(px(11.0))
                     .child(status)
                     .child(div().id("remove-key").cursor_pointer().text_color(rgb(0xffb4a8))
-                        .on_mouse_down(MouseButton::Left, listen(cx, |this, _, _, cx| this.remove_key_and_reset(cx))).child("Remove")));
+                        .on_mouse_down(MouseButton::Left, listen(cx, |this, _, window, cx| this.remove_key_and_reset(window, cx))).child("Remove")));
         }
         let input = text_box(&self.key_input, "key-box").flex().items_center().gap(px(6.0)).pr(px(5.0)).child(key_eye(&self.key_input, cx));
-        let save = button("save-key", "Save", true).on_mouse_down(MouseButton::Left, listen(cx, |this, _, window, cx| this.save_key_and_load(window, cx)));
+        let save = button("save-key", "Save", true).on_mouse_down(MouseButton::Left, listen(cx, |this, _, window, cx| this.save_key(window, cx)));
         let mut note = div().flex().gap(px(10.0)).text_size(px(11.0)).text_color(theme::muted());
         if let Some(notice) = self.key_notice.clone() {
             note = note.child(div().text_color(theme::accent_soft()).child(notice));
@@ -266,7 +266,7 @@ impl Overlay {
     fn model_control(&self, preset: &'static Preset, cx: &mut Context<Self>) -> Div {
         let s = &self.store.value;
         let column = div().flex().flex_col().gap(px(6.0));
-        if preset.needs_key && crate::secrets::get(preset.id).is_none() {
+        if preset.needs_key && !s.saved_keys.contains_key(preset.id) {
             return column.child(idle_face("Save a key to see models"));
         }
         if preset.base_url.is_empty() && s.custom_base_url.trim().is_empty() {
@@ -303,10 +303,12 @@ impl Overlay {
         let error = self.model_ui.error.is_some() && picker == Picker::ApiModel;
         let face_cell = self.model_ui.face.clone();
         let search = self.model_ui.search.clone();
-        let toggle = listen(cx, move |this, _: &MouseDownEvent, _, cx| {
+        let toggle = listen(cx, move |this, _: &MouseDownEvent, window, cx| {
             cx.stop_propagation();
             this.model_ui.search.update(cx, |input, cx| input.clear(cx));
             this.toggle_picker(picker, cx);
+            // Opening the list is the user action that may read a saved key to load it.
+            if picker == Picker::ApiModel && this.open_picker == Some(picker) { this.ensure_models(true, true, window, cx); }
         });
         let face = ui::picker(("model-face", picker as usize), value, open).relative()
             .when(error && !open, |face| face.border_color(rgb(0x6b3a33)))

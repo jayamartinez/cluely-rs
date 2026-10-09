@@ -1,5 +1,6 @@
 //! Non-secret preferences, persisted atomically as JSON in the user's config folder.
-//! API keys never live here; they go to the OS credential store with the provider slice.
+//! API keys never live here; they go to the OS credential store with the provider slice. Only
+//! which providers have one saved, with its masked hint, is kept here (`saved_keys`).
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -50,6 +51,9 @@ pub struct Settings {
     pub api_models: BTreeMap<String, String>,
     /// Base URL for the "custom" OpenAI-compatible provider.
     pub custom_base_url: String,
+    /// Providers with a key in the OS credential store, each with its masked hint ("••••3f9a"),
+    /// so Settings can show the saved key without reading the store. Never the key itself.
+    pub saved_keys: BTreeMap<String, String>,
     pub answer_style: AnswerStyle,
     /// Slower, deeper reasoning for answers. Off answers with the least reasoning the provider
     /// offers, so the first words arrive as fast as possible.
@@ -94,7 +98,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             provider: Provider::default(), claude_model: ClaudeModel::default(), claude_models: BTreeMap::new(), codex_model: String::new(),
-            api_provider: "anthropic".into(), api_models: BTreeMap::new(), custom_base_url: String::new(),
+            api_provider: "anthropic".into(), api_models: BTreeMap::new(), custom_base_url: String::new(), saved_keys: BTreeMap::new(),
             answer_style: AnswerStyle::default(), smart_mode: false, speculative_answers: false, auto_answer: false, transcribe: true, stt_provider: SttProvider::default(),
             use_gpu: true, listen_mic: true, listen_desktop: true,
             mic_device: String::new(), desktop_device: String::new(),
@@ -160,6 +164,15 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saved_keys_are_markers_with_hints_only() {
+        let settings = Settings { saved_keys: [("anthropic".to_string(), "••••3f9a".to_string())].into(), ..Settings::default() };
+        let json = serde_json::to_string(&settings).unwrap();
+        assert!(json.contains(r#""savedKeys":{"anthropic":"••••3f9a"}"#));
+        let older: Settings = serde_json::from_str(r#"{"provider":"apiKey"}"#).unwrap();
+        assert!(older.saved_keys.is_empty(), "settings saved before markers existed have none");
+    }
 
     #[test]
     fn missing_fields_take_defaults_and_retired_fields_are_ignored() {

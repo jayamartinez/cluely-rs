@@ -228,7 +228,7 @@ impl Overlay {
             if matches!(event, InputEvent::Changed) { cx.notify(); }
         }).detach();
         #[cfg(not(target_os = "macos"))]
-        cx.subscribe_in(&key_input, window, |this, _, event, _, cx| { if matches!(event, InputEvent::Submit) { this.save_key(cx); } }).detach();
+        cx.subscribe_in(&key_input, window, |this, _, event, window, cx| { if matches!(event, InputEvent::Submit) { this.save_key(window, cx); } }).detach();
         cx.subscribe_in(&model_input, window, |this, input, event, window, cx| {
             if matches!(event, InputEvent::Changed) {
                 let model = input.read(cx).text().trim().to_string();
@@ -297,9 +297,11 @@ impl Overlay {
             || previous.mic_device != now.mic_device || previous.desktop_device != now.desktop_device || previous.use_gpu != now.use_gpu {
             self.restart_listening_if_live(window, cx);
         }
-        // A new provider (or saved model) may need its list.
+        // Choosing another provider loads its list (a user action, so it may read the saved key).
         #[cfg(target_os = "macos")]
-        self.ensure_models(false, window, cx);
+        if previous.api_provider != self.store.value.api_provider || previous.provider != self.store.value.provider {
+            self.ensure_models(false, true, window, cx);
+        }
         cx.notify();
     }
 
@@ -330,7 +332,7 @@ impl Overlay {
         self.key_reveal.hide();
         if tab == Tab::Model { self.refresh_subscriptions(window, cx); }
         #[cfg(target_os = "macos")]
-        if tab == Tab::Model { self.ensure_models(true, window, cx); }
+        if tab == Tab::Model { self.ensure_models(true, false, window, cx); }
         if tab == Tab::Listening { self.refresh_model_status(); self.load_devices(window, cx); }
         if tab == Tab::History { self.refresh_archive_size(window, cx); }
         if tab == Tab::Modes { self.prepare_modes_tab(cx); }
@@ -816,37 +818,85 @@ impl Overlay {
         if changed { self.store.save(); }
     }
 
-    pub fn save_key(&mut self, cx: &mut Context<Self>) {
+    /// Save the typed key for the tab's provider, then mark it saved (with its masked hint) in
+    /// Settings. The credential store is used on a background thread: it can block, and on macOS
+    /// show a Keychain prompt.
+    pub fn save_key(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let key = self.key_input.read(cx).text().trim().to_string();
         if key.is_empty() { return; }
         let provider = self.key_target();
-        self.key_notice = Some(match crate::secrets::set(&provider, &key) {
-            Ok(()) => { self.key_input.update(cx, |input, cx| input.clear(cx)); format!("Saved to {}.", crate::secrets::STORE_NAME).into() }
-            Err(error) => format!("Couldn't save the key: {error}").into(),
-        });
+        self.key_notice = Some("Saving…".into());
         cx.notify();
+        let target = provider.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let saved = cx.background_executor()
+                .spawn(async move { crate::secrets::set(&target, &key).map(|()| crate::secrets::masked(&key).unwrap_or_default()) }).await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                match saved {
+                    Ok(hint) => {
+                        this.key_input.update(cx, |input, cx| input.clear(cx));
+                        this.set_key_marker(&provider, Some(hint));
+                        this.key_notice = Some(format!("Saved to {}.", crate::secrets::STORE_NAME).into());
+                        #[cfg(target_os = "macos")]
+                        this.key_saved(&provider, window, cx);
+                    }
+                    Err(error) => this.key_notice = Some(format!("Couldn't save the key: {error}").into()),
+                }
+                // Only macOS loads models from here.
+                #[cfg(not(target_os = "macos"))]
+                let _ = window;
+                cx.notify();
+            });
+        }).detach();
     }
 
-    pub fn remove_key(&mut self, cx: &mut Context<Self>) {
+    /// Delete the tab's provider key, on a background thread, and its marker in Settings.
+    pub fn remove_key(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.key_reveal.hide();
         let provider = self.key_target();
-        self.key_notice = Some(match crate::secrets::remove(&provider) { Ok(()) => "Key removed.".into(), Err(_) => "No saved key to remove.".into() });
-        cx.notify();
+        let target = provider.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let removed = cx.background_executor().spawn(async move { crate::secrets::remove(&target) }).await;
+            let _ = this.update(cx, |this, cx| {
+                this.key_notice = Some(match removed {
+                    Ok(()) => { this.set_key_marker(&provider, None); "Key removed.".into() }
+                    Err(_) => "No saved key to remove.".into(),
+                });
+                cx.notify();
+            });
+        }).detach();
+    }
+
+    /// Record in Settings whether `provider` has a saved key, with its masked hint.
+    pub(crate) fn set_key_marker(&mut self, provider: &str, hint: Option<String>) {
+        let markers = &mut self.store.value.saved_keys;
+        let changed = match hint {
+            Some(hint) => markers.insert(provider.to_string(), hint.clone()).as_ref() != Some(&hint),
+            None => markers.remove(provider).is_some(),
+        };
+        if changed { self.store.save(); }
     }
 
     /// Fetch the provider's model list off the UI thread.
     pub fn load_models(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(preset) = crate::providers::preset(&self.store.value.api_provider) else { return };
         let base = if preset.base_url.is_empty() { self.store.value.custom_base_url.trim().to_string() } else { preset.base_url.to_string() };
-        let key = crate::secrets::get(preset.id);
         let wire = preset.wire;
         self.models_loading = true;
         self.key_notice = None;
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
-            let result = cx.background_executor().spawn(async move { crate::providers::list_models(wire, &base, key.as_deref()) }).await;
+            // The key is read here, off the UI thread (the credential store can block or prompt).
+            let (result, found) = cx.background_executor().spawn(async move {
+                let key = crate::secrets::get(preset.id);
+                let found = key.as_deref().and_then(crate::secrets::masked);
+                (crate::providers::list_models(wire, &base, key.as_deref()), found)
+            }).await;
             let _ = this.update_in(cx, |this, window, cx| {
                 this.models_loading = false;
+                // A key saved before markers existed is marked once it has been read. A key that
+                // can't be read leaves the marker alone: a denied Keychain prompt reads as no key.
+                if found.is_some() { this.set_key_marker(preset.id, found); }
                 // The provider changed while this list loaded: it belongs to the previous one.
                 if this.store.value.api_provider != preset.id {
                     #[cfg(target_os = "macos")]

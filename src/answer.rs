@@ -70,7 +70,8 @@ pub struct Job { pub events: UnboundedReceiver<Event>, pub cancel: Arc<AtomicBoo
 
 /// A ready-to-run request for whichever provider is selected.
 pub enum Target {
-    Api(Request),
+    /// The preset's saved key is read when the request runs, on its worker thread (`run`).
+    Api(Request, &'static providers::Preset),
     Claude(ChatRequest),
     Codex(ChatRequest, Arc<CodexClient>),
 }
@@ -118,11 +119,11 @@ pub fn target(settings: &Settings, codex: &Arc<CodexClient>, system: String, mes
             let preset = providers::preset(&settings.api_provider).ok_or("Choose an API provider in Settings → Model.")?;
             let base_url = if preset.base_url.is_empty() { settings.custom_base_url.trim().to_string() } else { preset.base_url.to_string() };
             if base_url.is_empty() { return Err("Add the base URL for your custom provider in Settings → Model.".into()); }
-            let api_key = crate::secrets::get(preset.id);
-            if preset.needs_key && api_key.is_none() { return Err(format!("Add your {} API key in Settings → Model.", preset.label)); }
+            // The marker, not the key: building runs on the UI thread, where the store is never read.
+            if preset.needs_key && !settings.saved_keys.contains_key(preset.id) { return Err(format!("Add your {} API key in Settings → Model.", preset.label)); }
             let model = settings.api_model().trim().to_string();
             if model.is_empty() { return Err(format!("Choose a {} model in Settings → Model.", preset.label)); }
-            Ok(Target::Api(Request { wire: preset.wire, base_url, api_key, model, system, messages, max_tokens, effort }))
+            Ok(Target::Api(Request { wire: preset.wire, base_url, api_key: None, model, system, messages, max_tokens, effort }, preset))
         }
     }
 }
@@ -130,7 +131,12 @@ pub fn target(settings: &Settings, codex: &Arc<CodexClient>, system: String, mes
 /// Run `target` on the calling thread, streaming deltas; every provider blocks.
 pub fn run(target: &Target, cancel: &AtomicBool, on_delta: &mut dyn FnMut(&str)) -> Result<String, String> {
     match target {
-        Target::Api(request) => providers::stream(request, cancel, on_delta).map_err(|error| error.to_string()),
+        Target::Api(request, preset) => {
+            // Read here, off the UI thread: the credential store can block (or prompt on macOS).
+            let api_key = crate::secrets::get(preset.id);
+            if preset.needs_key && api_key.is_none() { return Err(format!("Add your {} API key in Settings → Model.", preset.label)); }
+            providers::stream(&Request { api_key, ..request.clone() }, cancel, on_delta).map_err(|error| error.to_string())
+        }
         Target::Claude(request) => ClaudeCli::stream(request, cancel, on_delta),
         Target::Codex(request, client) => client.stream(request, cancel, on_delta),
     }
@@ -166,7 +172,7 @@ mod tests {
 
     fn built(action: &str, smart: bool) -> Request {
         match build(&settings(smart), &CodexClient::new(), action, "", &[], "Them: what is a mutex", None).unwrap() {
-            Target::Api(request) => request,
+            Target::Api(request, _) => request,
             _ => panic!("expected an API request"),
         }
     }
@@ -192,6 +198,21 @@ mod tests {
     }
 
     #[test]
+    fn a_saved_key_is_read_when_the_request_runs_not_when_it_is_built() {
+        let anthropic = Settings { api_provider: "anthropic".into(), api_models: [("anthropic".to_string(), "m".to_string())].into(), ..settings(false) };
+        let Err(reason) = build(&anthropic, &CodexClient::new(), "Assist", "", &[], "", None) else { panic!("no key is marked as saved") };
+        assert!(reason.contains("Add your Anthropic API key"));
+        let marked = Settings { saved_keys: [("anthropic".to_string(), "••••3f9a".to_string())].into(), ..anthropic };
+        match build(&marked, &CodexClient::new(), "Assist", "", &[], "", None).unwrap() {
+            Target::Api(request, preset) => {
+                assert_eq!(preset.id, "anthropic");
+                assert!(request.api_key.is_none(), "the key is read by `run`, on the worker thread");
+            }
+            _ => panic!("expected an API request"),
+        }
+    }
+
+    #[test]
     fn general_leaves_the_instructions_as_they_were_and_a_mode_adds_its_block_after_them() {
         let general = settings(false);
         assert_eq!(system(&general), format!("{SYSTEM}\n\n{SPOKEN}"), "no mode material: exactly the instructions without modes");
@@ -206,7 +227,7 @@ mod tests {
         assert!(instructions.starts_with(&system(&general)), "the base rules and style come first");
         assert!(instructions.contains("\"Interview\" mode") && instructions.contains("Treat my résumé"), "the built-in's default context");
         assert!(instructions.ends_with("<file name=\"cv.md\">\nJane\n</file>"));
-        let request = match build(&interview, &CodexClient::new(), "Assist", "", &[], "", None).unwrap() { Target::Api(request) => request, _ => panic!("API") };
+        let request = match build(&interview, &CodexClient::new(), "Assist", "", &[], "", None).unwrap() { Target::Api(request, _) => request, _ => panic!("API") };
         assert_eq!(request.system, instructions, "the mode goes in the system prompt, not the turn");
         assert!(!turn_text(&request).contains("Treat my résumé"));
         // A Codex thread is reused only while its instructions are unchanged, so switching modes opens a new one.

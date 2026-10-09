@@ -32,13 +32,16 @@ const CLOSE_WAIT: Duration = Duration::from_secs(2);
 
 pub struct Deepgram {
     key: Option<String>,
+    /// A key is saved in the OS credential store; it is read when a session starts, on its worker
+    /// thread, never on the UI thread.
+    stored: bool,
 }
 
 impl Deepgram {
-    /// Uses the key in the OS credential store.
-    pub fn from_store() -> Self { Self { key: crate::secrets::get(PROVIDER_ID) } }
+    /// Uses the key in the OS credential store; `saved` is the marker in `Settings::saved_keys`.
+    pub fn from_store(saved: bool) -> Self { Self { key: None, stored: saved } }
 
-    pub fn with_key(key: impl Into<String>) -> Self { Self { key: Some(key.into()) } }
+    pub fn with_key(key: impl Into<String>) -> Self { Self { key: Some(key.into()), stored: false } }
 }
 
 /// The listen URL with the streaming parameters: raw 16 kHz mono PCM, interim results, and
@@ -57,11 +60,12 @@ impl StreamingAsr for Deepgram {
     }
 
     fn availability(&self) -> Availability {
-        if self.key.is_some() { Availability::Ready } else { Availability::NeedsApiKey }
+        if self.key.is_some() || self.stored { Availability::Ready } else { Availability::NeedsApiKey }
     }
 
     fn start_session(&self, sink: EventSink) -> Result<Box<dyn StreamingAsrSession>, AsrError> {
-        let key = self.key.as_deref().ok_or(AsrError::NotReady(Availability::NeedsApiKey))?;
+        let stored = if self.key.is_none() && self.stored { crate::secrets::get(PROVIDER_ID) } else { None };
+        let key = self.key.as_deref().or(stored.as_deref()).ok_or(AsrError::NotReady(Availability::NeedsApiKey))?;
         let socket = connect(key).map_err(AsrError::Failed)?;
         Ok(Box::new(Session { sink, socket, origin_ms: None, pending: Vec::new(), last_sent: Instant::now(), closed: false }))
     }
@@ -283,10 +287,11 @@ mod tests {
         let key = "dg_secret_1234567890abcdef1234";
         let provider = Deepgram::with_key(key);
         assert_eq!(provider.availability(), Availability::Ready);
-        assert_eq!(Deepgram { key: None }.availability(), Availability::NeedsApiKey);
+        assert_eq!(Deepgram { key: None, stored: false }.availability(), Availability::NeedsApiKey);
+        assert_eq!(Deepgram::from_store(true).availability(), Availability::Ready, "a saved key is read when the session starts");
         let text = connect_error(&tungstenite::Error::Io(std::io::Error::other(key)));
         assert!(!text.contains(key) && !text.contains("secret"), "{text}");
-        let not_ready = Deepgram { key: None }.start_session(EventSink::new(crate::audio::Source::Me, crate::stt::Generation(1), std::sync::mpsc::channel().0));
+        let not_ready = Deepgram { key: None, stored: false }.start_session(EventSink::new(crate::audio::Source::Me, crate::stt::Generation(1), std::sync::mpsc::channel().0));
         assert!(matches!(not_ready, Err(AsrError::NotReady(Availability::NeedsApiKey))));
     }
 

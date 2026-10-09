@@ -76,7 +76,7 @@ pub enum Command { Stop }
 pub fn provider(settings: &crate::settings::Settings) -> Arc<dyn StreamingAsr> {
     match settings.stt_provider {
         SttProvider::Parakeet => Arc::new(ParakeetRealtime::new(ParakeetConfig { use_gpu: settings.use_gpu, ..ParakeetConfig::default() })),
-        SttProvider::Deepgram => Arc::new(crate::stt::deepgram::Deepgram::from_store()),
+        SttProvider::Deepgram => Arc::new(crate::stt::deepgram::Deepgram::from_store(settings.saved_keys.contains_key(crate::stt::deepgram::PROVIDER_ID))),
     }
 }
 

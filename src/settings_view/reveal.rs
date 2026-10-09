@@ -1,8 +1,8 @@
 //! Showing a saved API key on request (the eye on the saved key in Settings › Model), as drawn in
 //! the Paper "Model v3 · Reveal saved key" artboard.
 //!
-//! The key is read only when the eye is clicked, and only while Settings is hidden from screen
-//! capture. It is drawn as plain text, which can't be selected, copied or read by the platform's
+//! The key is read only when the eye is clicked, on a background thread, and only while Settings
+//! is hidden from screen capture. It is drawn as plain text, which can't be selected, copied or read by the platform's
 //! text services, and is forgotten after ten seconds, on a second click, when a tab opens, when
 //! Settings closes, when the overlay hides, or when the provider or capture setting changes. It is
 //! never logged or put in an error.
@@ -19,13 +19,17 @@ use crate::{theme, ui};
 const SHOW_FOR: Duration = Duration::from_secs(10);
 /// Why the eye is dimmed.
 const NEEDS_CAPTURE_EXCLUSION: &str = "To show it, turn on Hide from screen capture (Window)";
+/// Shown on the eye while reading the key may bring up a Keychain prompt.
+const MAY_PROMPT: &str = "macOS may ask for your password to let CluelyRS read the key.";
 /// The countdown's color.
 const COUNTDOWN: u32 = 0xe6c07b;
 
-/// The saved key being shown, if any, and the timer that counts it down.
+/// The saved key being shown, if any, and the task that reads it and counts it down.
 #[derive(Default)]
 pub(crate) struct KeyReveal {
     shown: Option<Shown>,
+    /// The key is being read (on a background thread).
+    reading: bool,
     ticker: Option<Task<()>>,
 }
 
@@ -40,9 +44,10 @@ impl KeyReveal {
         self.shown = Some(Shown { provider: provider.to_string(), key, until: now + SHOW_FOR });
     }
 
-    /// Hide the key and forget it.
+    /// Hide the key and forget it, dropping a read still in progress.
     pub(crate) fn hide(&mut self) {
         self.shown = None;
+        self.reading = false;
         self.ticker = None;
     }
 
@@ -67,30 +72,41 @@ impl KeyReveal {
 }
 
 impl Overlay {
-    /// The eye on a saved key: show it (reading it now) or hide it again.
-    fn toggle_saved_key(&mut self, provider: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let now = Instant::now();
+    /// The eye on a saved key: show it (reading it now, off the UI thread) or hide it again.
+    fn toggle_saved_key(&mut self, provider: &'static str, window: &mut Window, cx: &mut Context<Self>) {
         let allowed = capture_excluded(&self.store.value);
-        if self.key_reveal.key(provider, allowed, now).is_some() || !allowed {
+        if self.key_reveal.key(provider, allowed, Instant::now()).is_some() || !allowed {
             self.key_reveal.hide();
             cx.notify();
             return;
         }
-        let Some(key) = crate::secrets::get(provider) else {
-            self.key_notice = Some("Couldn't read the saved key.".into());
-            cx.notify();
-            return;
-        };
-        self.key_reveal.show(provider, key, now);
-        // Redraw every second for the countdown; stop once the key is hidden.
-        self.key_reveal.ticker = Some(cx.spawn_in(window, async move |this, cx| loop {
-            cx.background_executor().timer(Duration::from_secs(1)).await;
+        if self.key_reveal.reading { return; }
+        self.key_reveal.reading = true;
+        self.key_reveal.ticker = Some(cx.spawn_in(window, async move |this, cx| {
+            // The credential store can block, or show a Keychain prompt: read it in the background.
+            let key = cx.background_executor().spawn(async move { crate::secrets::get(provider) }).await;
             let shown = this.update(cx, |this, cx| {
-                let shown = this.key_reveal.tick(Instant::now());
+                this.key_reveal.reading = false;
+                let shown = match key {
+                    // Capture exclusion may have been turned off while the key was read.
+                    Some(key) if capture_excluded(&this.store.value) => { this.key_reveal.show(provider, key, Instant::now()); true }
+                    Some(_) => false,
+                    None => { this.key_notice = Some("Couldn't read the saved key.".into()); false }
+                };
                 cx.notify();
                 shown
             });
-            if !matches!(shown, Ok(true)) { break; }
+            if !matches!(shown, Ok(true)) { return; }
+            // Redraw every second for the countdown; stop once the key is hidden.
+            loop {
+                cx.background_executor().timer(Duration::from_secs(1)).await;
+                let shown = this.update(cx, |this, cx| {
+                    let shown = this.key_reveal.tick(Instant::now());
+                    cx.notify();
+                    shown
+                });
+                if !matches!(shown, Ok(true)) { break; }
+            }
         }));
         cx.notify();
     }
@@ -122,6 +138,7 @@ impl Overlay {
         if !allowed {
             return eye.tooltip(|_, cx| tooltip(NEEDS_CAPTURE_EXCLUSION, cx));
         }
+        let eye = if !shown && crate::secrets::may_prompt(provider) { eye.tooltip(|_, cx| tooltip(MAY_PROMPT, cx)) } else { eye };
         eye.cursor_pointer().on_mouse_down(MouseButton::Left, listen(cx, move |this, _, window, cx| {
             cx.stop_propagation();
             this.toggle_saved_key(provider, window, cx);

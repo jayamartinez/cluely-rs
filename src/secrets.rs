@@ -2,6 +2,9 @@
 //! Manager on Windows, the login Keychain on macOS.
 //!
 //! Key material is never logged, formatted into errors, or returned except by [`get`].
+//! Every call here can block, and on macOS show a Keychain prompt, so none runs on the UI thread
+//! and none runs just because Settings is shown: Settings shows the non-secret marker kept in
+//! `Settings::saved_keys` instead.
 //! Errors from the credential store are mapped to short fixed messages because some
 //! `keyring` error variants carry the raw (undecodable) secret bytes.
 
@@ -49,9 +52,15 @@ pub fn remove(provider_id: &str) -> Result<()> {
     }
 }
 
-/// A display-safe hint such as `••••3f9a` for a stored key, or `None` when no key is stored.
-pub fn hint(provider_id: &str) -> Option<String> {
-    get(provider_id).map(|key| mask_hint(&key))
+/// A display-safe hint such as `••••3f9a` for `key`, as it would be stored; `None` for an invalid key.
+pub fn masked(key: &str) -> Option<String> {
+    normalize_key(key).ok().map(|key| mask_hint(&key))
+}
+
+/// Whether reading `provider_id`'s key may show a Keychain prompt: on macOS, until it has been
+/// read (or saved) in this run. Never on other platforms.
+pub fn may_prompt(provider_id: &str) -> bool {
+    cfg!(target_os = "macos") && !cache::known(provider_id)
 }
 
 /// Reads the key from the credential store itself, bypassing the cache.
@@ -84,6 +93,16 @@ mod cache {
 
     pub fn forget(provider_id: &str) {
         with(|cache| cache.forget(provider_id));
+    }
+
+    /// Never waits: the lock is held while a lookup (and any Keychain prompt) is in progress,
+    /// and this is asked by the UI. A busy cache counts as not known.
+    pub fn known(provider_id: &str) -> bool {
+        match CACHE.try_lock() {
+            Ok(guard) => guard.as_ref().is_some_and(|cache| cache.0.contains_key(provider_id)),
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner().as_ref().is_some_and(|cache| cache.0.contains_key(provider_id)),
+            Err(std::sync::TryLockError::WouldBlock) => false,
+        }
     }
 
     fn with<T>(f: impl FnOnce(&mut KeyCache) -> T) -> T {
@@ -125,6 +144,8 @@ mod cache {
     pub fn put(_provider_id: &str, _key: Option<String>) {}
 
     pub fn forget(_provider_id: &str) {}
+
+    pub fn known(_provider_id: &str) -> bool { false }
 }
 
 fn entry(provider_id: &str) -> Result<keyring::Entry> {
@@ -225,6 +246,13 @@ mod tests {
     }
 
     #[test]
+    fn masked_hints_match_what_would_be_stored() {
+        assert_eq!(masked("  sk-proj-0123456789ab3f9a \n").as_deref(), Some("••••3f9a"));
+        assert_eq!(masked("sk secret"), None);
+        assert_eq!(masked(""), None);
+    }
+
+    #[test]
     fn store_errors_do_not_include_secret_bytes() {
         let error = store_error("save", &keyring::Error::BadEncoding(b"sk-topsecret".to_vec()));
         assert!(!error.to_string().contains("topsecret"));
@@ -246,7 +274,7 @@ mod tests {
         assert!(keychain_has_item(PROVIDER), "the key should be a persistent Keychain item");
         assert_eq!(read_store(PROVIDER).as_deref(), Some(key));
         assert_eq!(get(PROVIDER).as_deref(), Some(key));
-        assert_eq!(hint(PROVIDER).as_deref(), Some("••••abcd"));
+        assert_eq!(get(PROVIDER).and_then(|key| masked(&key)).as_deref(), Some("••••abcd"));
         // A Settings render reads up to two keys (`get` for the badge, `hint` for the key row).
         const READS: u32 = 50;
         let started = std::time::Instant::now();

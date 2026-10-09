@@ -338,7 +338,7 @@ impl Overlay {
             Provider::Claude => self.claude_status.as_ref(),
             Provider::ApiKey => {
                 let s = &self.store.value;
-                let ready = crate::providers::preset(&s.api_provider).is_some_and(|p| !p.needs_key || crate::secrets::get(p.id).is_some());
+                let ready = crate::providers::preset(&s.api_provider).is_some_and(|p| !p.needs_key || s.saved_keys.contains_key(p.id));
                 return if ready { text("Ready".into(), theme::ok()) } else { text("Not set".into(), theme::muted()) };
             }
         };
@@ -427,7 +427,7 @@ impl Overlay {
         let mut section = div().flex().flex_col().gap(px(16.0));
         let mut top = div().flex().gap(px(12.0)).child(provider);
         if preset.needs_key {
-            let saved = crate::secrets::hint(preset.id);
+            let saved = s.saved_keys.get(preset.id).cloned();
             let mut status = div().flex().items_center().gap(px(12.0)).text_size(px(12.0)).text_color(theme::muted());
             if let Some(key) = self.revealed_key(preset.id) {
                 status = status.gap(px(10.0)).child(reveal::revealed_text(key)).child(self.saved_key_eye(preset.id, cx)).children(self.reveal_countdown(true));
@@ -436,7 +436,7 @@ impl Overlay {
                 if saved.is_some() {
                     status = status.child(self.saved_key_eye(preset.id, cx))
                         .child(div().id("remove-key").cursor_pointer().text_color(gpui::rgb(0xffb4a8))
-                            .on_mouse_down(MouseButton::Left, listen(cx, |this, _, _, cx| this.remove_key(cx))).child("Remove"));
+                            .on_mouse_down(MouseButton::Left, listen(cx, |this, _, window, cx| this.remove_key(window, cx))).child("Remove"));
                 }
                 if !preset.key_page.is_empty() {
                     let page = preset.key_page;
@@ -447,7 +447,7 @@ impl Overlay {
             top = top.child(field("API key", div().flex().flex_col().gap(px(6.0))
                 .child(div().flex().items_center().gap(px(8.0))
                     .child(input_box(self.key_input.clone(), "key-box").flex().items_center().gap(px(6.0)).pr(px(5.0)).child(key_eye(&self.key_input, cx)))
-                    .child(button("save-key", "Save", true).on_mouse_down(MouseButton::Left, listen(cx, |this, _, _, cx| this.save_key(cx)))))
+                    .child(button("save-key", "Save", true).on_mouse_down(MouseButton::Left, listen(cx, |this, _, window, cx| this.save_key(window, cx)))))
                 .child(status)));
         }
         section = section.child(top);
@@ -514,12 +514,12 @@ impl Overlay {
     /// The Deepgram API key: paste and save, or the saved key's hint with Remove.
     fn deepgram_key_row(&self, cx: &mut Context<Self>) -> Div {
         let focus = self.key_input.clone();
-        let saved = crate::secrets::hint(deepgram::PROVIDER_ID);
+        let saved = self.store.value.saved_keys.get(deepgram::PROVIDER_ID).cloned();
         let mut status = div().flex().items_center().gap(px(12.0)).text_size(px(12.0)).text_color(theme::muted())
             .child(match &saved { Some(hint) => format!("Saved key {hint}"), None => "No key saved".to_string() });
         if saved.is_some() {
             status = status.child(div().id("remove-key").cursor_pointer().text_color(gpui::rgb(0xffb4a8))
-                .on_mouse_down(MouseButton::Left, listen(cx, |this, _, _, cx| this.remove_key(cx))).child("Remove"));
+                .on_mouse_down(MouseButton::Left, listen(cx, |this, _, window, cx| this.remove_key(window, cx))).child("Remove"));
         }
         status = status.child(div().id("key-page").cursor_pointer().text_color(theme::accent_soft())
             .on_mouse_down(MouseButton::Left, listen(cx, |_, _, _, cx| cx.open_url("https://console.deepgram.com/"))).child("Get a key ↗"));
@@ -529,7 +529,7 @@ impl Overlay {
                     .bg(theme::field()).border_1().border_color(theme::hairline()).cursor_text()
                     .on_mouse_down(MouseButton::Left, listen(cx, move |_, _, window, cx| window.focus(&focus.focus_handle(cx))))
                     .child(self.key_input.clone()))
-                .child(button("save-key", "Save", true).on_mouse_down(MouseButton::Left, listen(cx, |this, _, _, cx| this.save_key(cx)))))
+                .child(button("save-key", "Save", true).on_mouse_down(MouseButton::Left, listen(cx, |this, _, window, cx| this.save_key(window, cx)))))
             .child(status);
         if let Some(notice) = self.key_notice.clone() {
             row = row.child(div().text_size(px(12.0)).text_color(theme::accent_soft()).child(notice));
