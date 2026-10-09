@@ -46,21 +46,25 @@ pub struct SettingsWindow {
 
 /// Show the Settings window on `tab`, opening it if needed, and bring CluelyRS forward so the menu
 /// bar (Settings…, Quit) is its own while the window is in front.
-pub fn open(overlay: &mut Overlay, tab: Tab, cx: &mut Context<Overlay>) {
+pub fn open(tab: Tab, cx: &mut Context<Overlay>) {
     let page = Page::Settings(tab);
     let entity = cx.entity();
-    let existing = overlay.settings_window;
     // Deferred: the window reads the overlay while it draws, and the overlay is being updated now.
-    cx.defer(move |cx| {
-        cx.activate(true);
-        if let Some(handle) = existing
-            && handle.update(cx, |this, window, cx| { this.page = page; window.activate_window(); cx.notify(); }).is_ok() {
+    // The window becomes key only once CluelyRS is active (`platform::activate_then`).
+    cx.defer(move |cx| platform::activate_then(cx, move |active, cx| {
+        if let Some(handle) = entity.read(cx).settings_window
+            && handle.update(cx, |this, window, cx| {
+                this.page = page;
+                if active { window.activate_window(); } else if let Some(native) = this.native { platform::order_front(native); }
+                cx.notify();
+            }).is_ok() {
             return;
         }
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(760.0), px(640.0)), cx))),
             titlebar: Some(TitlebarOptions { title: Some("Settings".into()), appears_transparent: true, traffic_light_position: Some(point(px(14.0), px(14.0))) }),
             kind: WindowKind::Normal,
+            focus: active,
             is_resizable: false,
             is_minimizable: false,
             ..Default::default()
@@ -70,7 +74,7 @@ pub fn open(overlay: &mut Overlay, tab: Tab, cx: &mut Context<Overlay>) {
             Ok(handle) => entity.update(cx, |overlay, _| { overlay.settings_window = Some(handle); overlay.update_dock(); }),
             Err(error) => eprintln!("settings window could not open: {error}"),
         }
-    });
+    }));
 }
 
 /// The window is about to close. Leave the Dock first (unless "Show in Dock" is on), so CluelyRS

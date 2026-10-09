@@ -282,7 +282,7 @@ impl Overlay {
     pub fn open_settings(&mut self, tab: Tab, window: &mut Window, cx: &mut Context<Self>) {
         self.prepare_tab(tab, window, cx);
         #[cfg(target_os = "macos")]
-        crate::settings_window::open(self, tab, cx);
+        crate::settings_window::open(tab, cx);
         #[cfg(not(target_os = "macos"))]
         {
             self.settings_tab = Some(tab);
@@ -310,20 +310,20 @@ impl Overlay {
     pub fn open_sessions(&mut self, cx: &mut Context<Self>) {
         let Some(root) = self.archive.as_ref().map(|archive| archive.root().to_path_buf()) else { return };
         let _ = std::fs::create_dir_all(&root);
-        // On macOS, bring CluelyRS forward first: GPUI deadlocks when a window becomes key while its
-        // app isn't active (it resigns key status while holding the window's lock), and CluelyRS is
-        // usually not the active app. Done on the next turn, after this click, as for Settings.
+        // On macOS the window becomes key only once CluelyRS is active (`platform::activate_then`):
+        // CluelyRS is usually not the active app, and GPUI deadlocks when a window becomes key while
+        // its app isn't. Done after this click, as for Settings.
         #[cfg(target_os = "macos")]
         {
-            let (overlay, mut handle, codex) = (cx.entity(), self.sessions_window, self.codex.clone());
-            cx.defer(move |cx| {
-                cx.activate(true);
-                sessions_window::open(&mut handle, root, codex, cx);
+            let (overlay, codex) = (cx.entity(), self.codex.clone());
+            cx.defer(move |cx| platform::activate_then(cx, move |active, cx| {
+                let mut handle = overlay.read(cx).sessions_window;
+                sessions_window::open(&mut handle, root, codex, active, cx);
                 overlay.update(cx, |overlay, _| overlay.sessions_window = handle);
-            });
+            }));
         }
         #[cfg(not(target_os = "macos"))]
-        sessions_window::open(&mut self.sessions_window, root, self.codex.clone(), cx);
+        sessions_window::open(&mut self.sessions_window, root, self.codex.clone(), true, cx);
     }
 
     #[cfg(not(target_os = "macos"))]

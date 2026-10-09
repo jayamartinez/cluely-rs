@@ -44,8 +44,10 @@ pub struct SessionsWindow {
 }
 
 /// Open the window, or bring the existing one forward.
-pub fn open(existing: &mut Option<WindowHandle<SessionsWindow>>, root: PathBuf, codex: Arc<CodexClient>, cx: &mut App) {
-    if let Some(handle) = existing && handle.update(cx, |this, window, cx| { this.reload(cx); window.activate_window(); }).is_ok() {
+/// Open the window, or reload and raise it. `focus`: whether it may become key (macOS: only while
+/// CluelyRS is the active app, see `platform::activate_then`).
+pub fn open(existing: &mut Option<WindowHandle<SessionsWindow>>, root: PathBuf, codex: Arc<CodexClient>, focus: bool, cx: &mut App) {
+    if let Some(handle) = existing && handle.update(cx, |this, window, cx| { this.reload(cx); if focus { window.activate_window(); } }).is_ok() {
         return;
     }
     let options = WindowOptions {
@@ -53,7 +55,7 @@ pub fn open(existing: &mut Option<WindowHandle<SessionsWindow>>, root: PathBuf, 
         // The frame is drawn by the window itself (title bar with its own controls).
         titlebar: Some(TitlebarOptions { title: Some("Sessions".into()), appears_transparent: true, traffic_light_position: None }),
         kind: WindowKind::Normal,
-        focus: true,
+        focus,
         show: true,
         is_resizable: true,
         is_minimizable: true,
