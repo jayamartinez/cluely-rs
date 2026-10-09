@@ -27,7 +27,7 @@ impl Overlay {
             .child(self.opacity_row(cx))
             .child(switch_row("Answer text size", "Answers and the transcript line; the text box and toolbar keep their size",
                 choice("text-size", &TextSize::ALL, s.text_size, |s, v| s.text_size = v, cx)))
-            .child(switch_row("Card width", "The overlay's top and left edges stay put",
+            .child(switch_row("Card width", "The overlay grows and shrinks around its centre; its top edge stays put",
                 choice("card-width", &CardWidth::ALL, s.card_width, |s, v| s.card_width = v, cx)))
             // macOS: room above the Dock section's divider. On Windows this section ends the tab.
             .when(cfg!(target_os = "macos"), |section| section.pb(px(16.0)))

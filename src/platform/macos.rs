@@ -95,6 +95,28 @@ pub fn resize(window: &mut Window, native: Option<NativeWindow>, size: Size<Pixe
     });
 }
 
+/// Change the width to `width` (points) keeping the top edge and the horizontal centre, within the
+/// visible frame of the window's screen (`super::centred_left`). On the next turn of the main queue,
+/// as `resize`.
+pub fn set_width_centred(native: NativeWindow, width: f32) {
+    struct OnMainQueue(NativeWindow);
+    // The main queue runs on the main thread, where the window is used.
+    unsafe impl Send for OnMainQueue {}
+    impl OnMainQueue { fn window(&self) -> &NSWindow { self.0.get() } }
+    let target = OnMainQueue(native);
+    let width = f64::from(width);
+    DispatchQueue::main().exec_async(move || {
+        let window = target.window();
+        let frame = window.frame();
+        let (work_left, work_right) = window.screen().map_or((f64::MIN, f64::MAX), |screen| {
+            let work = screen.visibleFrame();
+            (work.origin.x, work.origin.x + work.size.width)
+        });
+        let left = super::centred_left(frame.origin.x, frame.size.width, width, work_left, work_right);
+        window.setFrame_display(NSRect::new(NSPoint::new(left, frame.origin.y), NSSize::new(width, frame.size.height)), true);
+    });
+}
+
 /// Move by a physical-pixel delta (y down, as on Windows), clamped to the visible frame of the
 /// window's screen (below the menu bar, beside the Dock).
 pub fn move_by(window: NativeWindow, dx: i32, dy: i32) -> std::io::Result<()> {
