@@ -172,6 +172,8 @@ pub struct Overlay {
     pub(crate) modes: crate::modes::ModeStore,
     /// Settings › Modes (`modes_view`).
     pub(crate) modes_ui: crate::modes_view::ModesUi,
+    /// Update checks: what Settings › About shows and the notice above the text box (`update_notice`).
+    pub(crate) updates: crate::update::Tracker,
 }
 
 impl Overlay {
@@ -264,12 +266,13 @@ impl Overlay {
             listening: None, listening_status: None, listening_epoch: 0, transcript: Vec::new(), provisional: Default::default(), levels: Default::default(),
             model_installed: false, model_download: None, model_notice: None,
             open_picker: None, reveal_accounts: false, devices: None, devices_loading: false, archive_bytes: None, picker_face: Rc::default(), toggle_hover: None,
-            collapse: None, settings_height: Rc::default(), modes_ui, modes };
+            collapse: None, settings_height: Rc::default(), modes_ui, modes, updates: Default::default() };
         overlay.refresh_model_status();
         overlay.mark_existing_keys(window, cx);
         #[cfg(target_os = "macos")]
         overlay.update_dock();
         if start_live { overlay.set_live(true, window, cx); }
+        overlay.start_update_checks(window, cx);
         overlay
     }
 
@@ -410,7 +413,8 @@ impl Overlay {
 
     /// Size the window to its content state; transparent area outside the content still takes clicks.
     fn fit(&self, window: &mut Window) {
-        let height = if self.settings_tab.is_some() { SETTINGS_HEIGHT } else if self.live_since.is_some() { LIVE_HEIGHT } else { IDLE_HEIGHT };
+        let height = if self.settings_tab.is_some() { SETTINGS_HEIGHT } else if self.live_since.is_some() { LIVE_HEIGHT }
+            else if self.update_notice_shown() { IDLE_HEIGHT + update_notice::NOTICE_HEIGHT } else { IDLE_HEIGHT };
         platform::resize(window, self.native, size(px(self.store.value.card_width.window()), px(height)));
     }
 
@@ -1104,6 +1108,7 @@ fn idle_hint(text: &'static str) -> impl IntoElement {
 }
 
 mod card;
+mod update_notice;
 pub(crate) use card::CARD_WIDTH;
 /// How many audio levels the Live waveform keeps (one per bar from the middle out).
 pub(crate) const LEVEL_HISTORY: usize = 3;

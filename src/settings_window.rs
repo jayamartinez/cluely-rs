@@ -60,8 +60,12 @@ pub struct SettingsWindow {
 
 /// Show the Settings window on `tab`, opening it if needed, and bring CluelyRS forward so the menu
 /// bar (Settings…, Quit) is its own while the window is in front.
-pub fn open(tab: Tab, cx: &mut Context<Overlay>) {
-    let page = Page::Settings(tab);
+pub fn open(tab: Tab, cx: &mut Context<Overlay>) { open_page(Page::Settings(tab), cx) }
+
+/// Show the Settings window on About (the menu's "Check for Updates…").
+pub fn open_about(cx: &mut Context<Overlay>) { open_page(Page::About, cx) }
+
+fn open_page(page: Page, cx: &mut Context<Overlay>) {
     let entity = cx.entity();
     // Deferred: the window reads the overlay while it draws, and the overlay is being updated now.
     // The window becomes key only once CluelyRS is active (`platform::activate_then`).
@@ -169,15 +173,20 @@ impl SettingsWindow {
             .child(tabs)
     }
 
-    fn about(&self) -> AnyElement {
-        div().flex().flex_col().items_center().gap(px(10.0)).pt(px(48.0))
-            .child(ui::mark(56.0))
-            .child(div().pt(px(6.0)).text_size(px(20.0)).font_weight(FontWeight::BOLD).text_color(theme::text()).child("CluelyRS"))
-            .child(div().text_size(px(12.0)).text_color(theme::muted()).child(format!("Version {}", env!("CARGO_PKG_VERSION"))))
-            .child(div().id("quit").mt(px(18.0)).px(px(14.0)).py(px(7.0)).rounded(px(9.0)).cursor_pointer()
-                .border_1().border_color(theme::hairline()).text_size(px(12.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::body())
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.quit())
-                .child("Quit CluelyRS"))
+    /// The app's name and version, Updates (`settings_view::about`) and Quit.
+    fn about(&self, cx: &mut Context<Self>) -> AnyElement {
+        let updates = self.overlay.update(cx, |overlay, cx| overlay.updates_section(cx));
+        div().flex().flex_col().gap(px(22.0)).pt(px(10.0))
+            .child(div().flex().flex_col().items_center().gap(px(10.0))
+                .child(ui::mark(56.0))
+                .child(div().pt(px(6.0)).text_size(px(20.0)).font_weight(FontWeight::BOLD).text_color(theme::text()).child("CluelyRS"))
+                .child(div().text_size(px(12.0)).text_color(theme::muted()).child(format!("Version {}", env!("CARGO_PKG_VERSION")))))
+            .child(updates)
+            .child(div().flex().justify_center()
+                .child(div().id("quit").px(px(14.0)).py(px(7.0)).rounded(px(9.0)).cursor_pointer()
+                    .border_1().border_color(theme::hairline()).text_size(px(12.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::body())
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.quit())
+                    .child("Quit CluelyRS")))
             .into_any_element()
     }
 }
@@ -189,7 +198,7 @@ impl Render for SettingsWindow {
         window.set_window_title(title);
         let body = match self.page {
             Page::Settings(tab) => self.overlay.update(cx, |overlay, cx| overlay.settings_window_body(tab, cx)),
-            Page::About => self.about(),
+            Page::About => self.about(cx),
         };
         self.fit_to_tab(window, cx);
         let heights = self.heights.clone();

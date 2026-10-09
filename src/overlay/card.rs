@@ -55,7 +55,10 @@ impl Overlay {
             if !self.turns.is_empty() { conversation = conversation.child(thread.flex_initial().min_h_0()); }
             card = card.child(conversation.child(actions.flex_none()));
         }
-        card.child(self.input_row(conversation_shown, cx)).child(self.toolbar(live, cx))
+        // An update notice (never during Live) sits above the text box, as the conversation does.
+        let notice = self.update_notice(cx);
+        let below = conversation_shown || notice.is_some();
+        card.children(notice).child(self.input_row(below, cx)).child(self.toolbar(live, cx))
     }
 
     /// The text box and the return button, which turns blue once there is something to send.
