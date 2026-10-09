@@ -188,19 +188,35 @@ fn pretty(accelerator: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use global_hotkey::hotkey::{Code, Modifiers};
+
     use super::*;
 
+    fn default(action: Action) -> &'static str { DEFAULTS.iter().find(|(item, _)| *item == action).unwrap().1 }
+
     #[test]
-    fn every_default_parses_once_and_switch_mode_reads_as_a_quote() {
+    fn every_default_parses_and_none_is_bound_twice() {
         let keys: Vec<HotKey> = DEFAULTS.iter().map(|(_, accelerator)| accelerator.parse().unwrap()).collect();
         for (index, key) in keys.iter().enumerate() {
             assert!(!keys[..index].contains(key), "{} is bound twice", DEFAULTS[index].1);
         }
-        let switch = DEFAULTS.iter().find(|(action, _)| *action == Action::SwitchMode).unwrap().1;
-        #[cfg(target_os = "macos")]
-        assert_eq!(pretty(switch), "⌘ ⇧ '");
+    }
+
+    /// The key is the one right of ; on a US layout (`Code::Quote`: VK_OEM_7 on Windows,
+    /// kVK_ANSI_Quote on macOS), with Ctrl Shift on Windows and ⌘⇧ on macOS, claimed at all times.
+    #[test]
+    fn switch_mode_is_ctrl_shift_quote_on_windows_and_cmd_shift_quote_on_macos() {
+        let key: HotKey = default(Action::SwitchMode).parse().unwrap();
         #[cfg(not(target_os = "macos"))]
-        assert_eq!(pretty(switch), "Ctrl Shift '");
+        {
+            assert_eq!(key, HotKey::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::Quote));
+            assert_eq!(pretty(default(Action::SwitchMode)), "Ctrl Shift '");
+        }
+        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(key, HotKey::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::Quote));
+            assert_eq!(pretty(default(Action::SwitchMode)), "⌘ ⇧ '");
+        }
         assert!(Action::SwitchMode.always(), "the switcher opens from anywhere, not only while Live");
     }
 }

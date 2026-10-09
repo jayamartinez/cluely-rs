@@ -39,10 +39,6 @@ pub const IDLE_HEIGHT: f32 = 270.0;
 const LIVE_HEIGHT: f32 = 680.0;
 /// The card, the Settings panel under it (Windows) and room for an open picker list below them.
 const SETTINGS_HEIGHT: f32 = 820.0;
-/// The idle card with the mode switcher open below it.
-const SWITCHER_IDLE_HEIGHT: f32 = 440.0;
-/// The tallest Live card with the mode switcher open below it.
-const SWITCHER_LIVE_HEIGHT: f32 = 860.0;
 /// How long Settings takes to collapse into the conversation after a message is sent from under it.
 const COLLAPSE: Duration = Duration::from_millis(200);
 /// Held movement eases in so a tap nudges, then cruises. Pixels per ~16 ms frame.
@@ -210,7 +206,7 @@ impl Overlay {
         if let Some(native) = native { platform::enable_passthrough(native); }
         cx.spawn_in(window, async move |this, cx| loop {
             cx.background_executor().timer(Duration::from_millis(30)).await;
-            if this.update(cx, |this, cx| this.update_passthrough(cx)).is_err() { break; }
+            if this.update_in(cx, |this, window, cx| this.update_passthrough(window, cx)).is_err() { break; }
         }).detach();
         // One-second tick for the live timer; idle ticks do no work.
         cx.spawn_in(window, async move |this, cx| loop {
@@ -424,20 +420,25 @@ impl Overlay {
         let mut height = if self.settings_tab.is_some() { SETTINGS_HEIGHT } else if self.live_since.is_some() { LIVE_HEIGHT }
             else if self.update_notice_shown() { IDLE_HEIGHT + update_notice::NOTICE_HEIGHT } else { IDLE_HEIGHT };
         // The mode switcher hangs below the card.
-        if self.switcher.is_some() { height = height.max(if self.live_since.is_some() { SWITCHER_LIVE_HEIGHT } else { SWITCHER_IDLE_HEIGHT }); }
+        if self.switcher_open() { height = height.max(switcher::window_height(self.live_since.is_some())); }
         platform::resize(window, self.native, size(px(self.store.value.card_width.window()), px(height)));
     }
 
     fn handle(&mut self, action: Action, window: &mut Window, cx: &mut Context<Self>) {
         match action {
-            Action::Toggle => self.toggle_visible(),
+            Action::Toggle => {
+                // Hiding closes the mode switcher, handing the keyboard back.
+                if self.native.is_some_and(platform::is_visible) { self.close_switcher(window, cx); }
+                self.toggle_visible();
+            }
             Action::Live => self.set_live(self.live_since.is_none(), window, cx),
             Action::Assist => self.send("Assist", String::new(), window, cx),
             Action::Focus => self.type_shortcut(window, cx),
             Action::SwitchMode => self.switch_mode_shortcut(window, cx),
             Action::MoveUp | Action::MoveDown | Action::MoveLeft | Action::MoveRight => self.start_motion(Motion::Move, window, cx),
             Action::ScrollUp | Action::ScrollDown => self.start_motion(Motion::Scroll, window, cx),
-            Action::Close => self.close_panels(window, cx),
+            // Esc, claimed while the Windows Settings panel is open, closes the switcher over it first.
+            Action::Close => if self.switcher_open() { self.close_switcher(window, cx) } else { self.close_panels(window, cx) },
         }
     }
 
@@ -499,7 +500,7 @@ impl Overlay {
         self.open_picker.is_some() && self.settings_tab.is_some()
     }
 
-    fn update_passthrough(&mut self, cx: &mut Context<Self>) {
+    fn update_passthrough(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(native) = self.native else { return };
         let over_control = platform::cursor_in_window(native).is_some_and(|point| self.hits.contains(point));
         if over_control != self.catching_mouse {
@@ -512,6 +513,8 @@ impl Overlay {
             self.open_picker = None;
             cx.notify();
         }
+        // The mode switcher too; the app clicked takes the keyboard.
+        if self.switcher_open() && !over_control && platform::left_button_down() { self.dismiss_switcher(window, cx); }
         // Likewise, leaving a control for the click-through area sends the overlay no "hover
         // ended", so a hover tooltip is cleared here.
         if self.toggle_hover.is_some() && !over_control {
@@ -1143,9 +1146,9 @@ impl Render for Overlay {
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 // Tab in the text box opens the mode switcher.
                 let modifiers = event.keystroke.modifiers;
-                if event.keystroke.key == "tab" && !modifiers.shift && !modifiers.control && !modifiers.alt && !modifiers.platform
-                    && this.switcher.is_none() && this.composer.focus_handle(cx).is_focused(window) {
-                    this.open_switcher(switcher::Opened::TextBox, window, cx);
+                if event.keystroke.key == "tab" && !modifiers.modified() && !this.switcher_open() && this.composer.focus_handle(cx).is_focused(window) {
+                    cx.stop_propagation();
+                    this.open_switcher(window, cx);
                     return;
                 }
                 if event.keystroke.key != "escape" { return; }
@@ -1219,20 +1222,26 @@ fn click_through(native: Option<NativeWindow>, hits: Hits, applied: Rc<RefCell<V
         let Some(native) = native else { return };
         let scale = window.scale_factor();
         hits.1.set(scale);
-        let physical = |value: gpui::Pixels| (f32::from(value) * scale).round() as i32;
-        let floating = hits.floating();
-        let shapes: Vec<platform::Shape> = children.iter().map(|bounds| (bounds, false)).chain(floating.iter().map(|bounds| (bounds, true))).map(|(bounds, float)| {
-            let height = f32::from(bounds.size.height);
-            let radius = if float { 10.0 } else if height <= 44.0 { height / 2.0 } else { 18.0 };
-            (physical(bounds.left()) - 1, physical(bounds.top()) - 1, physical(bounds.right()) + 1, physical(bounds.bottom()) + 1,
-                (radius * scale).round() as i32)
-        }).collect();
+        let shapes = region(&children, &hits.floating(), scale);
         let shapes = if settings_open { vec![enclosing(applied.borrow().iter().chain(&shapes), (18.0 * scale).round() as i32)] } else { shapes };
         if *applied.borrow() != shapes {
             platform::set_shape(native, &shapes);
             *applied.borrow_mut() = shapes;
         }
     }
+}
+
+/// The window region, in physical pixels, for the laid-out `children` of the overlay and the
+/// `floating` areas reserved for deferred content (open lists and popovers), each a rounded
+/// rectangle a pixel larger than its bounds. The same on every platform; only Windows applies it.
+fn region(children: &[Hit], floating: &[Hit], scale: f32) -> Vec<platform::Shape> {
+    let physical = |value: gpui::Pixels| (f32::from(value) * scale).round() as i32;
+    children.iter().map(|bounds| (bounds, false)).chain(floating.iter().map(|bounds| (bounds, true))).map(|(bounds, float)| {
+        let height = f32::from(bounds.size.height);
+        let radius = if float { 10.0 } else if height <= 44.0 { height / 2.0 } else { 18.0 };
+        (physical(bounds.left()) - 1, physical(bounds.top()) - 1, physical(bounds.right()) + 1, physical(bounds.bottom()) + 1,
+            (radius * scale).round() as i32)
+    }).collect()
 }
 
 /// The text box's placeholder says what an answer will see: the screen only while Screen on send is on.

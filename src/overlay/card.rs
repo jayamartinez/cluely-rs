@@ -127,7 +127,7 @@ impl Overlay {
             .child(ui::icon("icons/gear.svg", 17.0, if settings_open { theme::text() } else { theme::muted() }));
         // The overlay moves with its shortcuts only (Ctrl Alt arrows, ⌃⌥ arrows on macOS), not by dragging.
         div().flex().items_center().gap(px(6.0)).h(px(46.0)).pl(px(16.0)).pr(px(10.0)).bg(self.card_fill(CARD)).rounded_b(px(19.0))
-            .child(div().flex_1().flex().items_center().gap(px(10.0)).child(ui::mark(22.0)).child(self.mode_chip(cx)))
+            .child(div().flex_1().flex().items_center().gap(px(12.0)).child(ui::mark(22.0)).child(self.mode_chip(cx)))
             .child(middle)
             .child(div().flex_1().flex().items_center().justify_end().gap(px(2.0)).child(sessions).child(settings))
             .child(self.hits.mark())
