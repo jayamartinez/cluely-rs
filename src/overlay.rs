@@ -126,6 +126,8 @@ pub struct Overlay {
     pub(crate) codex_status: Option<crate::chat::SubscriptionStatus>,
     pub(crate) claude_status: Option<crate::chat::SubscriptionStatus>,
     pub(crate) signing_in: bool,
+    /// Why the file picked for a subscription's CLI can't be used (Settings › Model).
+    pub(crate) cli_error: Option<(Provider, SharedString)>,
     /// The Live session being saved to History, when saving is on.
     pub(crate) recorder: Option<Recorder>,
     /// The held-key loop that is currently running, if any.
@@ -255,6 +257,7 @@ impl Overlay {
             key_notice: None, loaded_models: Vec::new(), models_loading: false, reasoning: None, planner: Planner::new(false, Budget::default()), prepared_shot: PreparedShot::default(), answer_action: "Assist", speculation_attempt: 0,
             metrics: None, next_turn: 0, catching_mouse: true, return_focus: None,
             codex: crate::codex::CodexClient::new(), codex_status: None, claude_status: None, signing_in: false,
+            cli_error: None,
             motion: None, live_since: None, turns: Vec::new(), scroll: ScrollHandle::new(),
             listening: None, listening_status: None, listening_epoch: 0, transcript: Vec::new(), provisional: Default::default(), levels: Default::default(),
             model_installed: false, model_download: None, model_notice: None,
