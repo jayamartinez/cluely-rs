@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 
 use block2::RcBlock;
 use dispatch2::DispatchQueue;
-use gpui::{Pixels, Size, Window};
+use gpui::{App, Pixels, Size, Window};
 use objc2::MainThreadMarker;
 use objc2::rc::Retained;
 use objc2_app_kit::{
@@ -262,6 +262,41 @@ pub fn set_in_dock(shown: bool) {
     let Some(mtm) = MainThreadMarker::new() else { return };
     let policy = if shown { NSApplicationActivationPolicy::Regular } else { NSApplicationActivationPolicy::Accessory };
     NSApplication::sharedApplication(mtm).setActivationPolicy(policy);
+}
+
+/// How long to wait for macOS to make CluelyRS the active app before showing a window anyway.
+const ACTIVATION_WAIT: std::time::Duration = std::time::Duration::from_millis(600);
+const ACTIVATION_POLL: std::time::Duration = std::time::Duration::from_millis(20);
+
+fn app_is_active() -> bool {
+    MainThreadMarker::new().is_some_and(|mtm| NSApplication::sharedApplication(mtm).isActive())
+}
+
+/// Bring CluelyRS forward, then call `show` once macOS has made it the active app, saying whether
+/// it is. GPUI deadlocks when one of its windows becomes key while the app isn't active: its
+/// key-status handler resigns key status while holding the window's lock and re-enters itself. macOS
+/// may take a moment to activate an app that asks, or decline (CluelyRS's overlay never activates
+/// it), so `show` must make a window key only when told the app is active, and otherwise show it
+/// without focus: clicking it then activates the app first.
+pub fn activate_then(cx: &mut App, show: impl FnOnce(bool, &mut App) + 'static) {
+    cx.activate(true);
+    if app_is_active() {
+        show(true, cx);
+        return;
+    }
+    cx.spawn(async move |cx| {
+        let mut waited = std::time::Duration::ZERO;
+        while !app_is_active() && waited < ACTIVATION_WAIT {
+            cx.background_executor().timer(ACTIVATION_POLL).await;
+            waited += ACTIVATION_POLL;
+        }
+        let _ = cx.update(|cx| show(app_is_active(), cx));
+    }).detach();
+}
+
+/// Show `window` above other windows without making it key (see [`activate_then`]).
+pub fn order_front(window: NativeWindow) {
+    window.get().orderFront(None);
 }
 
 /// Open a folder in Finder.
