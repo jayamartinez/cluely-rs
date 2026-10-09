@@ -39,6 +39,10 @@ pub const IDLE_HEIGHT: f32 = 270.0;
 const LIVE_HEIGHT: f32 = 680.0;
 /// The card, the Settings panel under it (Windows) and room for an open picker list below them.
 const SETTINGS_HEIGHT: f32 = 820.0;
+/// The idle card with the mode switcher open below it.
+const SWITCHER_IDLE_HEIGHT: f32 = 440.0;
+/// The tallest Live card with the mode switcher open below it.
+const SWITCHER_LIVE_HEIGHT: f32 = 860.0;
 /// How long Settings takes to collapse into the conversation after a message is sent from under it.
 const COLLAPSE: Duration = Duration::from_millis(200);
 /// Held movement eases in so a tap nudges, then cruises. Pixels per ~16 ms frame.
@@ -174,6 +178,8 @@ pub struct Overlay {
     pub(crate) modes_ui: crate::modes_view::ModesUi,
     /// Update checks: what Settings › About shows and the notice above the text box (`update_notice`).
     pub(crate) updates: crate::update::Tracker,
+    /// The mode switcher under the card, while it's open.
+    switcher: Option<switcher::Switcher>,
     /// Windows: the Modes window, while it's open.
     pub(crate) modes_window: Option<gpui::WindowHandle<crate::modes_window::ModesWindow>>,
 }
@@ -268,7 +274,7 @@ impl Overlay {
             listening: None, listening_status: None, listening_epoch: 0, transcript: Vec::new(), provisional: Default::default(), levels: Default::default(),
             model_installed: false, model_download: None, model_notice: None,
             open_picker: None, reveal_accounts: false, devices: None, devices_loading: false, archive_bytes: None, picker_face: Rc::default(), toggle_hover: None,
-            collapse: None, settings_height: Rc::default(), modes_ui, modes, updates: Default::default(), modes_window: None };
+            collapse: None, settings_height: Rc::default(), modes_ui, modes, updates: Default::default(), modes_window: None, switcher: None };
         overlay.refresh_model_status();
         overlay.mark_existing_keys(window, cx);
         #[cfg(target_os = "macos")]
@@ -415,8 +421,10 @@ impl Overlay {
 
     /// Size the window to its content state; transparent area outside the content still takes clicks.
     fn fit(&self, window: &mut Window) {
-        let height = if self.settings_tab.is_some() { SETTINGS_HEIGHT } else if self.live_since.is_some() { LIVE_HEIGHT }
+        let mut height = if self.settings_tab.is_some() { SETTINGS_HEIGHT } else if self.live_since.is_some() { LIVE_HEIGHT }
             else if self.update_notice_shown() { IDLE_HEIGHT + update_notice::NOTICE_HEIGHT } else { IDLE_HEIGHT };
+        // The mode switcher hangs below the card.
+        if self.switcher.is_some() { height = height.max(if self.live_since.is_some() { SWITCHER_LIVE_HEIGHT } else { SWITCHER_IDLE_HEIGHT }); }
         platform::resize(window, self.native, size(px(self.store.value.card_width.window()), px(height)));
     }
 
@@ -426,6 +434,7 @@ impl Overlay {
             Action::Live => self.set_live(self.live_since.is_none(), window, cx),
             Action::Assist => self.send("Assist", String::new(), window, cx),
             Action::Focus => self.type_shortcut(window, cx),
+            Action::SwitchMode => self.switch_mode_shortcut(window, cx),
             Action::MoveUp | Action::MoveDown | Action::MoveLeft | Action::MoveRight => self.start_motion(Motion::Move, window, cx),
             Action::ScrollUp | Action::ScrollDown => self.start_motion(Motion::Scroll, window, cx),
             Action::Close => self.close_panels(window, cx),
@@ -1111,6 +1120,7 @@ fn idle_hint(text: &'static str) -> impl IntoElement {
 
 mod card;
 mod update_notice;
+mod switcher;
 pub(crate) use card::CARD_WIDTH;
 /// How many audio levels the Live waveform keeps (one per bar from the middle out).
 pub(crate) const LEVEL_HISTORY: usize = 3;
@@ -1131,6 +1141,13 @@ impl Render for Overlay {
             .track_focus(&self.focus)
             .on_children_prepainted(click_through(self.native, self.hits.clone(), self.shape.clone(), self.settings_tab.is_some()))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                // Tab in the text box opens the mode switcher.
+                let modifiers = event.keystroke.modifiers;
+                if event.keystroke.key == "tab" && !modifiers.shift && !modifiers.control && !modifiers.alt && !modifiers.platform
+                    && this.switcher.is_none() && this.composer.focus_handle(cx).is_focused(window) {
+                    this.open_switcher(switcher::Opened::TextBox, window, cx);
+                    return;
+                }
                 if event.keystroke.key != "escape" { return; }
                 if this.settings_tab.is_some() { this.close_panels(window, cx); }
                 else if this.composer.focus_handle(cx).is_focused(window) {

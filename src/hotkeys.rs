@@ -13,6 +13,8 @@ pub enum Action {
     Live,
     /// Jump into the composer to type without clicking; pressed while typing there, jump back out.
     Focus,
+    /// Open the mode switcher (or close it).
+    SwitchMode,
     Toggle,
     MoveUp,
     MoveDown,
@@ -58,6 +60,7 @@ pub const DEFAULTS: &[(Action, &str)] = &[
     (Action::Assist, "control+Enter"),
     (Action::Live, "control+shift+Enter"),
     (Action::Focus, "control+shift+Space"),
+    (Action::SwitchMode, "control+shift+Quote"),
     (Action::Toggle, "control+Backslash"),
     (Action::MoveUp, "control+alt+ArrowUp"),
     (Action::MoveDown, "control+alt+ArrowDown"),
@@ -75,6 +78,7 @@ pub const DEFAULTS: &[(Action, &str)] = &[
     (Action::Assist, "super+Enter"),
     (Action::Live, "super+shift+Enter"),
     (Action::Focus, "super+shift+Space"),
+    (Action::SwitchMode, "super+shift+Quote"),
     (Action::Toggle, "super+Backslash"),
     (Action::MoveUp, "control+alt+ArrowUp"),
     (Action::MoveDown, "control+alt+ArrowDown"),
@@ -169,7 +173,7 @@ impl Hotkeys {
 fn pretty(accelerator: &str) -> String {
     accelerator.split('+').map(|part| match part {
         "control" => "Ctrl", "alt" => "Alt", "shift" => "Shift", "Enter" => "↵", "Backslash" => "\\",
-        "ArrowUp" => "↑", "ArrowDown" => "↓", "ArrowLeft" => "←", "ArrowRight" => "→", "Escape" => "Esc", other => other,
+        "ArrowUp" => "↑", "ArrowDown" => "↓", "ArrowLeft" => "←", "ArrowRight" => "→", "Escape" => "Esc", "Quote" => "'", other => other,
     }).collect::<Vec<_>>().join(" ")
 }
 
@@ -178,6 +182,25 @@ fn pretty(accelerator: &str) -> String {
 fn pretty(accelerator: &str) -> String {
     accelerator.split('+').map(|part| match part {
         "super" => "⌘", "control" => "⌃", "alt" => "⌥", "shift" => "⇧", "Enter" => "↵", "Backslash" => "\\",
-        "ArrowUp" => "↑", "ArrowDown" => "↓", "ArrowLeft" => "←", "ArrowRight" => "→", "Escape" => "Esc", other => other,
+        "ArrowUp" => "↑", "ArrowDown" => "↓", "ArrowLeft" => "←", "ArrowRight" => "→", "Escape" => "Esc", "Quote" => "'", other => other,
     }).collect::<Vec<_>>().join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_default_parses_once_and_switch_mode_reads_as_a_quote() {
+        let keys: Vec<HotKey> = DEFAULTS.iter().map(|(_, accelerator)| accelerator.parse().unwrap()).collect();
+        for (index, key) in keys.iter().enumerate() {
+            assert!(!keys[..index].contains(key), "{} is bound twice", DEFAULTS[index].1);
+        }
+        let switch = DEFAULTS.iter().find(|(action, _)| *action == Action::SwitchMode).unwrap().1;
+        #[cfg(target_os = "macos")]
+        assert_eq!(pretty(switch), "⌘ ⇧ '");
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(pretty(switch), "Ctrl Shift '");
+        assert!(Action::SwitchMode.always(), "the switcher opens from anywhere, not only while Live");
+    }
 }
