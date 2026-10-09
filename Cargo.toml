@@ -39,6 +39,8 @@ windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dw
 [target.'cfg(target_os = "macos")'.dependencies]
 # API keys in the login Keychain.
 keyring = { version = "3", features = ["apple-native"] }
+# Whether a key is saved, by attributes only (no secret read, so no Keychain prompt).
+security-framework = "3"
 # The overlay's NSWindow: level, click-through, focus, capture exclusion and resizing.
 block2 = "0.6"
 dispatch2 = "0.3"

@@ -40,6 +40,12 @@ fn run() -> anyhow::Result<()> {
     if args.first().map(String::as_str) == Some("--store-key") {
         let key = std::env::var("DEEPGRAM_API_KEY").context("set DEEPGRAM_API_KEY in the environment first")?;
         cluely_rs::secrets::set(deepgram::PROVIDER_ID, &key)?;
+        // As Settings does: mark the key as saved, with its masked hint, so Settings needn't read it.
+        let mut store = cluely_rs::settings::Store::load();
+        if let Some(hint) = cluely_rs::secrets::masked(&key) {
+            store.value.saved_keys.insert(deepgram::PROVIDER_ID.to_string(), hint);
+            store.save();
+        }
         println!("Deepgram key stored in {} (service CluelyRS, id {}).", cluely_rs::secrets::STORE_NAME, deepgram::PROVIDER_ID);
         return Ok(());
     }
@@ -50,7 +56,7 @@ fn run() -> anyhow::Result<()> {
     let provider: Arc<dyn StreamingAsr> = match args.iter().position(|a| a == "--provider").and_then(|i| args.get(i + 1)).map(String::as_str) {
         Some("deepgram") => match std::env::var("DEEPGRAM_API_KEY") {
             Ok(key) => Arc::new(deepgram::Deepgram::with_key(key)),
-            Err(_) => Arc::new(deepgram::Deepgram::from_store()),
+            Err(_) => Arc::new(deepgram::Deepgram::from_store(true)),
         },
         _ => Arc::new(ParakeetRealtime::default()),
     };

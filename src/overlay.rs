@@ -97,6 +97,11 @@ pub struct Overlay {
     pub(crate) key_notice: Option<SharedString>,
     pub(crate) loaded_models: Vec<String>,
     pub(crate) models_loading: bool,
+    /// The macOS Settings window's provider → key → model form.
+    #[cfg(target_os = "macos")]
+    pub(crate) model_ui: crate::settings_view::ModelUi,
+    /// A saved key shown on request for a few seconds (`settings_view::reveal`).
+    pub(crate) key_reveal: crate::settings_view::KeyReveal,
     /// Answers for the Live session: warm provider, one request at a time, stale replies dropped.
     reasoning: Option<ReasoningSession>,
     /// Decides when to prepare an answer ahead of time (`reasoning::speculation`).
@@ -222,7 +227,8 @@ impl Overlay {
             // The card's return button turns blue once there is text to send.
             if matches!(event, InputEvent::Changed) { cx.notify(); }
         }).detach();
-        cx.subscribe_in(&key_input, window, |this, _, event, _, cx| { if matches!(event, InputEvent::Submit) { this.save_key(cx); } }).detach();
+        #[cfg(not(target_os = "macos"))]
+        cx.subscribe_in(&key_input, window, |this, _, event, window, cx| { if matches!(event, InputEvent::Submit) { this.save_key(window, cx); } }).detach();
         cx.subscribe_in(&model_input, window, |this, input, event, window, cx| {
             if matches!(event, InputEvent::Changed) {
                 let model = input.read(cx).text().trim().to_string();
@@ -236,11 +242,16 @@ impl Overlay {
             }
         }).detach();
         let modes_ui = crate::modes_view::ModesUi::new(&modes, window, cx);
+        #[cfg(target_os = "macos")]
+        let model_ui = crate::settings_view::ModelUi::new(&key_input, &base_url_input, window, cx);
         let mut overlay = Self { native, own_window: window.window_handle(), hotkeys, store, settings_tab: None, sessions_window: None,
             #[cfg(target_os = "macos")]
             settings_window: None,
             archive, focus: cx.focus_handle(),
             recorder: None, shape: Rc::default(), hits: Hits::default(), composer, key_input, model_input, base_url_input,
+            #[cfg(target_os = "macos")]
+            model_ui,
+            key_reveal: Default::default(),
             key_notice: None, loaded_models: Vec::new(), models_loading: false, reasoning: None, planner: Planner::new(false, Budget::default()), prepared_shot: PreparedShot::default(), answer_action: "Assist", speculation_attempt: 0,
             metrics: None, next_turn: 0, catching_mouse: true, return_focus: None,
             codex: crate::codex::CodexClient::new(), codex_status: None, claude_status: None, signing_in: false,
@@ -250,6 +261,7 @@ impl Overlay {
             open_picker: None, reveal_accounts: false, devices: None, devices_loading: false, archive_bytes: None, picker_face: Rc::default(), toggle_hover: None,
             collapse: None, settings_height: Rc::default(), modes_ui, modes };
         overlay.refresh_model_status();
+        overlay.mark_existing_keys(window, cx);
         #[cfg(target_os = "macos")]
         overlay.update_dock();
         if start_live { overlay.set_live(true, window, cx); }
@@ -261,6 +273,10 @@ impl Overlay {
         change(&mut self.store.value);
         if self.store.value == previous { return; }
         self.store.save();
+        // A shown saved key belongs to one provider, and only while Settings is hidden from capture.
+        if previous.hide_from_capture != self.store.value.hide_from_capture || previous.api_provider != self.store.value.api_provider {
+            self.key_reveal.hide();
+        }
         if let Some(native) = self.native && previous.hide_from_capture != self.store.value.hide_from_capture {
             apply_capture_setting(native, &self.store.value);
         }
@@ -281,6 +297,11 @@ impl Overlay {
         if previous.transcribe != now.transcribe || previous.stt_provider != now.stt_provider || previous.listen_mic != now.listen_mic || previous.listen_desktop != now.listen_desktop
             || previous.mic_device != now.mic_device || previous.desktop_device != now.desktop_device || previous.use_gpu != now.use_gpu {
             self.restart_listening_if_live(window, cx);
+        }
+        // Choosing another provider loads its list (a user action, so it may read the saved key).
+        #[cfg(target_os = "macos")]
+        if previous.api_provider != self.store.value.api_provider || previous.provider != self.store.value.provider {
+            self.ensure_models(false, true, window, cx);
         }
         cx.notify();
     }
@@ -307,7 +328,12 @@ impl Overlay {
     /// Refresh what a settings tab shows (accounts, devices, history size) as it opens.
     pub(crate) fn prepare_tab(&mut self, tab: Tab, window: &mut Window, cx: &mut Context<Self>) {
         self.open_picker = None;
+        // A key shown while typing, or a saved key shown on request, is hidden again whenever a tab opens.
+        self.key_input.update(cx, |input, cx| input.set_revealed(false, cx));
+        self.key_reveal.hide();
         if tab == Tab::Model { self.refresh_subscriptions(window, cx); }
+        #[cfg(target_os = "macos")]
+        if tab == Tab::Model { self.ensure_models(true, false, window, cx); }
         if tab == Tab::Listening { self.refresh_model_status(); self.load_devices(window, cx); }
         if tab == Tab::History { self.refresh_archive_size(window, cx); }
         if tab == Tab::Modes { self.prepare_modes_tab(cx); }
@@ -361,6 +387,7 @@ impl Overlay {
         self.collapse = None;
         self.open_picker = None;
         self.reveal_accounts = false;
+        self.key_reveal.hide();
         self.hotkeys.set_panel_open(false);
         self.fit(window);
         cx.notify();
@@ -792,40 +819,120 @@ impl Overlay {
         if changed { self.store.save(); }
     }
 
-    pub fn save_key(&mut self, cx: &mut Context<Self>) {
+    /// Save the typed key for the tab's provider, then mark it saved (with its masked hint) in
+    /// Settings. The credential store is used on a background thread: it can block, and on macOS
+    /// show a Keychain prompt.
+    pub fn save_key(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let key = self.key_input.read(cx).text().trim().to_string();
         if key.is_empty() { return; }
         let provider = self.key_target();
-        self.key_notice = Some(match crate::secrets::set(&provider, &key) {
-            Ok(()) => { self.key_input.update(cx, |input, cx| input.clear(cx)); format!("Saved to {}.", crate::secrets::STORE_NAME).into() }
-            Err(error) => format!("Couldn't save the key: {error}").into(),
-        });
+        self.key_notice = Some("Saving…".into());
         cx.notify();
+        let target = provider.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let saved = cx.background_executor()
+                .spawn(async move { crate::secrets::set(&target, &key).map(|()| crate::secrets::masked(&key).unwrap_or_default()) }).await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                match saved {
+                    Ok(hint) => {
+                        this.key_input.update(cx, |input, cx| input.clear(cx));
+                        this.set_key_marker(&provider, Some(hint));
+                        this.key_notice = Some(format!("Saved to {}.", crate::secrets::STORE_NAME).into());
+                        #[cfg(target_os = "macos")]
+                        this.key_saved(&provider, window, cx);
+                    }
+                    Err(error) => this.key_notice = Some(format!("Couldn't save the key: {error}").into()),
+                }
+                // Only macOS loads models from here.
+                #[cfg(not(target_os = "macos"))]
+                let _ = window;
+                cx.notify();
+            });
+        }).detach();
     }
 
-    pub fn remove_key(&mut self, cx: &mut Context<Self>) {
+    /// Delete the tab's provider key, on a background thread, and its marker in Settings.
+    pub fn remove_key(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.key_reveal.hide();
         let provider = self.key_target();
-        self.key_notice = Some(match crate::secrets::remove(&provider) { Ok(()) => "Key removed.".into(), Err(_) => "No saved key to remove.".into() });
-        cx.notify();
+        let target = provider.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let removed = cx.background_executor().spawn(async move { crate::secrets::remove(&target) }).await;
+            let _ = this.update(cx, |this, cx| {
+                this.key_notice = Some(match removed {
+                    Ok(()) => { this.set_key_marker(&provider, None); "Key removed.".into() }
+                    Err(_) => "No saved key to remove.".into(),
+                });
+                cx.notify();
+            });
+        }).detach();
+    }
+
+    /// Keys saved before `Settings::saved_keys` existed have no marker. Look for them once at
+    /// startup, in the background (on macOS by attributes only, which never shows a Keychain
+    /// prompt), and mark the ones found.
+    fn mark_existing_keys(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let unmarked = self.store.value.unmarked_key_providers();
+        if unmarked.is_empty() { return; }
+        cx.spawn_in(window, async move |this, cx| {
+            let found = cx.background_executor().spawn(async move {
+                unmarked.into_iter().filter_map(|id| crate::secrets::find_marker(id).map(|hint| (id.to_string(), hint))).collect::<Vec<_>>()
+            }).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.store.value.mark_found_keys(found) {
+                    this.store.save();
+                    cx.notify();
+                }
+            });
+        }).detach();
+    }
+
+    /// Record in Settings whether `provider` has a saved key, with its masked hint.
+    pub(crate) fn set_key_marker(&mut self, provider: &str, hint: Option<String>) {
+        let markers = &mut self.store.value.saved_keys;
+        let changed = match hint {
+            Some(hint) => markers.insert(provider.to_string(), hint.clone()).as_ref() != Some(&hint),
+            None => markers.remove(provider).is_some(),
+        };
+        if changed { self.store.save(); }
     }
 
     /// Fetch the provider's model list off the UI thread.
     pub fn load_models(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(preset) = crate::providers::preset(&self.store.value.api_provider) else { return };
         let base = if preset.base_url.is_empty() { self.store.value.custom_base_url.trim().to_string() } else { preset.base_url.to_string() };
-        let key = crate::secrets::get(preset.id);
         let wire = preset.wire;
         self.models_loading = true;
         self.key_notice = None;
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
-            let result = cx.background_executor().spawn(async move { crate::providers::list_models(wire, &base, key.as_deref()) }).await;
-            let _ = this.update(cx, |this, cx| {
+            // The key is read here, off the UI thread (the credential store can block or prompt).
+            let (result, found) = cx.background_executor().spawn(async move {
+                let key = crate::secrets::get(preset.id);
+                let found = key.as_deref().and_then(crate::secrets::masked);
+                (crate::providers::list_models(wire, &base, key.as_deref()), found)
+            }).await;
+            let _ = this.update_in(cx, |this, window, cx| {
                 this.models_loading = false;
-                match result {
-                    Ok(models) => this.loaded_models = models,
-                    Err(error) => this.key_notice = Some(format!("Couldn't load models: {error}").into()),
+                // A key saved before markers existed is marked once it has been read. A key that
+                // can't be read leaves the marker alone: a denied Keychain prompt reads as no key.
+                if found.is_some() { this.set_key_marker(preset.id, found); }
+                // The provider changed while this list loaded: it belongs to the previous one.
+                if this.store.value.api_provider != preset.id {
+                    #[cfg(target_os = "macos")]
+                    this.models_stale(window, cx);
+                } else {
+                    #[cfg(target_os = "macos")]
+                    this.models_loaded(preset, result);
+                    #[cfg(not(target_os = "macos"))]
+                    match result {
+                        Ok(models) => this.loaded_models = models,
+                        Err(error) => this.key_notice = Some(format!("Couldn't load models: {error}").into()),
+                    }
                 }
+                // Only macOS starts another load from here.
+                #[cfg(not(target_os = "macos"))]
+                let _ = window;
                 cx.notify();
             });
         }).detach();
@@ -839,6 +946,7 @@ impl Overlay {
     fn toggle_visible(&mut self) {
         let Some(native) = self.native else { return };
         let visible = !platform::is_visible(native);
+        if !visible { self.key_reveal.hide(); }
         platform::set_visible(native, visible);
         self.hotkeys.set_overlay_visible(visible);
         // A hidden panel must not keep claiming Esc.
@@ -1087,10 +1195,15 @@ fn enclosing<'a>(shapes: impl Iterator<Item = &'a platform::Shape>, radius: i32)
     })
 }
 
-pub(crate) fn apply_capture_setting(native: NativeWindow, settings: &Settings) {
+/// Whether the overlay and Settings are kept out of screen captures right now.
+pub(crate) fn capture_excluded(settings: &Settings) -> bool {
     // CLUELYRS_ALLOW_CAPTURE=1 is a development switch for taking screenshots of the overlay.
     let dev_override = std::env::var_os("CLUELYRS_ALLOW_CAPTURE").is_some_and(|value| value == "1");
-    if let Err(error) = platform::set_capture_hidden(native, settings.hide_from_capture && !dev_override) {
+    settings.hide_from_capture && !dev_override
+}
+
+pub(crate) fn apply_capture_setting(native: NativeWindow, settings: &Settings) {
+    if let Err(error) = platform::set_capture_hidden(native, capture_excluded(settings)) {
         eprintln!("capture exclusion unavailable: {error}");
     }
 }

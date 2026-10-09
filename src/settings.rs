@@ -1,5 +1,6 @@
 //! Non-secret preferences, persisted atomically as JSON in the user's config folder.
-//! API keys never live here; they go to the OS credential store with the provider slice.
+//! API keys never live here; they go to the OS credential store with the provider slice. Only
+//! which providers have one saved, with its masked hint, is kept here (`saved_keys`).
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -50,6 +51,9 @@ pub struct Settings {
     pub api_models: BTreeMap<String, String>,
     /// Base URL for the "custom" OpenAI-compatible provider.
     pub custom_base_url: String,
+    /// Providers with a key in the OS credential store, each with its masked hint ("••••3f9a"),
+    /// so Settings can show the saved key without reading the store. Never the key itself.
+    pub saved_keys: BTreeMap<String, String>,
     pub answer_style: AnswerStyle,
     /// Slower, deeper reasoning for answers. Off answers with the least reasoning the provider
     /// offers, so the first words arrive as fast as possible.
@@ -94,7 +98,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             provider: Provider::default(), claude_model: ClaudeModel::default(), claude_models: BTreeMap::new(), codex_model: String::new(),
-            api_provider: "anthropic".into(), api_models: BTreeMap::new(), custom_base_url: String::new(),
+            api_provider: "anthropic".into(), api_models: BTreeMap::new(), custom_base_url: String::new(), saved_keys: BTreeMap::new(),
             answer_style: AnswerStyle::default(), smart_mode: false, speculative_answers: false, auto_answer: false, transcribe: true, stt_provider: SttProvider::default(),
             use_gpu: true, listen_mic: true, listen_desktop: true,
             mic_device: String::new(), desktop_device: String::new(),
@@ -105,6 +109,29 @@ impl Default for Settings {
 }
 
 impl Settings {
+    /// Providers that can have a saved key but have no marker: keys saved before markers existed
+    /// are looked for among these (`secrets::find_marker`).
+    pub fn unmarked_key_providers(&self) -> Vec<&'static str> {
+        crate::providers::PRESETS.iter()
+            .filter(|preset| preset.needs_key || preset.base_url.is_empty())
+            .map(|preset| preset.id)
+            .chain([crate::stt::deepgram::PROVIDER_ID])
+            .filter(|id| !self.saved_keys.contains_key(*id))
+            .collect()
+    }
+
+    /// Mark the keys found by that search, leaving markers set meanwhile alone. Whether any was added.
+    pub fn mark_found_keys(&mut self, found: Vec<(String, String)>) -> bool {
+        let mut added = false;
+        for (provider, hint) in found {
+            if let std::collections::btree_map::Entry::Vacant(entry) = self.saved_keys.entry(provider) {
+                entry.insert(hint);
+                added = true;
+            }
+        }
+        added
+    }
+
     /// Model for the selected API provider; empty until the user picks one.
     pub fn api_model(&self) -> &str { self.api_models.get(&self.api_provider).map(String::as_str).unwrap_or("") }
 
@@ -160,6 +187,33 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keys_saved_before_markers_are_looked_for_and_marked_once() {
+        let mut settings = Settings { saved_keys: [("anthropic".to_string(), "••••3f9a".to_string())].into(), ..Settings::default() };
+        let unmarked = settings.unmarked_key_providers();
+        assert!(unmarked.contains(&"openai") && unmarked.contains(&"custom") && unmarked.contains(&"deepgram"));
+        assert!(!unmarked.contains(&"anthropic"), "already marked");
+        assert!(!unmarked.contains(&"ollama"), "local providers have no key");
+
+        // A key marked meanwhile (saved while the search ran) keeps its own hint.
+        settings.saved_keys.insert("openai".into(), "••••new1".into());
+        let found = vec![("openai".to_string(), String::new()), ("deepgram".to_string(), String::new())];
+        assert!(settings.mark_found_keys(found.clone()));
+        assert_eq!(settings.saved_keys["openai"], "••••new1");
+        assert_eq!(settings.saved_keys["deepgram"], "");
+        assert!(!settings.mark_found_keys(found), "nothing new the second time");
+        assert!(!settings.unmarked_key_providers().contains(&"deepgram"));
+    }
+
+    #[test]
+    fn saved_keys_are_markers_with_hints_only() {
+        let settings = Settings { saved_keys: [("anthropic".to_string(), "••••3f9a".to_string())].into(), ..Settings::default() };
+        let json = serde_json::to_string(&settings).unwrap();
+        assert!(json.contains(r#""savedKeys":{"anthropic":"••••3f9a"}"#));
+        let older: Settings = serde_json::from_str(r#"{"provider":"apiKey"}"#).unwrap();
+        assert!(older.saved_keys.is_empty(), "settings saved before markers existed have none");
+    }
 
     #[test]
     fn missing_fields_take_defaults_and_retired_fields_are_ignored() {

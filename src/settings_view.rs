@@ -16,6 +16,13 @@ use crate::theme;
 use crate::transcript_view::model_size_label;
 use crate::ui;
 
+mod reveal;
+#[cfg(target_os = "macos")]
+mod model_form;
+#[cfg(target_os = "macos")]
+pub(crate) use model_form::ModelUi;
+pub(crate) use reveal::KeyReveal;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Tab { #[default] Model, Listening, Modes, Keys, Window, History }
 
@@ -124,6 +131,29 @@ fn dock_section(s: &Settings, cx: &mut Context<Overlay>) -> Div {
 fn button(id: &'static str, label: impl Into<SharedString>, primary: bool) -> gpui::Stateful<Div> {
     let base = div().id(id).flex_none().px(px(12.0)).py(px(6.0)).rounded(px(9.0)).cursor_pointer().text_size(px(12.0)).font_weight(FontWeight::SEMIBOLD).child(label.into());
     if primary { base.bg(theme::accent()).text_color(theme::accent_ink()) } else { base.border_1().border_color(theme::hairline()).text_color(theme::body()) }
+}
+
+/// "Saved key ••••3f9a", "Saved key" for a key found before its hint was known, or "No key saved".
+fn saved_key_label(hint: Option<&str>) -> String {
+    match hint {
+        Some("") => "Saved key".to_string(),
+        Some(hint) => format!("Saved key {hint}"),
+        None => "No key saved".to_string(),
+    }
+}
+
+/// The eye in an API key field: shows what was typed or pasted so it can be checked before saving.
+/// Never shows a saved key; saving empties the field and hides it again.
+fn key_eye(input: &gpui::Entity<crate::input::TextInput>, cx: &App) -> impl IntoElement {
+    let revealed = input.read(cx).is_revealed();
+    let target = input.clone();
+    div().id("key-eye").flex_none().size(px(20.0)).flex().items_center().justify_center().rounded(px(5.0)).cursor_pointer()
+        .when(revealed, |eye| eye.bg(gpui::rgb(0x25282c)))
+        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+            cx.stop_propagation();
+            target.update(cx, |input, cx| input.set_revealed(!revealed, cx));
+        })
+        .child(ui::icon(if revealed { "icons/eye-off.svg" } else { "icons/eye.svg" }, 14.0, if revealed { theme::body() } else { theme::muted() }))
 }
 
 /// GPT version of a Codex model id: "gpt-6.1-sol" → (6, 1), "gpt-6-luna" → (6, 0); `None` for other shapes.
@@ -283,18 +313,29 @@ impl Overlay {
                 .on_mouse_down(MouseButton::Left, listen(cx, move |this, _, window, cx| this.update_settings(|s| s.provider = provider, window, cx)))
                 .child(self.connection_badge(provider, index, cx)));
         }
-        let choice = self.model_choice();
-        let model = field("Model", self.dropdown(choice.picker, choice.value, choice.options, &choice.selected, choice.set, cx));
+        // macOS: provider, key and model as one form in the Settings window (`model_form`).
+        #[cfg(target_os = "macos")]
+        { self.model_form(list, cx) }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let choice = self.model_choice();
+            let model = field("Model", self.dropdown(choice.picker, choice.value, choice.options, &choice.selected, choice.set, cx));
+            let style = field("Answer style", self.answer_style_picker(cx));
+            let smart = ui::setting_row("Smart mode · slower, deeper reasoning", switch("smart-mode", s.smart_mode, |s, v| s.smart_mode = v, cx)).border_b_0();
+            let mut tab = div().flex().flex_col().gap(px(16.0)).child(list).child(div().flex().gap(px(12.0)).child(model).child(style)).child(smart)
+                .child(answer_early(s, cx));
+            if s.provider == Provider::ApiKey { tab = tab.child(self.api_key_section(cx)); }
+            tab
+        }
+    }
+
+    fn answer_style_picker(&self, cx: &mut Context<Self>) -> Div {
+        let s = &self.store.value;
         let styles = [(AnswerStyle::Spoken, "Words I can say aloud"), (AnswerStyle::Standard, "Standard explanations")];
         let style_value = styles.iter().find(|(st, _)| *st == s.answer_style).map(|(_, l)| *l).unwrap_or("Words I can say aloud");
-        let style = field("Answer style", self.dropdown(Picker::AnswerStyle, style_value,
+        self.dropdown(Picker::AnswerStyle, style_value,
             styles.iter().map(|(st, l)| (format!("{st:?}"), l.to_string())).collect(), &format!("{:?}", s.answer_style),
-            |s, v| s.answer_style = if v == "Standard" { AnswerStyle::Standard } else { AnswerStyle::Spoken }, cx));
-        let smart = ui::setting_row("Smart mode · slower, deeper reasoning", switch("smart-mode", s.smart_mode, |s, v| s.smart_mode = v, cx)).border_b_0();
-        let mut tab = div().flex().flex_col().gap(px(16.0)).child(list).child(div().flex().gap(px(12.0)).child(model).child(style)).child(smart)
-            .child(answer_early(s, cx));
-        if s.provider == Provider::ApiKey { tab = tab.child(self.api_key_section(cx)); }
-        tab
+            |s, v| s.answer_style = if v == "Standard" { AnswerStyle::Standard } else { AnswerStyle::Spoken }, cx)
     }
 
     /// Trailing status for a provider row: the account (masked until clicked), a Sign in
@@ -306,7 +347,7 @@ impl Overlay {
             Provider::Claude => self.claude_status.as_ref(),
             Provider::ApiKey => {
                 let s = &self.store.value;
-                let ready = crate::providers::preset(&s.api_provider).is_some_and(|p| !p.needs_key || crate::secrets::get(p.id).is_some());
+                let ready = crate::providers::preset(&s.api_provider).is_some_and(|p| !p.needs_key || s.saved_keys.contains_key(p.id));
                 return if ready { text("Ready".into(), theme::ok()) } else { text("Not set".into(), theme::muted()) };
             }
         };
@@ -378,6 +419,7 @@ impl Overlay {
         }
     }
 
+    #[cfg(not(target_os = "macos"))]
     fn api_key_section(&self, cx: &mut Context<Self>) -> Div {
         let s = &self.store.value;
         let presets: Vec<(String, String)> = crate::providers::PRESETS.iter().map(|p| (p.id.to_string(), p.label.to_string())).collect();
@@ -394,22 +436,27 @@ impl Overlay {
         let mut section = div().flex().flex_col().gap(px(16.0));
         let mut top = div().flex().gap(px(12.0)).child(provider);
         if preset.needs_key {
-            let saved = crate::secrets::hint(preset.id);
-            let mut status = div().flex().items_center().gap(px(12.0)).text_size(px(12.0)).text_color(theme::muted())
-                .child(match &saved { Some(hint) => format!("Saved key {hint}"), None => "No key saved".to_string() });
-            if saved.is_some() {
-                status = status.child(div().id("remove-key").cursor_pointer().text_color(gpui::rgb(0xffb4a8))
-                    .on_mouse_down(MouseButton::Left, listen(cx, |this, _, _, cx| this.remove_key(cx))).child("Remove"));
-            }
-            if !preset.key_page.is_empty() {
-                let page = preset.key_page;
-                status = status.child(div().id("key-page").cursor_pointer().text_color(theme::accent_soft())
-                    .on_mouse_down(MouseButton::Left, listen(cx, move |_, _, _, cx| cx.open_url(page))).child("Get a key ↗"));
+            let saved = s.saved_keys.get(preset.id).cloned();
+            let mut status = div().flex().items_center().gap(px(12.0)).text_size(px(12.0)).text_color(theme::muted());
+            if let Some(key) = self.revealed_key(preset.id) {
+                status = status.gap(px(10.0)).child(reveal::revealed_text(key)).child(self.saved_key_eye(preset.id, cx)).children(self.reveal_countdown(true));
+            } else {
+                status = status.child(saved_key_label(saved.as_deref()));
+                if saved.is_some() {
+                    status = status.child(self.saved_key_eye(preset.id, cx))
+                        .child(div().id("remove-key").cursor_pointer().text_color(gpui::rgb(0xffb4a8))
+                            .on_mouse_down(MouseButton::Left, listen(cx, |this, _, window, cx| this.remove_key(window, cx))).child("Remove"));
+                }
+                if !preset.key_page.is_empty() {
+                    let page = preset.key_page;
+                    status = status.child(div().id("key-page").cursor_pointer().text_color(theme::accent_soft())
+                        .on_mouse_down(MouseButton::Left, listen(cx, move |_, _, _, cx| cx.open_url(page))).child("Get a key ↗"));
+                }
             }
             top = top.child(field("API key", div().flex().flex_col().gap(px(6.0))
                 .child(div().flex().items_center().gap(px(8.0))
-                    .child(input_box(self.key_input.clone(), "key-box"))
-                    .child(button("save-key", "Save", true).on_mouse_down(MouseButton::Left, listen(cx, |this, _, _, cx| this.save_key(cx)))))
+                    .child(input_box(self.key_input.clone(), "key-box").flex().items_center().gap(px(6.0)).pr(px(5.0)).child(key_eye(&self.key_input, cx)))
+                    .child(button("save-key", "Save", true).on_mouse_down(MouseButton::Left, listen(cx, |this, _, window, cx| this.save_key(window, cx)))))
                 .child(status)));
         }
         section = section.child(top);
@@ -476,12 +523,12 @@ impl Overlay {
     /// The Deepgram API key: paste and save, or the saved key's hint with Remove.
     fn deepgram_key_row(&self, cx: &mut Context<Self>) -> Div {
         let focus = self.key_input.clone();
-        let saved = crate::secrets::hint(deepgram::PROVIDER_ID);
+        let saved = self.store.value.saved_keys.get(deepgram::PROVIDER_ID).cloned();
         let mut status = div().flex().items_center().gap(px(12.0)).text_size(px(12.0)).text_color(theme::muted())
-            .child(match &saved { Some(hint) => format!("Saved key {hint}"), None => "No key saved".to_string() });
+            .child(saved_key_label(saved.as_deref()));
         if saved.is_some() {
             status = status.child(div().id("remove-key").cursor_pointer().text_color(gpui::rgb(0xffb4a8))
-                .on_mouse_down(MouseButton::Left, listen(cx, |this, _, _, cx| this.remove_key(cx))).child("Remove"));
+                .on_mouse_down(MouseButton::Left, listen(cx, |this, _, window, cx| this.remove_key(window, cx))).child("Remove"));
         }
         status = status.child(div().id("key-page").cursor_pointer().text_color(theme::accent_soft())
             .on_mouse_down(MouseButton::Left, listen(cx, |_, _, _, cx| cx.open_url("https://console.deepgram.com/"))).child("Get a key ↗"));
@@ -491,7 +538,7 @@ impl Overlay {
                     .bg(theme::field()).border_1().border_color(theme::hairline()).cursor_text()
                     .on_mouse_down(MouseButton::Left, listen(cx, move |_, _, window, cx| window.focus(&focus.focus_handle(cx))))
                     .child(self.key_input.clone()))
-                .child(button("save-key", "Save", true).on_mouse_down(MouseButton::Left, listen(cx, |this, _, _, cx| this.save_key(cx)))))
+                .child(button("save-key", "Save", true).on_mouse_down(MouseButton::Left, listen(cx, |this, _, window, cx| this.save_key(window, cx)))))
             .child(status);
         if let Some(notice) = self.key_notice.clone() {
             row = row.child(div().text_size(px(12.0)).text_color(theme::accent_soft()).child(notice));
@@ -656,6 +703,13 @@ mod tests {
         let other = vec![("codex-mini".to_string(), "Codex Mini".to_string())];
         assert_eq!(latest_gpt_models(&other), other);
         assert_eq!((gpt_version("gpt-6.1-sol"), gpt_version("GPT-6-Luna"), gpt_version("gpt-x")), (Some((6, 1)), Some((6, 0)), None));
+    }
+
+    #[test]
+    fn saved_keys_read_with_or_without_their_hint() {
+        assert_eq!(saved_key_label(Some("••••3f9a")), "Saved key ••••3f9a");
+        assert_eq!(saved_key_label(Some("")), "Saved key", "a key found before it was ever read");
+        assert_eq!(saved_key_label(None), "No key saved");
     }
 
     #[test]
