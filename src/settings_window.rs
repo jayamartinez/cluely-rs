@@ -38,10 +38,12 @@ pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([KeyBinding::new("cmd-w", CloseSettings, Some("SettingsWindow"))]);
 }
 
-/// The window's width; its height follows the open tab.
+/// The window's width; its height follows the open tab, within these limits.
 const WIDTH: f32 = 760.0;
-/// The shortest the window gets, and how much of the screen's height it leaves free at most.
 const MIN_HEIGHT: f32 = 420.0;
+/// Taller tabs scroll rather than make a tall window.
+const MAX_HEIGHT: f32 = 640.0;
+/// Room the window always leaves on the screen.
 const SCREEN_MARGIN: f32 = 120.0;
 /// The Modes page's window height (its columns scroll).
 const MODES_HEIGHT: f32 = 640.0;
@@ -121,8 +123,8 @@ impl SettingsWindow {
         cx.notify();
     }
 
-    /// Grow or shrink to show the whole tab, as Mac settings windows do, keeping the top edge in
-    /// place. A tab taller than the screen allows scrolls.
+    /// Fit the tab, as Mac settings windows do, keeping the top edge in place: shorter tabs make a
+    /// shorter window, and tabs taller than `MAX_HEIGHT` (or the screen allows) scroll.
     fn fit_to_tab(&self, window: &mut Window, cx: &App) {
         let (toolbar, tab) = self.heights.get();
         if toolbar <= 0.0 { return; }
@@ -130,7 +132,7 @@ impl SettingsWindow {
         let tab = if self.page == Page::Settings(Tab::Modes) { MODES_HEIGHT - toolbar } else { tab };
         if tab <= 0.0 { return; }
         let screen = window.display(cx).map_or(f32::MAX, |display| f32::from(display.bounds().size.height) - SCREEN_MARGIN);
-        let wanted = (toolbar + tab).ceil().clamp(MIN_HEIGHT, screen.max(MIN_HEIGHT));
+        let wanted = (toolbar + tab).ceil().clamp(MIN_HEIGHT, MAX_HEIGHT.min(screen).max(MIN_HEIGHT));
         if (wanted - f32::from(window.viewport_size().height)).abs() > 1.0 {
             platform::resize(window, self.native, size(px(WIDTH), px(wanted)));
         }
