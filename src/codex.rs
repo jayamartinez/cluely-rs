@@ -31,6 +31,7 @@ use base64::Engine;
 use serde_json::{Map, Value, json};
 
 use crate::chat::{ChatRequest, Effort, SubscriptionStatus};
+use crate::cli_path::{self, Cli};
 use crate::providers::{Message, Part, Role};
 
 const MAX_LINE_BYTES: usize = 8 * 1024 * 1024;
@@ -850,9 +851,18 @@ fn is_launcher_script(path: &Path) -> bool {
     path.extension().and_then(|ext| ext.to_str()).is_some_and(|ext| ["cmd", "bat", "ps1"].iter().any(|bad| ext.eq_ignore_ascii_case(bad)))
 }
 
+/// Where the Codex CLI was found, or a user-safe reason it wasn't.
+pub fn executable() -> Result<PathBuf, String> {
+    SystemLauncher.resolve().map_err(|error| error.message)
+}
+
 impl Launcher for SystemLauncher {
     fn resolve(&self) -> Result<PathBuf, CodexError> {
-        resolve_executable(&|key| std::env::var_os(key))
+        let env = |key: &str| if key == "PATH" { Some(cli_path::search_path()) } else { std::env::var_os(key) };
+        cli_path::resolve_with_retry(
+            || resolve_executable(&env, cli_path::chosen(Cli::Codex).as_deref()),
+            |error| error.kind == Kind::NotInstalled,
+        )
     }
 
     fn launch(&self) -> Result<Spawned, CodexError> {
@@ -870,7 +880,7 @@ impl Launcher for SystemLauncher {
             .args(launch_arguments())
             .current_dir(&cwd)
             .env_clear()
-            .envs(sanitize_environment(std::env::vars_os()))
+            .envs(sanitize_environment(cli_path::with_search_path(std::env::vars_os())))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             // Diagnostics may contain private context; they are discarded, never logged.
@@ -1062,31 +1072,27 @@ fn resolve_candidate(file: &Path) -> Option<PathBuf> {
     None
 }
 
-/// CODEX_PATH, then PATH, then the official Windows installer location. Launcher scripts are
+/// The location chosen in Settings when it is usable, then CODEX_PATH, then PATH (see
+/// `cli_path::search_path`), then the official Windows installer location. Launcher scripts are
 /// only followed to the native binary of the official npm package; they are never executed.
-fn resolve_executable(env: &dyn Fn(&str) -> Option<OsString>) -> Result<PathBuf, CodexError> {
+fn resolve_executable(env: &dyn Fn(&str) -> Option<OsString>, chosen: Option<&Path>) -> Result<PathBuf, CodexError> {
     target().ok_or_else(|| err(Kind::NotInstalled))?;
+    let accept = |candidate: &Path| resolve_candidate(candidate).filter(|path| !is_launcher_script(path));
+    if let Some(found) = chosen.filter(|path| path.is_absolute()).and_then(accept) {
+        return Ok(found);
+    }
     if let Some(supplied) = env("CODEX_PATH").filter(|value| !value.is_empty()) {
         let text = supplied.to_str().ok_or_else(|| err(Kind::PathInvalid))?;
         let path = Path::new(text);
         if text.contains(['\0', '\r', '\n']) || !path.is_absolute() {
             return Err(err(Kind::PathInvalid));
         }
-        return resolve_candidate(path).filter(|path| !is_launcher_script(path)).ok_or_else(|| err(Kind::NotInstalled));
+        return accept(path).ok_or_else(|| err(Kind::NotInstalled));
     }
-    let names: &[&str] = if cfg!(windows) { &["codex.exe", "codex.cmd", "codex.ps1", "codex"] } else { &["codex"] };
-    if let Some(path) = env("PATH") {
-        for directory in std::env::split_paths(&path) {
-            let clean = PathBuf::from(directory.to_string_lossy().trim_matches('"'));
-            if clean.as_os_str().is_empty() || !clean.is_absolute() {
-                continue;
-            }
-            for name in names {
-                if let Some(found) = resolve_candidate(&clean.join(name)).filter(|path| !is_launcher_script(path)) {
-                    return Ok(found);
-                }
-            }
-        }
+    let names =
+        if cfg!(windows) { cli_path::file_names("codex", &["exe", "cmd", "ps1", ""], env("PATHEXT").as_deref()) } else { vec!["codex".to_string()] };
+    if let Some(found) = env("PATH").and_then(|path| cli_path::find_in(&path, &names, accept)) {
+        return Ok(found);
     }
     if cfg!(windows) {
         let local = env("LOCALAPPDATA").map(PathBuf::from).or_else(dirs::data_local_dir);
@@ -2490,7 +2496,6 @@ pub(crate) mod tests {
 
     // --- Executable resolution ------------------------------------------------------------------
 
-    #[cfg(windows)]
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("cluelyrs-codex-test-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -2501,9 +2506,43 @@ pub(crate) mod tests {
     #[test]
     fn codex_path_must_be_absolute() {
         let env = |key: &str| (key == "CODEX_PATH").then(|| OsString::from("codex.exe"));
-        assert_eq!(resolve_executable(&env).unwrap_err().kind, Kind::PathInvalid);
+        assert_eq!(resolve_executable(&env, None).unwrap_err().kind, Kind::PathInvalid);
         let missing = |key: &str| (key == "CODEX_PATH").then(|| OsString::from(if cfg!(windows) { "C:\\nope\\codex.exe" } else { "/nope/codex" }));
-        assert_eq!(resolve_executable(&missing).unwrap_err().kind, Kind::NotInstalled);
+        assert_eq!(resolve_executable(&missing, None).unwrap_err().kind, Kind::NotInstalled);
+    }
+
+    /// A fake native `codex` that does nothing (Unix: an executable file is a native candidate).
+    #[cfg(unix)]
+    fn fake_codex(dir: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all(dir).unwrap();
+        let path = dir.join("codex");
+        std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        real(&path)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn chosen_location_then_codex_path_then_path() {
+        let dir = scratch("order");
+        let (chosen, supplied, on_path) = (fake_codex(&dir.join("chosen")), fake_codex(&dir.join("supplied")), fake_codex(&dir.join("path")));
+        let path_var = std::env::join_paths([dir.join("empty"), dir.join("path")]).unwrap();
+        let env = |codex_path: Option<&Path>| {
+            let (codex_path, path_var) = (codex_path.map(|path| path.as_os_str().to_owned()), path_var.clone());
+            move |key: &str| match key { "CODEX_PATH" => codex_path.clone(), "PATH" => Some(path_var.clone()), _ => None }
+        };
+        assert_eq!(resolve_executable(&env(Some(&supplied)), Some(chosen.as_path())).unwrap(), chosen, "the location chosen in Settings comes first");
+        assert_eq!(resolve_executable(&env(Some(&supplied)), None).unwrap(), supplied);
+        assert_eq!(resolve_executable(&env(None), None).unwrap(), on_path);
+        // A chosen location that is gone, relative or not executable is skipped, not an error.
+        for unusable in [dir.join("gone").join("codex"), PathBuf::from("codex"), dir.join("chosen")] {
+            assert_eq!(resolve_executable(&env(None), Some(unusable.as_path())).unwrap(), on_path, "{unusable:?}");
+        }
+        let nowhere = |key: &str| (key == "PATH").then(|| dir.join("empty").into_os_string());
+        let missing = resolve_executable(&nowhere, None).unwrap_err();
+        assert_eq!((missing.kind, missing.message.as_str()), (Kind::NotInstalled, "Install the Codex CLI, or set CODEX_PATH to its executable."));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[cfg(windows)]
@@ -2521,11 +2560,11 @@ pub(crate) mod tests {
         std::fs::write(dir.join("codex.bat"), "@echo evil").unwrap();
         let shim = dir.join("codex.cmd");
         let env = |key: &str| (key == "CODEX_PATH").then(|| shim.clone().into_os_string());
-        let resolved = resolve_executable(&env).unwrap();
+        let resolved = resolve_executable(&env, None).unwrap();
         assert!(resolved.ends_with("bin\\codex.exe") && resolved.to_string_lossy().contains(triple));
         let bat = dir.join("codex.bat");
         let env = |key: &str| (key == "CODEX_PATH").then(|| bat.clone().into_os_string());
-        assert!(resolve_executable(&env).is_err());
+        assert!(resolve_executable(&env, None).is_err());
         assert_eq!(shim_entries("node \"$basedir/node_modules/@openai/codex/bin/codex.js\" \"$@\""), vec!["node_modules/@openai/codex/bin/codex.js"]);
         assert!(shim_entries("\"%~dp0\\%EVIL%\\@openai\\codex\\bin\\codex.js\"").is_empty());
         let _ = std::fs::remove_dir_all(&dir);

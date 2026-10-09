@@ -21,6 +21,7 @@ use base64::Engine as _;
 use serde_json::{Value, json};
 
 use crate::chat::{ChatRequest, Effort, SubscriptionStatus};
+use crate::cli_path::{self, Cli};
 use crate::providers::{Message, Part, Role};
 
 const MODELS: [(&str, &str); 3] = [("sonnet", "Sonnet"), ("opus", "Opus"), ("haiku", "Haiku")];
@@ -72,6 +73,11 @@ static WORKSPACE_COUNTER: AtomicU64 = AtomicU64::new(0);
 pub struct ClaudeCli;
 
 impl ClaudeCli {
+    /// Where the Claude Code CLI was found, or a user-safe reason it wasn't.
+    pub fn executable() -> Result<PathBuf, String> {
+        resolve_executable()
+    }
+
     /// Reads the CLI's sign-in state with `claude auth status --json`.
     pub fn status() -> SubscriptionStatus {
         let mut status = SubscriptionStatus { models: models(), ..SubscriptionStatus::default() };
@@ -640,14 +646,18 @@ fn native_executable(path: &Path) -> bool {
     }
 }
 
-/// Resolution order: CLAUDE_PATH, ~/.local/bin, then PATH. `usable` checks that a
-/// candidate is an existing native executable.
+/// Resolution order: the location chosen in Settings when it is usable, CLAUDE_PATH,
+/// ~/.local/bin, then PATH. `usable` checks that a candidate is an existing native executable.
 fn resolve_with(
+    chosen: Option<&Path>,
     claude_path: Option<OsString>,
     home: Option<PathBuf>,
     path_var: Option<OsString>,
     usable: &dyn Fn(&Path) -> bool,
 ) -> Result<PathBuf, String> {
+    if let Some(chosen) = chosen.filter(|path| path.is_absolute() && usable(path)) {
+        return Ok(chosen.to_path_buf());
+    }
     if let Some(supplied) = claude_path.filter(|value| !value.is_empty()) {
         let supplied = PathBuf::from(supplied);
         let text = supplied.to_string_lossy();
@@ -657,19 +667,11 @@ fn resolve_with(
         return if usable(&supplied) { Ok(supplied) } else { Err(NOT_FOUND.into()) };
     }
     let binary = if cfg!(windows) { "claude.exe" } else { "claude" };
-    let mut directories = Vec::new();
-    if let Some(home) = home.filter(|home| home.is_absolute()) {
-        directories.push(home.join(".local").join("bin"));
-    }
-    if let Some(path_var) = path_var {
-        for directory in std::env::split_paths(&path_var) {
-            let clean = PathBuf::from(directory.to_string_lossy().trim_matches('"'));
-            if clean.is_absolute() {
-                directories.push(clean);
-            }
-        }
-    }
-    directories.into_iter().map(|directory| directory.join(binary)).find(|candidate| usable(candidate)).ok_or_else(|| NOT_FOUND.into())
+    let accept = |candidate: &Path| usable(candidate).then(|| candidate.to_path_buf());
+    let local = home.filter(|home| home.is_absolute()).map(|home| home.join(".local").join("bin").join(binary));
+    local.and_then(|local| accept(&local))
+        .or_else(|| cli_path::find_in(&path_var?, &[binary.to_string()], accept))
+        .ok_or_else(|| NOT_FOUND.into())
 }
 
 // ---------------------------------------------------------------------------
@@ -697,7 +699,11 @@ fn usable_on_disk(path: &Path) -> bool {
 }
 
 fn resolve_executable() -> Result<PathBuf, String> {
-    resolve_with(std::env::var_os("CLAUDE_PATH"), dirs::home_dir(), std::env::var_os("PATH"), &usable_on_disk)
+    let resolve = || {
+        let chosen = cli_path::chosen(Cli::Claude);
+        resolve_with(chosen.as_deref(), std::env::var_os("CLAUDE_PATH"), dirs::home_dir(), Some(cli_path::search_path()), &usable_on_disk)
+    };
+    cli_path::resolve_with_retry(resolve, |message| message == NOT_FOUND)
 }
 
 /// An owned, empty temporary working directory, removed non-recursively on drop.
@@ -736,12 +742,14 @@ struct Running {
 
 fn launch(exe: &Path, args: &[String], stdin: bool, stdout: bool) -> Result<Running, String> {
     let workspace = Workspace::create()?;
+    // PATH is the one `cli_path` searched, so the CLI finds the tools its install relies on.
+    let vars = cli_path::with_search_path(std::env::vars_os()).into_iter().filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)));
     let mut command = Command::new(exe);
     command
         .args(args)
         .current_dir(&workspace.0)
         .env_clear()
-        .envs(sanitize_env(std::env::vars_os().filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))))
+        .envs(sanitize_env(vars))
         .stdin(if stdin { Stdio::piped() } else { Stdio::null() })
         .stdout(if stdout { Stdio::piped() } else { Stdio::null() })
         .stderr(Stdio::null());
@@ -1245,17 +1253,17 @@ mod tests {
         let path_var = std::env::join_paths([PathBuf::from("relative"), bin]).unwrap();
 
         let only = |target: PathBuf| move |path: &Path| path == target;
-        assert_eq!(resolve_with(None, Some(home.clone()), None, &only(local.clone())), Ok(local.clone()));
-        assert_eq!(resolve_with(None, Some(home.clone()), Some(path_var.clone()), &only(on_path.clone())), Ok(on_path));
-        assert_eq!(resolve_with(None, Some(home.clone()), Some(path_var), &|_| true), Ok(local), "~/.local/bin wins");
-        assert_eq!(resolve_with(None, None, None, &|_| true), Err(NOT_FOUND.into()));
-        assert_eq!(resolve_with(None, Some(PathBuf::from("rel")), None, &|_| true), Err(NOT_FOUND.into()));
+        assert_eq!(resolve_with(None, None, Some(home.clone()), None, &only(local.clone())), Ok(local.clone()));
+        assert_eq!(resolve_with(None, None, Some(home.clone()), Some(path_var.clone()), &only(on_path.clone())), Ok(on_path));
+        assert_eq!(resolve_with(None, None, Some(home.clone()), Some(path_var), &|_| true), Ok(local), "~/.local/bin wins");
+        assert_eq!(resolve_with(None, None, None, None, &|_| true), Err(NOT_FOUND.into()));
+        assert_eq!(resolve_with(None, None, Some(PathBuf::from("rel")), None, &|_| true), Err(NOT_FOUND.into()));
 
         let supplied = root.join("tools").join(binary);
-        assert_eq!(resolve_with(Some(supplied.clone().into()), Some(home), None, &|_| true), Ok(supplied));
-        assert_eq!(resolve_with(Some("claude".into()), None, None, &|_| true), Err(BAD_CLAUDE_PATH.into()));
+        assert_eq!(resolve_with(None, Some(supplied.clone().into()), Some(home), None, &|_| true), Ok(supplied));
+        assert_eq!(resolve_with(None, Some("claude".into()), None, None, &|_| true), Err(BAD_CLAUDE_PATH.into()));
         let script = root.join("tools").join("claude.cmd");
-        assert_eq!(resolve_with(Some(script.clone().into()), None, None, &|path| native_executable(path)), Err(NOT_FOUND.into()));
+        assert_eq!(resolve_with(None, Some(script.clone().into()), None, None, &|path| native_executable(path)), Err(NOT_FOUND.into()));
 
         for name in ["claude.cmd", "claude.ps1", "cli.js", "claude.BAT"] {
             assert!(!native_executable(Path::new(name)), "{name}");
@@ -1264,6 +1272,35 @@ mod tests {
             assert!(native_executable(Path::new(r"C:\x\CLAUDE.EXE")));
             assert!(!native_executable(Path::new(r"C:\x\claude")));
         }
+    }
+
+    #[test]
+    fn a_usable_chosen_location_comes_first() {
+        let root = PathBuf::from(if cfg!(windows) { r"C:\" } else { "/" });
+        let binary = if cfg!(windows) { "claude.exe" } else { "claude" };
+        let chosen = root.join("chosen").join(binary);
+        let supplied = root.join("tools").join(binary);
+        let usable = |path: &Path| path != root.join("gone").join(binary);
+        assert_eq!(resolve_with(Some(&chosen), Some(supplied.clone().into()), None, None, &usable), Ok(chosen));
+        // Gone or relative: skipped for CLAUDE_PATH and the automatic search, not an error.
+        assert_eq!(resolve_with(Some(&root.join("gone").join(binary)), Some(supplied.clone().into()), None, None, &usable), Ok(supplied.clone()));
+        assert_eq!(resolve_with(Some(Path::new(binary)), Some(supplied.clone().into()), None, None, &usable), Ok(supplied));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_native_executable_on_the_search_path_is_found() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("cluelyrs-claude-path-{}", std::process::id()));
+        let bin = dir.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let claude = bin.join("claude");
+        std::fs::write(&claude, "#!/bin/sh\nexit 0\n").unwrap();
+        let path_var = std::env::join_paths([dir.join("empty"), bin.clone()]).unwrap();
+        assert_eq!(resolve_with(None, None, Some(dir.join("home")), Some(path_var.clone()), &usable_on_disk), Err(NOT_FOUND.into()), "not executable");
+        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(resolve_with(None, None, Some(dir.join("home")), Some(path_var), &usable_on_disk), Ok(claude));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
