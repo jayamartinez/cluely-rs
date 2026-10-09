@@ -12,7 +12,6 @@
 use gpui::{Context, Focusable, InteractiveElement, IntoElement, MouseButton, ParentElement, Styled, div, prelude::*, px, rgb, rgba};
 
 use super::{Overlay, WIDTH};
-use crate::platform;
 use crate::settings_view::Tab;
 use crate::toggles::Toggle;
 use crate::{theme, ui};
@@ -91,7 +90,7 @@ impl Overlay {
     /// non-activating panel on macOS), so take it as the Type shortcut does; Esc, the shortcut again
     /// or sending hands it back. Settings stays open: typing there is allowed, and sending collapses it.
     fn focus_text_box(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) {
-        if let Some(native) = self.native && let Some(previous) = platform::take_focus(native) { self.return_focus = Some(previous); }
+        self.take_keyboard(cx);
         window.focus(&self.composer.focus_handle(cx));
     }
 

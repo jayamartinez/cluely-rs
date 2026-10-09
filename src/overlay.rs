@@ -501,9 +501,28 @@ impl Overlay {
     fn focus_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.show();
         if self.live_since.is_none() && self.settings_tab.is_none() { self.set_live(true, window, cx); }
-        if let Some(native) = self.native && let Some(previous) = platform::take_focus(native) { self.return_focus = Some(previous); }
+        self.take_keyboard(cx);
         window.focus(&self.composer.focus_handle(cx));
         cx.notify();
+    }
+
+    /// Give the overlay the keyboard and remember the app that had it, for `return_to_previous_app`.
+    #[cfg(not(target_os = "macos"))]
+    fn take_keyboard(&mut self, _cx: &mut Context<Self>) {
+        if let Some(native) = self.native && let Some(previous) = platform::take_focus(native) { self.return_focus = Some(previous); }
+    }
+
+    /// Give the overlay the keyboard and remember the app that had it, for `return_to_previous_app`.
+    /// The panel becomes key only once CluelyRS is the active app (`platform::take_focus`), which can
+    /// be a moment after this press or click, or never.
+    #[cfg(target_os = "macos")]
+    fn take_keyboard(&mut self, cx: &mut Context<Self>) {
+        let Some(native) = self.native else { return };
+        let overlay = cx.entity().downgrade();
+        // Deferred: `take_focus` may call back at once, and the overlay is being updated now.
+        cx.defer(move |cx| platform::take_focus(native, cx, move |previous, cx| {
+            if let Some(previous) = previous { let _ = overlay.update(cx, |this, _| this.return_focus = Some(previous)); }
+        }));
     }
 
     /// Hand the keyboard back to the app the user was in before typing here.
