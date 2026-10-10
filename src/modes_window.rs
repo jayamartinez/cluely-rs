@@ -69,11 +69,11 @@ impl ModesWindow {
 }
 
 impl Render for ModesWindow {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.apply_capture(cx);
         let page = self.overlay.update(cx, |overlay, cx| overlay.modes_tab(cx));
         div().size_full().flex().flex_col().bg(rgb(0x0f1012)).font_family(theme::FONT).text_color(theme::text())
-            .child(crate::sessions_window::title_bar("Modes"))
+            .child(crate::sessions_window::title_bar("Modes", window))
             .child(div().flex_1().min_h_0().flex().child(page))
     }
 }
