@@ -102,6 +102,24 @@ mod tests {
         assert_eq!(turns.len(), 4);
     }
 
+    /// The request the model gets in session 2 (built as for any answer, history budget included)
+    /// carries session 2's exchanges only, even with many earlier ones still on the card.
+    #[test]
+    fn a_request_in_a_new_session_carries_none_of_the_earlier_sessions() {
+        use crate::answer::{Target, build};
+        use crate::providers::Part;
+        use crate::settings::{Provider, Settings};
+        let mut turns: Vec<Turn> = (1..=12).map(|id| turn(id, 1, Status::Done)).collect();
+        turns.push(turn(13, 2, Status::Done));
+        let settings = Settings { provider: Provider::ApiKey, api_provider: "custom".into(), custom_base_url: "http://127.0.0.1:9/v1".into(),
+            api_models: [("custom".to_string(), "m".to_string())].into(), ..Settings::default() };
+        let Target::Api(request, _) = build(&settings, &crate::codex::CodexClient::new(), "Assist", "", &history(&turns, 2), "", None).unwrap()
+            else { panic!("API") };
+        let texts: Vec<String> = request.messages.iter().map(|m| match &m.parts[0] { Part::Text(text) => text.clone(), Part::Jpeg(_) => String::new() }).collect();
+        assert_eq!(texts.len(), 3, "one earlier exchange and the new turn: {texts:?}");
+        assert_eq!((texts[0].as_str(), texts[1].as_str()), ("Ask: question 13", "answer 13"));
+    }
+
     /// Every start goes through `Overlay::set_live(true)`, which calls `begin` with the turns on
     /// the card. The first session since launch (an empty card, as after a restart) gets no
     /// divider; each later one gets one where its turns begin; a session that asked nothing has
