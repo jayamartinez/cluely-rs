@@ -122,17 +122,20 @@ pub fn set_width_centred(native: NativeWindow, width: f32) {
 }
 
 /// Move by a physical-pixel delta (y down, as on Windows), clamped to the visible frame of the
-/// window's screen (below the menu bar, beside the Dock).
-pub fn move_by(window: NativeWindow, dx: i32, dy: i32) -> std::io::Result<()> {
+/// window's screen (below the menu bar, beside the Dock). Below `content_bottom` (physical pixels
+/// from the top of the content; the bottom of what is drawn) the window is transparent, so that
+/// part may go past the visible frame's bottom edge.
+pub fn move_by(window: NativeWindow, dx: i32, dy: i32, content_bottom: Option<i32>) -> std::io::Result<()> {
     let window = window.get();
     let scale = window.backingScaleFactor();
     let frame = window.frame();
     // AppKit's y axis points up.
     let (mut x, mut y) = (frame.origin.x + dx as f64 / scale, frame.origin.y - dy as f64 / scale);
+    let below = content_bottom.map_or(0.0, |bottom| (frame.size.height - bottom as f64 / scale).max(0.0));
     if let Some(screen) = window.screen() {
         let work = screen.visibleFrame();
         x = x.clamp(work.origin.x, (work.origin.x + work.size.width - frame.size.width).max(work.origin.x));
-        y = y.clamp(work.origin.y, (work.origin.y + work.size.height - frame.size.height).max(work.origin.y));
+        y = y.clamp(work.origin.y - below, (work.origin.y + work.size.height - frame.size.height).max(work.origin.y - below));
     }
     window.setFrameOrigin(NSPoint::new(x, y));
     Ok(())
