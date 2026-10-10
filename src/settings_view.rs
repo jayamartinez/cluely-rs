@@ -16,6 +16,7 @@ use crate::theme;
 use crate::transcript_view::model_size_label;
 use crate::ui;
 
+mod about;
 mod cli_location;
 mod reveal;
 #[cfg(target_os = "macos")]
@@ -26,13 +27,14 @@ pub(crate) use reveal::KeyReveal;
 mod appearance;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Tab { #[default] Model, Listening, Modes, Keys, Window, History }
+pub enum Tab { #[default] Model, Listening, Modes, Keys, Window, History, About }
 
 impl Tab {
     /// The overlay's Settings panel (Windows). Modes isn't there yet: macOS shows it in its Settings window.
-    const ALL: [Tab; 5] = [Tab::Model, Tab::Listening, Tab::Keys, Tab::Window, Tab::History];
+    /// macOS has About as its own page in the Settings window.
+    const ALL: [Tab; 6] = [Tab::Model, Tab::Listening, Tab::Keys, Tab::Window, Tab::History, Tab::About];
     fn label(self) -> &'static str {
-        match self { Tab::Model => "Model", Tab::Listening => "Listening", Tab::Modes => "Modes", Tab::Keys => "Keys", Tab::Window => "Window", Tab::History => "History" }
+        match self { Tab::Model => "Model", Tab::Listening => "Listening", Tab::Modes => "Modes", Tab::Keys => "Keys", Tab::Window => "Window", Tab::History => "History", Tab::About => "About" }
     }
 }
 
@@ -244,6 +246,7 @@ impl Overlay {
             Tab::Keys => self.keys_tab().into_any_element(),
             Tab::Window => self.window_tab(cx).into_any_element(),
             Tab::History => self.history_tab(cx).into_any_element(),
+            Tab::About => self.about_tab(cx).into_any_element(),
         }
     }
 

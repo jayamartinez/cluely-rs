@@ -98,6 +98,12 @@ pub struct Settings {
     /// Also keep the screenshots attached to answers.
     pub save_screenshots: bool,
     pub keep_sessions: Retention,
+    /// Check GitHub for a newer version at launch and every 6 hours (Settings › About).
+    pub check_for_updates: bool,
+    /// When updates were last checked, in Unix seconds.
+    pub last_update_check: Option<u64>,
+    /// The version whose notice was closed in the overlay; it shows again only for a newer one.
+    pub dismissed_update: String,
     /// The active mode's meeting context and file text (see `modes`). Not saved here: the
     /// overlay fills it from `modes.json` when it starts and whenever the mode changes.
     #[serde(skip)]
@@ -115,7 +121,8 @@ impl Default for Settings {
             background_opacity: appearance::DEFAULT_OPACITY, text_size: TextSize::default(), card_width: CardWidth::default(),
             mic_device: String::new(), desktop_device: String::new(),
             hide_from_capture: true, screen_on_send: true, start_live_on_launch: false, show_in_dock: false,
-            save_sessions: true, save_screenshots: true, keep_sessions: Retention::default(), mode: None,
+            save_sessions: true, save_screenshots: true, keep_sessions: Retention::default(),
+            check_for_updates: true, last_update_check: None, dismissed_update: String::new(), mode: None,
         }
     }
 }
@@ -259,11 +266,20 @@ mod tests {
         assert!(partial.codex_path.is_empty() && partial.claude_path.is_empty(), "the CLIs are found automatically");
         let located: Settings = serde_json::from_str(r#"{"codexPath":"/opt/tools/codex","claudePath":""}"#).unwrap();
         assert_eq!((located.codex_path.as_str(), located.claude_path.as_str()), ("/opt/tools/codex", ""));
+        assert!(partial.check_for_updates && partial.last_update_check.is_none() && partial.dismissed_update.is_empty(), "update checks are on");
         assert_eq!(partial.sources(), Source::ALL);
         assert_eq!(Settings { listen_mic: false, ..Settings::default() }.sources(), [Source::Them]);
         assert_eq!(partial.devices(), crate::audio::Devices::default());
         let picked = Settings { mic_device: " USB Audio CODEC ".into(), ..Settings::default() };
         assert_eq!(picked.devices().mic.as_deref(), Some("USB Audio CODEC"));
+    }
+
+    #[test]
+    fn update_check_state_is_saved_under_its_own_names() {
+        let settings = Settings { check_for_updates: false, last_update_check: Some(1_791_500_000), dismissed_update: "0.2.0".into(), ..Settings::default() };
+        let json = serde_json::to_string(&settings).unwrap();
+        assert!(json.contains(r#""checkForUpdates":false"#) && json.contains(r#""lastUpdateCheck":1791500000"#) && json.contains(r#""dismissedUpdate":"0.2.0""#), "{json}");
+        assert_eq!(serde_json::from_str::<Settings>(&json).unwrap(), settings);
     }
 
     #[test]

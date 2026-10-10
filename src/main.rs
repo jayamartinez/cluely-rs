@@ -4,7 +4,7 @@ use cluely_rs::{assets, cli_path, hotkeys, input, modes, overlay, text_area};
 use gpui::{App, AppContext, Application, Bounds, WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, point, px, size};
 
 #[cfg(target_os = "macos")]
-gpui::actions!(cluely_rs, [Quit, OpenSettings]);
+gpui::actions!(cluely_rs, [Quit, OpenSettings, CheckForUpdates]);
 
 /// The app menu, so Settings opens with ⌘, and CluelyRS quits with ⌘Q, like any Mac app.
 #[cfg(target_os = "macos")]
@@ -14,6 +14,7 @@ fn app_menu(cx: &mut App) {
     cluely_rs::settings_window::bind_keys(cx);
     cx.set_menus(vec![gpui::Menu { name: "CluelyRS".into(), items: vec![
         gpui::MenuItem::action("Settings…", OpenSettings),
+        gpui::MenuItem::action("Check for Updates…", CheckForUpdates),
         gpui::MenuItem::separator(),
         gpui::MenuItem::action("Quit CluelyRS", Quit),
     ] }]);
@@ -60,6 +61,9 @@ fn main() {
         if let Ok(handle) = opened {
             cx.on_action(move |_: &OpenSettings, cx| {
                 let _ = handle.update(cx, |overlay, window, cx| overlay.open_settings(Default::default(), window, cx));
+            });
+            cx.on_action(move |_: &CheckForUpdates, cx| {
+                let _ = handle.update(cx, |overlay, window, cx| overlay.check_for_updates_from_menu(window, cx));
             });
         }
         if let Err(error) = opened {
