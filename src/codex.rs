@@ -2653,7 +2653,14 @@ pub(crate) mod tests {
         // The least reasoning the model advertises, overriding the user's own Codex config.
         assert_eq!((turn["effort"].clone(), turn["summary"].clone()), (json!("minimal"), json!("none")));
         assert_eq!(turn["input"][0]["text"], "Conversation so far:\n\nUser: Before\n\nAssistant: Earlier");
-        let denial = received.iter().find(|m| m["id"] == "srv-1").unwrap();
+        // The client writes the decline before reading on, but the fake server may log it after
+        // the turn completes, so wait for it to arrive.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let denial = loop {
+            let found = lock(&launcher.received).iter().find(|m| m["id"] == "srv-1").cloned();
+            if found.is_some() || Instant::now() >= deadline { break found.expect("the server request was answered") }
+            std::thread::sleep(Duration::from_millis(10));
+        };
         assert_eq!(denial["result"]["decision"], "decline");
         // The process is reused for the next answer.
         assert!(codex.stream(&request(), &AtomicBool::new(false), &mut |_| {}).is_ok());
