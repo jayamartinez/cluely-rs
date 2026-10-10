@@ -431,7 +431,6 @@ impl Overlay {
                 if self.native.is_some_and(platform::is_visible) { self.close_switcher(window, cx); }
                 self.toggle_visible();
             }
-            Action::Live => self.set_live(self.live_since.is_none(), window, cx),
             Action::Assist => self.send("Assist", String::new(), window, cx),
             Action::Focus => self.type_shortcut(window, cx),
             Action::SwitchMode => self.switch_mode_shortcut(window, cx),
@@ -444,7 +443,6 @@ impl Overlay {
 
     fn set_live(&mut self, live: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.live_since = live.then(Instant::now);
-        self.hotkeys.set_live(live);
         // The composer's model switcher lists the subscription's models; fetch them up front.
         if live && self.codex_status.is_none() { self.refresh_subscriptions(window, cx); }
         if !live {

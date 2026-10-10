@@ -105,7 +105,8 @@ impl Overlay {
         let bars: gpui::AnyElement = if live && !self.levels.is_empty() { self.level_bars().into_any_element() }
             else { ui::icon("icons/tab-listening.svg", 18.0, if live { theme::accent_soft() } else { rgb(ICON_OFF) }).into_any_element() };
         let wave = icon_button("live").gap(px(6.0)).px(px(9.0))
-            .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, window, cx| this.set_live(!live, window, cx)))
+            // Read when clicked: the state may have changed since this frame was drawn.
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| this.set_live(this.live_since.is_none(), window, cx)))
             .child(bars)
             .when(live, |wave| wave.child(div().font_family(theme::MONO).text_size(px(12.0)).text_color(theme::accent_soft()).child(self.elapsed())));
         let middle = div().flex().items_center().gap(px(6.0))
