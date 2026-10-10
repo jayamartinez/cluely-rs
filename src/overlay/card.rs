@@ -39,7 +39,8 @@ impl Overlay {
         let live = self.live_since.is_some();
         // With Settings open the card is just the text box and toolbar; the conversation grows back
         // in as Settings collapses.
-        let conversation_shown = live && (self.settings_tab.is_none() || collapse.is_some());
+        // After Live stops, the last chat stays until the next session starts (see `chat`).
+        let conversation_shown = (live || !self.turns.is_empty()) && (self.settings_tab.is_none() || collapse.is_some());
         // Each section paints its own translucent background, so none is stacked on another and the
         // whole card stays equally see-through.
         let mut card = div().id("card").relative().w(px(self.store.value.card_width.card())).flex().flex_col().rounded(px(20.0))

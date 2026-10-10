@@ -52,7 +52,13 @@ const FRAME: Duration = Duration::from_millis(16);
 enum Motion { Move, Scroll }
 
 #[derive(Clone, PartialEq)]
-enum Status { Streaming, Done, Failed(SharedString) }
+enum Status {
+    Streaming,
+    Done,
+    Failed(SharedString),
+    /// Live stopped while it was being written; its text is what it had by then.
+    Stopped,
+}
 
 struct Turn {
     id: u64,
@@ -66,6 +72,9 @@ struct Turn {
     /// Shown without a press (Settings → Show answers automatically): the question it answers,
     /// and when it was shown (until that question's line is committed).
     auto: Option<(UtteranceId, u64)>,
+    /// The Live session it belongs to (`Overlay::session`). Earlier sessions stay on the card,
+    /// but only the current one's turns go to the model.
+    session: u64,
 }
 
 /// Add an answer to the session's History record, when one is being saved. A `stopped` answer
@@ -144,7 +153,12 @@ pub struct Overlay {
     /// The held-key loop that is currently running, if any.
     motion: Option<Motion>,
     pub(crate) live_since: Option<Instant>,
+    /// Every turn on the card since launch, across Live sessions (see `chat`).
     turns: Vec<Turn>,
+    /// The current (or last) Live session, counted from launch; 0 before the first.
+    session: u64,
+    /// Where each later session starts in `turns`, with its "New session" label.
+    dividers: Vec<chat::Divider>,
     scroll: ScrollHandle,
     /// The capture + transcription pipeline while Live is transcribing.
     pub(crate) listening: Option<Listening>,
@@ -277,7 +291,7 @@ impl Overlay {
             metrics: None, next_turn: 0, catching_mouse: true, return_focus: None,
             codex: crate::codex::CodexClient::new(), codex_status: None, claude_status: None, signing_in: false,
             cli_error: None,
-            motion: None, live_since: None, turns: Vec::new(), scroll: ScrollHandle::new(),
+            motion: None, live_since: None, turns: Vec::new(), session: 0, dividers: Vec::new(), scroll: ScrollHandle::new(),
             listening: None, listening_status: None, listening_epoch: 0, transcript: Vec::new(), provisional: Default::default(), levels: Default::default(),
             model_installed: false, model_download: None, model_notice: None,
             open_picker: None, reveal_accounts: false, devices: None, devices_loading: false, archive_bytes: None, picker_face: Rc::default(), toggle_hover: None,
@@ -425,10 +439,10 @@ impl Overlay {
 
     /// Size the window to its content state; transparent area outside the content still takes clicks.
     fn fit(&self, window: &mut Window) {
-        let mut height = if self.settings_tab.is_some() { SETTINGS_HEIGHT } else if self.live_since.is_some() { LIVE_HEIGHT }
+        let mut height = if self.settings_tab.is_some() { SETTINGS_HEIGHT } else if self.live_since.is_some() || !self.turns.is_empty() { LIVE_HEIGHT }
             else if self.update_notice_shown() { IDLE_HEIGHT + update_notice::NOTICE_HEIGHT } else { IDLE_HEIGHT };
         // The mode switcher hangs below the card.
-        if self.switcher_open() { height = height.max(switcher::window_height(self.live_since.is_some(), self.update_notice_shown())); }
+        if self.switcher_open() { height = height.max(switcher::window_height(self.live_since.is_some() || !self.turns.is_empty(), self.update_notice_shown())); }
         platform::resize(window, self.native, size(px(self.store.value.card_width.window()), px(height)));
     }
 
@@ -458,14 +472,17 @@ impl Overlay {
             for turn in self.turns.iter().filter(|turn| turn.status == Status::Streaming) {
                 save_turn(&mut self.recorder, self.store.value.save_screenshots, turn, true);
             }
+            chat::stop(&mut self.turns);
+            // The stopped mark (and the last of the cut-off answer) lands at the bottom: show it.
+            if !self.turns.is_empty() { self.scroll.scroll_to_bottom(); }
             // Dropping the session cancels the running request; its late replies are stale.
             self.reasoning = None;
-            self.turns.clear();
             // The pipeline's own final commits arrive after it's gone and are dropped, so save
             // what each source was still saying from the last provisional text first.
             self.archive_provisional();
             self.stop_listening();
-            self.clear_transcript();
+            // The chat and the last heard lines stay on the card until the next session starts.
+            self.provisional = Default::default();
             if let Some(metrics) = self.metrics.take() { std::thread::spawn(move || metrics.export()); }
         }
         self.record(live);
@@ -476,6 +493,11 @@ impl Overlay {
             self.hotkeys.set_panel_open(false);
         }
         if live {
+            // A new session: earlier turns stay on the card under a divider, but the model,
+            // speculation and the transcript start empty.
+            self.session += 1;
+            if chat::begin(self.turns.len(), &mut self.dividers, chat::divider_label(chrono::Local::now())) { self.scroll.scroll_to_bottom(); }
+            self.clear_transcript();
             self.metrics = listening::Metrics::for_session(self.live_since.unwrap_or_else(Instant::now));
             self.reasoning = Some(ReasoningSession::new(self.codex.clone(), self.metrics.as_ref().map(|metrics| metrics.recorder.clone())));
             if let Some(session) = &self.reasoning { session.prewarm(&self.store.value); }
@@ -642,7 +664,7 @@ impl Overlay {
         self.next_turn += 1;
         let id = self.next_turn;
         let at_ms = self.live_since.map(|start| start.elapsed().as_millis() as u64).unwrap_or(0);
-        self.turns.push(Turn { id, action: action.to_string().into(), question: question.clone(), text: String::new(), status: Status::Streaming, at_ms, screenshot: None, auto: None });
+        self.turns.push(Turn { id, action: action.to_string().into(), question: question.clone(), text: String::new(), status: Status::Streaming, at_ms, screenshot: None, auto: None, session: self.session });
         self.scroll.scroll_to_bottom();
         cx.notify();
         if let Some(claimed) = self.claim_prepared(action, &question, history.len()) {
@@ -680,11 +702,8 @@ impl Overlay {
         }).detach();
     }
 
-    /// Finished exchanges of this session, oldest first.
-    fn history(&self) -> Vec<Exchange> {
-        self.turns.iter().filter(|t| t.status == Status::Done)
-            .map(|t| Exchange { action: t.action.to_string(), question: t.question.clone(), answer: t.text.clone() }).collect()
-    }
+    /// Finished exchanges of this session, oldest first. Earlier sessions' turns are only shown.
+    fn history(&self) -> Vec<Exchange> { chat::history(&self.turns, self.session) }
 
     /// Show a request's replies in turn `id` while it is the current one.
     fn stream_replies(&mut self, id: u64, generation: reasoning::Generation, mut replies: UnboundedReceiver<reasoning::Reply>, cx: &mut Context<Self>) {
@@ -742,7 +761,7 @@ impl Overlay {
         let id = self.next_turn;
         let at_ms = self.live_since.map(|start| start.elapsed().as_millis() as u64).unwrap_or(0);
         self.turns.push(Turn { id, action: self.answer_action.into(), question: String::new(), text: claimed.text, status: Status::Streaming,
-            at_ms, screenshot: None, auto: Some((utterance, at_ms)) });
+            at_ms, screenshot: None, auto: Some((utterance, at_ms)), session: self.session });
         self.scroll.scroll_to_bottom();
         match claimed.done {
             Some(result) => self.finish_turn(id, result, cx),
@@ -1082,7 +1101,8 @@ impl Overlay {
             thread = thread.child(div().text_size(px(13.0)).text_color(theme::muted())
                 .child(format!("Press {} to answer from your screen and the conversation.", self.hotkeys.label(Action::Assist))));
         }
-        for turn in &self.turns {
+        for (index, turn) in self.turns.iter().enumerate() {
+            for divider in self.dividers.iter().filter(|divider| divider.before == index) { thread = thread.child(chat::divider(&divider.label)); }
             let asked = if turn.question.is_empty() { turn.action.to_string() } else { turn.question.clone() };
             let header: AnyElement = match turn.auto {
                 Some((utterance, shown_ms)) => {
@@ -1097,10 +1117,13 @@ impl Overlay {
             let body: AnyElement = match &turn.status {
                 Status::Failed(reason) => div().text_size(px(13.0)).line_height(px(20.0)).text_color(gpui::rgb(0xffb4a8)).child(reason.clone()).into_any_element(),
                 Status::Streaming if turn.text.is_empty() => div().text_size(px(13.0)).text_color(theme::muted()).child("Thinking…").into_any_element(),
-                _ => div().id(("answer", turn.id as usize)).min_w_0().text_color(theme::text()).child(crate::markdown::render(&turn.text, self.store.value.text_size.answer())).into_any_element(),
+                _ => div().id(("answer", turn.id as usize)).min_w_0().text_color(theme::text()).child(crate::markdown::render(&turn.text, self.store.value.text_size.answer()))
+                    .when(turn.status == Status::Stopped, |answer| answer.child(chat::stopped_mark())).into_any_element(),
             };
             thread = thread.child(header).child(body);
         }
+        // A session that has started but asked nothing yet.
+        for divider in self.dividers.iter().filter(|divider| divider.before == self.turns.len()) { thread = thread.child(chat::divider(&divider.label)); }
         let ready = self.answer_ready();
         let mut actions = div().flex().items_center().gap(px(4.0)).px(px(12.0)).pt(px(8.0)).pb(px(8.0));
         for (index, label) in answer::ACTIONS.into_iter().enumerate() {
@@ -1129,6 +1152,7 @@ fn idle_hint(text: &'static str) -> impl IntoElement {
 }
 
 mod card;
+mod chat;
 mod update_notice;
 mod switcher;
 pub(crate) use card::CARD_WIDTH;
@@ -1178,7 +1202,7 @@ impl Render for Overlay {
                         .absolute().top_0().left_0().size_full())
                 }
             });
-        } else if !live {
+        } else if !live && self.turns.is_empty() {
             root = root.child(idle_hint(IDLE_HINT));
         }
         root
@@ -1304,7 +1328,7 @@ mod tests {
         let archive = Archive::at(root.clone());
         let mut recorder = Some(archive.start(100, "ended".into()).unwrap());
         let turn = |action: &str, question: &str, text: &str| Turn { id: 1, action: action.to_string().into(), question: question.into(), text: text.into(),
-            status: Status::Streaming, at_ms: 4_000, screenshot: Some(b"jpeg".to_vec()), auto: None };
+            status: Status::Streaming, at_ms: 4_000, screenshot: Some(b"jpeg".to_vec()), auto: None, session: 1 };
         save_turn(&mut recorder, true, &turn("Assist", "", "Done answer"), false);
         save_turn(&mut recorder, true, &turn("Ask", "How do I scale it?", "Shard by tenant and"), true);
         save_turn(&mut recorder, true, &turn("Assist", "", " "), true);
