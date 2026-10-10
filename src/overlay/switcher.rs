@@ -39,7 +39,7 @@ const TALLEST_CARD_HEIGHT: f32 = IDLE_CARD_HEIGHT + 418.0;
 /// The card's top in the window (the overlay's top padding).
 const CARD_TOP: f32 = 8.0;
 /// Under the list: its rounded edge, and slack for a card a little taller than these heights.
-const BELOW_LIST: f32 = 56.0;
+const BELOW_LIST: f32 = 24.0;
 /// The closed chip's dashed border.
 const CHIP_EDGE: u32 = 0x3a3d42;
 const FOCUSED_ROW: u32 = 0x2a2d31;
@@ -103,17 +103,20 @@ fn step(key: &str, shift: bool, focused: usize, modes: usize) -> Step {
     }
 }
 
-/// Where the list hangs, from the chip's bounds, at its tallest.
+/// Where the list hangs, from the chip's bounds, at its tallest. The chip is placed by layout, so
+/// the list follows the card's width (Settings › Window › Card width) and any row above the text
+/// box (the update notice) without knowing about them.
 fn list_area(chip: Bounds<Pixels>) -> Bounds<Pixels> {
     let (dx, dy) = LIST_FROM_CHIP;
     Bounds::new(point(chip.left() + px(dx), chip.top() + px(dy)), size(px(LIST_WIDTH), px(LIST_MAX_HEIGHT)))
 }
 
 /// The overlay window's height while the list is open, so the list fits under the card at its
-/// tallest (idle, or Live with the conversation at its cap). `Overlay::fit` takes the larger of
-/// this and the height the rest of the overlay needs.
-pub(super) fn window_height(live: bool) -> f32 {
-    let card = if live { TALLEST_CARD_HEIGHT } else { IDLE_CARD_HEIGHT };
+/// tallest: idle (taller by the update notice row while `notice` shows it), or Live with the
+/// conversation at its cap. `Overlay::fit` takes the larger of this and the height the rest of
+/// the overlay needs. The card's width doesn't change its height.
+pub(super) fn window_height(live: bool, notice: bool) -> f32 {
+    let card = if live { TALLEST_CARD_HEIGHT } else { IDLE_CARD_HEIGHT } + if notice { super::update_notice::NOTICE_HEIGHT } else { 0.0 };
     // The chip's top in the window: in the toolbar, which ends 1 px (the border) above the card's bottom.
     let chip_top = CARD_TOP + card - 1.0 - 46.0 + CHIP_IN_TOOLBAR;
     chip_top + LIST_FROM_CHIP.1 + LIST_MAX_HEIGHT + BELOW_LIST
@@ -326,6 +329,8 @@ fn row_child(store: &ModeStore, index: usize) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::appearance::CardWidth;
+    use crate::overlay::update_notice::NOTICE_HEIGHT;
     use crate::overlay::{IDLE_HEIGHT, region};
 
     #[test]
@@ -370,37 +375,58 @@ mod tests {
         assert_eq!(step("space", false, 0, 11), Step::Pass);
     }
 
+    /// The card as the overlay lays it out: centred in the window for its width, `height` tall.
+    fn card(width: CardWidth, height: f32) -> Bounds<Pixels> {
+        Bounds::new(point(px((width.window() - width.card()) / 2.0), px(CARD_TOP)), size(px(width.card()), px(height)))
+    }
+
     /// The chip as the card lays it out (as measured on macOS): after the 22 px mark, centred in
-    /// the toolbar at the bottom of a card `card` tall.
-    fn chip(card: f32) -> Bounds<Pixels> {
-        let left = (super::super::WIDTH - super::super::CARD_WIDTH) / 2.0 + 1.0 + 16.0 + 22.0 + 12.0;
-        Bounds::new(point(px(left), px(CARD_TOP + card - 1.0 - 46.0 + CHIP_IN_TOOLBAR)), size(px(84.0), px(20.0)))
+    /// the toolbar at the bottom of the card.
+    fn chip(card: Bounds<Pixels>) -> Bounds<Pixels> {
+        let left = f32::from(card.left()) + 1.0 + 16.0 + 22.0 + 12.0;
+        Bounds::new(point(px(left), card.bottom() - px(1.0 + 46.0 - CHIP_IN_TOOLBAR)), size(px(84.0), px(20.0)))
+    }
+
+    /// Every card the list can hang under: each width, idle with and without the update notice, and
+    /// Live at its tallest.
+    fn layouts() -> Vec<(CardWidth, bool, bool, Bounds<Pixels>)> {
+        let mut layouts = Vec::new();
+        for (width, _) in CardWidth::ALL {
+            for (live, notice, height) in [(false, false, IDLE_CARD_HEIGHT), (false, true, IDLE_CARD_HEIGHT + NOTICE_HEIGHT), (true, false, TALLEST_CARD_HEIGHT)] {
+                layouts.push((width, live, notice, card(width, height)));
+            }
+        }
+        layouts
     }
 
     #[test]
     fn the_open_list_hangs_under_the_card_inside_the_grown_window() {
-        for (live, card) in [(false, IDLE_CARD_HEIGHT), (true, TALLEST_CARD_HEIGHT)] {
+        for (width, live, notice, card) in layouts() {
+            let label = format!("{width:?} live {live} notice {notice}");
             let list = list_area(chip(card));
-            assert_eq!(f32::from(list.top()), CARD_TOP + card + 4.0, "4 px under the card");
-            assert_eq!(f32::from(list.left()), f32::from(chip(card).left()) - 9.0);
-            assert!(f32::from(list.bottom()) < window_height(live), "live {live}: the list ends inside the window");
-            assert!(f32::from(list.right()) < super::super::WIDTH);
+            assert_eq!(list.top(), card.bottom() + px(4.0), "{label}: 4 px under the card");
+            assert_eq!(list.left(), chip(card).left() - px(9.0), "{label}");
+            assert!(f32::from(list.bottom()) < window_height(live, notice), "{label}: the list ends inside the window");
+            assert!(f32::from(list.right()) < width.window(), "{label}: and inside its width");
         }
-        assert!(window_height(false) > IDLE_HEIGHT, "the idle window grows for the list");
+        assert!(window_height(false, false) > IDLE_HEIGHT, "the idle window grows for the list");
     }
 
     #[test]
     fn the_window_region_covers_the_whole_list_at_windows_scale_factors() {
-        for scale in [1.0, 1.25, 1.5, 2.0] {
-            let card = Bounds::new(point(px(20.0), px(CARD_TOP)), size(px(super::super::CARD_WIDTH), px(IDLE_CARD_HEIGHT)));
-            let list = list_area(chip(IDLE_CARD_HEIGHT));
-            let shapes = region(&[card], &[list], scale);
-            let physical = |value: Pixels| f32::from(value) * scale;
-            let (left, top, right, bottom, radius) = shapes[1];
-            assert!(left as f32 <= physical(list.left()) && top as f32 <= physical(list.top()), "scale {scale}");
-            assert!(right as f32 >= physical(list.right()) && bottom as f32 >= physical(list.bottom()), "scale {scale}");
-            assert!(bottom as f32 <= window_height(false) * scale, "scale {scale}: the region stays inside the window");
-            assert_eq!(radius, (10.0 * scale).round() as i32, "a floating list gets the popover corner");
+        for (width, live, notice, card) in layouts() {
+            for scale in [1.0, 1.25, 1.5, 2.0] {
+                let label = format!("{width:?} live {live} notice {notice} scale {scale}");
+                let list = list_area(chip(card));
+                let shapes = region(&[card], &[list], scale);
+                let physical = |value: Pixels| f32::from(value) * scale;
+                let (left, top, right, bottom, radius) = shapes[1];
+                assert!(left as f32 <= physical(list.left()) && top as f32 <= physical(list.top()), "{label}");
+                assert!(right as f32 >= physical(list.right()) && bottom as f32 >= physical(list.bottom()), "{label}");
+                assert!(right as f32 <= width.window() * scale, "{label}: the region stays inside the window's width");
+                assert!(bottom as f32 <= window_height(live, notice) * scale, "{label}: and its height");
+                assert_eq!(radius, (10.0 * scale).round() as i32, "a floating list gets the popover corner");
+            }
         }
     }
 }

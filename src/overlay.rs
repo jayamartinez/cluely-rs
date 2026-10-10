@@ -420,7 +420,7 @@ impl Overlay {
         let mut height = if self.settings_tab.is_some() { SETTINGS_HEIGHT } else if self.live_since.is_some() { LIVE_HEIGHT }
             else if self.update_notice_shown() { IDLE_HEIGHT + update_notice::NOTICE_HEIGHT } else { IDLE_HEIGHT };
         // The mode switcher hangs below the card.
-        if self.switcher_open() { height = height.max(switcher::window_height(self.live_since.is_some())); }
+        if self.switcher_open() { height = height.max(switcher::window_height(self.live_since.is_some(), self.update_notice_shown())); }
         platform::resize(window, self.native, size(px(self.store.value.card_width.window()), px(height)));
     }
 
