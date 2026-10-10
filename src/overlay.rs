@@ -473,6 +473,8 @@ impl Overlay {
                 save_turn(&mut self.recorder, self.store.value.save_screenshots, turn, true);
             }
             chat::stop(&mut self.turns);
+            // The stopped mark (and the last of the cut-off answer) lands at the bottom: show it.
+            if !self.turns.is_empty() { self.scroll.scroll_to_bottom(); }
             // Dropping the session cancels the running request; its late replies are stale.
             self.reasoning = None;
             // The pipeline's own final commits arrive after it's gone and are dropped, so save
