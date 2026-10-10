@@ -140,3 +140,7 @@ Not yet: speculative answers.
   built from the pinned submodule; see [PATCHES.md](PATCHES.md).
 - [NVIDIA Parakeet Realtime EOU 120M](https://huggingface.co/nvidia/parakeet_realtime_eou_120m-v1), NVIDIA Open Model
   License. Downloaded at runtime, not distributed with CluelyRS.
+
+## License
+
+CluelyRS is released under the [MIT License](LICENSE). The third-party components above keep their own licenses.
