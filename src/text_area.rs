@@ -167,6 +167,7 @@ impl TextArea {
 
     fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
         self.show_cursor();
+        let offset = clamp_offset(&self.content, offset);
         self.selected_range = offset..offset;
         self.selection_reversed = false;
         cx.notify();
@@ -174,6 +175,8 @@ impl TextArea {
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
         self.show_cursor();
+        let offset = clamp_offset(&self.content, offset);
+        self.selected_range = clamp_range(&self.content, self.selected_range.clone());
         if self.selection_reversed { self.selected_range.start = offset } else { self.selected_range.end = offset }
         if self.selected_range.end < self.selected_range.start {
             self.selection_reversed = !self.selection_reversed;
@@ -320,6 +323,7 @@ impl EntityInputHandler for TextArea {
         self.show_cursor();
         self.goal_x = None;
         let range = range_utf16.as_ref().map(|range| self.range_from_utf16(range)).or(self.marked_range.clone()).unwrap_or(self.selected_range.clone());
+        let range = clamp_range(&self.content, range);
         let inserted = self.splice(&range, new_text);
         let changed = !(range.is_empty() && inserted.is_empty());
         self.selected_range = range.start + inserted.len()..range.start + inserted.len();
@@ -332,6 +336,7 @@ impl EntityInputHandler for TextArea {
     fn replace_and_mark_text_in_range(&mut self, range_utf16: Option<Range<usize>>, new_text: &str, selected_utf16: Option<Range<usize>>, _: &mut Window, cx: &mut Context<Self>) {
         self.show_cursor();
         let range = range_utf16.as_ref().map(|range| self.range_from_utf16(range)).or(self.marked_range.clone()).unwrap_or(self.selected_range.clone());
+        let range = clamp_range(&self.content, range);
         let inserted = self.splice(&range, new_text);
         self.marked_range = (!inserted.is_empty()).then(|| range.start..range.start + inserted.len());
         self.selected_range = selected_utf16.as_ref().map(|selection| utf16_range_in(&inserted, selection))
@@ -361,9 +366,20 @@ fn normalize(text: &str) -> String {
     if text.contains('\r') { text.replace("\r\n", "\n").replace('\r', "\n") } else { text.to_string() }
 }
 
-fn line_start(text: &str, offset: usize) -> usize { text[..offset].rfind('\n').map_or(0, |at| at + 1) }
+/// `offset` within `text` and on a char boundary, so an offset left over from older text can't slice it.
+fn clamp_offset(text: &str, offset: usize) -> usize { text.floor_char_boundary(offset) }
 
-fn line_end(text: &str, offset: usize) -> usize { text[offset..].find('\n').map_or(text.len(), |at| offset + at) }
+fn clamp_range(text: &str, range: Range<usize>) -> Range<usize> {
+    let start = clamp_offset(text, range.start);
+    start..clamp_offset(text, range.end).max(start)
+}
+
+fn line_start(text: &str, offset: usize) -> usize { text[..clamp_offset(text, offset)].rfind('\n').map_or(0, |at| at + 1) }
+
+fn line_end(text: &str, offset: usize) -> usize {
+    let offset = clamp_offset(text, offset);
+    text[offset..].find('\n').map_or(text.len(), |at| offset + at)
+}
 
 /// Shape `text` paragraph by paragraph, wrapped to `width`.
 fn shape(text: &str, font: &Font, font_size: Pixels, color: Hsla, line_height: Pixels, width: Pixels, window: &Window) -> Vec<LaidLine> {
@@ -388,6 +404,8 @@ struct TextAreaElement {
 
 struct Prepaint {
     lines: Vec<LaidLine>,
+    /// The lines are the placeholder's, not the text's.
+    placeholder: bool,
     selection: Vec<PaintQuad>,
     cursor: Option<PaintQuad>,
     line_height: Pixels,
@@ -454,7 +472,7 @@ impl Element for TextAreaElement {
         } else {
             (selection_quads(&laid, area.selected_range.clone()), None)
         };
-        Prepaint { lines: laid.lines, selection, cursor, line_height }
+        Prepaint { lines: laid.lines, placeholder: empty, selection, cursor, line_height }
     }
 
     fn paint(&mut self, _: Option<&GlobalElementId>, _: Option<&gpui::InspectorElementId>, bounds: Bounds<Pixels>, _: &mut (), prepaint: &mut Prepaint, window: &mut Window, cx: &mut App) {
@@ -467,7 +485,9 @@ impl Element for TextAreaElement {
         }
         let area = self.area.read(cx);
         if area.has_keyboard(window) && area.cursor_visible && let Some(cursor) = prepaint.cursor.take() { window.paint_quad(cursor); }
-        let lines = std::mem::take(&mut prepaint.lines);
+        // Clicks and Up/Down are measured against the text: over the placeholder there is none, so
+        // they land at 0 rather than at offsets into the placeholder.
+        let lines = if prepaint.placeholder { Vec::new() } else { std::mem::take(&mut prepaint.lines) };
         let line_height = prepaint.line_height;
         self.area.update(cx, |area, _| area.layout = Some(Layout { lines, bounds, line_height }));
     }
@@ -520,6 +540,25 @@ mod tests {
         assert_eq!((line_start(text, 6), line_end(text, 6)), (4, 13));
         assert_eq!((line_start(text, 14), line_end(text, 14)), (14, 14));
         assert_eq!((line_start(text, text.len()), line_end(text, text.len())), (15, text.len()));
+    }
+
+    #[test]
+    fn stale_offsets_are_clamped_to_the_text() {
+        // Offsets measured against the placeholder used to reach the empty text (Home, typing).
+        assert_eq!((line_start("", 35), line_end("", 147)), (0, 0));
+        assert_eq!(clamp_range("", 147..147), 0..0);
+        let text = "a日b"; // 日 is bytes 1..4
+        assert_eq!(clamp_offset(text, 2), 1);
+        assert_eq!(clamp_range(text, 2..3), 1..1);
+        assert_eq!(line_end(text, 99), text.len());
+    }
+
+    #[test]
+    fn hit_testing_without_text_lands_at_the_start() {
+        // Over the placeholder, the area keeps no lines to measure against.
+        let layout = Layout { lines: Vec::new(), bounds: Bounds::default(), line_height: px(20.0) };
+        assert_eq!(layout.offset(point(px(300.0), px(50.0))), 0);
+        assert_eq!(layout.position(147), point(px(0.0), px(0.0)));
     }
 
     #[test]

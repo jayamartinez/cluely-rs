@@ -30,9 +30,8 @@ mod appearance;
 pub enum Tab { #[default] Model, Listening, Modes, Keys, Window, History, About }
 
 impl Tab {
-    /// The overlay's Settings panel (Windows). Modes isn't there yet: macOS shows it in its Settings window.
-    /// macOS has About as its own page in the Settings window.
-    const ALL: [Tab; 6] = [Tab::Model, Tab::Listening, Tab::Keys, Tab::Window, Tab::History, Tab::About];
+    /// The overlay's Settings panel (Windows). macOS has Modes and About as their own pages in the Settings window.
+    const ALL: [Tab; 7] = [Tab::Model, Tab::Listening, Tab::Modes, Tab::Keys, Tab::Window, Tab::History, Tab::About];
     fn label(self) -> &'static str {
         match self { Tab::Model => "Model", Tab::Listening => "Listening", Tab::Modes => "Modes", Tab::Keys => "Keys", Tab::Window => "Window", Tab::History => "History", Tab::About => "About" }
     }
@@ -242,7 +241,9 @@ impl Overlay {
         match tab {
             Tab::Model => self.model_tab(cx).into_any_element(),
             Tab::Listening => self.listening_tab(cx).into_any_element(),
-            Tab::Modes => self.modes_tab(cx),
+            // macOS shows the Modes page in its Settings window; Windows a summary that opens the Modes window.
+            Tab::Modes if cfg!(target_os = "macos") => self.modes_tab(cx),
+            Tab::Modes => self.modes_summary(cx),
             Tab::Keys => self.keys_tab().into_any_element(),
             Tab::Window => self.window_tab(cx).into_any_element(),
             Tab::History => self.history_tab(cx).into_any_element(),
