@@ -71,6 +71,7 @@ fn length(action: &str, smart: bool) -> Option<&'static str> {
 }
 
 /// One finished exchange, replayed as context for the next request.
+#[derive(Clone)]
 pub struct Exchange { pub action: String, pub question: String, pub answer: String }
 
 pub enum Event { Delta(String), Done(Result<String, String>) }
@@ -89,7 +90,7 @@ pub enum Target {
 /// `conversation` is the heard conversation as prompt text (`reasoning::Conversation::render`).
 pub fn build(settings: &Settings, codex: &Arc<CodexClient>, action: &str, question: &str, history: &[Exchange], conversation: &str, screenshot: Option<Vec<u8>>) -> Result<Target, String> {
     let mut messages = Vec::new();
-    for exchange in recent(history) {
+    for exchange in &recent(history) {
         let asked = if exchange.question.is_empty() { exchange.action.clone() } else { format!("{}: {}", exchange.action, exchange.question) };
         messages.push(Message { role: Role::User, parts: vec![Part::Text(asked)] });
         messages.push(Message { role: Role::Assistant, parts: vec![Part::Text(exchange.answer.clone())] });
@@ -105,13 +106,28 @@ pub fn build(settings: &Settings, codex: &Arc<CodexClient>, action: &str, questi
     target(settings, codex, system(settings), messages, max_tokens)
 }
 
-/// The newest exchanges that fit the history budget, oldest first.
-fn recent(history: &[Exchange]) -> &[Exchange] {
+/// The newest exchanges that fit the history budget, oldest first. The newest is always kept:
+/// when it alone is over the budget, it goes cut down to fit, so one long answer doesn't leave
+/// the next request without any history.
+fn recent(history: &[Exchange]) -> Vec<Exchange> {
     let mut bytes = 0;
     let kept = history.iter().rev().take(HISTORY_EXCHANGES)
         .take_while(|exchange| { bytes += exchange.action.len() + exchange.question.len() + exchange.answer.len(); bytes <= HISTORY_BYTES })
         .count();
-    &history[history.len() - kept..]
+    if kept == 0 && let Some(newest) = history.last() {
+        let question = cut(&newest.question, HISTORY_BYTES.saturating_sub(newest.action.len()));
+        let answer = cut(&newest.answer, HISTORY_BYTES.saturating_sub(newest.action.len() + question.len()));
+        return vec![Exchange { action: newest.action.clone(), question: question.into(), answer: answer.into() }];
+    }
+    history[history.len() - kept..].to_vec()
+}
+
+/// The longest start of `text` that is at most `max` bytes, ending on a character boundary.
+fn cut(text: &str, max: usize) -> &str {
+    if text.len() <= max { return text; }
+    let mut end = max;
+    while !text.is_char_boundary(end) { end -= 1; }
+    &text[..end]
 }
 
 /// The instructions every answer runs under (also used to open a Codex thread ahead of time):
@@ -331,6 +347,27 @@ mod tests {
         assert_eq!(kept.len(), 31, "32 KB of 1,006-byte exchanges");
         assert!(kept.last().unwrap().answer.starts_with("0099"), "the newest are kept");
         assert_eq!(recent(&exchanges(100)).len(), HISTORY_EXCHANGES);
+    }
+
+    /// One exchange longer than the whole budget still goes, cut down to fit, instead of
+    /// leaving the next request with no history at all.
+    #[test]
+    fn an_oversized_newest_exchange_is_kept_cut_to_the_budget() {
+        let mut history = exchanges(3);
+        // Multi-byte characters, so the cut has to find a character boundary.
+        history.push(Exchange { action: "Assist".into(), question: "What did they say?".into(), answer: format!("start {}", "é".repeat(HISTORY_BYTES)) });
+        let kept = recent(&history);
+        assert_eq!(kept.len(), 1, "only the newest, which alone fills the budget");
+        let newest = &kept[0];
+        assert_eq!((newest.action.as_str(), newest.question.as_str()), ("Assist", "What did they say?"));
+        assert!(newest.answer.starts_with("start "));
+        let size = newest.action.len() + newest.question.len() + newest.answer.len();
+        assert!(size <= HISTORY_BYTES && size > HISTORY_BYTES - 4, "{size}");
+        // Even its question alone over the budget.
+        let huge = Exchange { action: "Ask".into(), question: "q".repeat(HISTORY_BYTES * 2), answer: "a".into() };
+        let kept = recent(std::slice::from_ref(&huge));
+        assert_eq!(kept[0].action.len() + kept[0].question.len() + kept[0].answer.len(), HISTORY_BYTES);
+        assert!(recent(&[]).is_empty());
     }
 
     #[test]
