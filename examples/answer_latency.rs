@@ -72,7 +72,7 @@ fn main() {
     };
     let request = Request {
         action: "Assist".into(), question: String::new(), history: Vec::new(),
-        conversation: conversation.render(), screenshot: Some(screenshot()), utterance: None,
+        conversation: conversation.render(true), screenshot: Some(screenshot()), utterance: None,
     };
     let speculate = args.iter().position(|a| a == "--speculate").and_then(|i| args.get(i + 1)).map(|ms| ms.parse::<u64>().expect("--speculate <ms>"));
     let (started, mut replies, mut first, mut text) = match speculate {

@@ -657,13 +657,14 @@ impl Overlay {
         let point = self.native.and_then(platform::center);
         let prepared = self.prepared_shot.fresh(Instant::now());
         let action = action.to_string();
-        let conversation = self.conversation().render();
+        let conversation = self.conversation();
         cx.spawn_in(window, async move |this, cx| {
             let screenshot = match (settings.screen_on_send, prepared, point) {
                 (false, ..) | (true, None, None) => None,
                 (true, Some(jpeg), _) => Some(jpeg),
                 (true, None, Some((x, y))) => cx.background_executor().spawn(async move { crate::capture::screen_jpeg(x, y).ok() }).await,
             };
+            let conversation = conversation.render(screenshot.is_some());
             let request = reasoning::Request { action, question, history, conversation, screenshot: screenshot.clone(), utterance };
             let started = this.update(cx, |this, cx| {
                 if let Some(turn) = this.turns.iter_mut().find(|t| t.id == id) { turn.screenshot = screenshot; }
@@ -811,7 +812,7 @@ impl Overlay {
         let (action, settings) = (self.answer_action, self.store.value.clone());
         self.speculation_attempt += 1;
         let attempt = self.speculation_attempt;
-        let conversation = self.conversation().render();
+        let conversation = self.conversation();
         let point = if settings.screen_on_send { self.native.and_then(platform::center) } else { None };
         let prepared = if settings.screen_on_send { self.prepared_shot.fresh(Instant::now()) } else { None };
         cx.spawn(async move |this, cx| {
@@ -820,6 +821,7 @@ impl Overlay {
                 (None, Some((x, y))) => cx.background_executor().spawn(async move { crate::capture::screen_jpeg(x, y).ok() }).await,
                 (None, None) => None,
             };
+            let conversation = conversation.render(screenshot.is_some());
             let request = reasoning::Request { action: action.into(), question: String::new(), history, conversation, screenshot, utterance: Some(utterance) };
             let _ = this.update(cx, |this, cx| {
                 // Cancelled or replaced while the screenshot was taken. Otherwise the context is
