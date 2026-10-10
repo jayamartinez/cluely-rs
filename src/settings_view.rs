@@ -16,6 +16,7 @@ use crate::theme;
 use crate::transcript_view::model_size_label;
 use crate::ui;
 
+mod cli_location;
 mod reveal;
 #[cfg(target_os = "macos")]
 mod model_form;
@@ -325,6 +326,7 @@ impl Overlay {
                 .on_mouse_down(MouseButton::Left, listen(cx, move |this, _, window, cx| this.update_settings(|s| s.provider = provider, window, cx)))
                 .child(self.connection_badge(provider, index, cx)));
         }
+        list = list.children(self.cli_location_row(cx));
         // macOS: provider, key and model as one form in the Settings window (`model_form`).
         #[cfg(target_os = "macos")]
         { self.model_form(list, cx) }
@@ -380,7 +382,7 @@ impl Overlay {
                         .child(ui::icon(if self.reveal_accounts { "icons/eye-off.svg" } else { "icons/eye.svg" }, 14.0, theme::muted())))
                     .into_any_element()
             }
-            Some(st) if !st.installed => text("CLI not installed".into(), theme::muted()),
+            Some(st) if !st.installed => text("CLI not found".into(), theme::muted()),
             Some(_) => div().id(("sign-in", index)).flex_none().px(px(10.0)).py(px(5.0)).rounded(px(8.0)).bg(theme::accent()).cursor_pointer()
                 .text_size(px(12.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::accent_ink())
                 .on_mouse_down(MouseButton::Left, listen(cx, move |this, _, window, cx| { cx.stop_propagation(); this.sign_in(provider, window, cx) }))

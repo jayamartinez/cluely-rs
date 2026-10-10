@@ -10,6 +10,7 @@ pub mod audio;
 pub mod capture;
 pub mod chat;
 pub mod claude_cli;
+pub mod cli_path;
 pub mod codex;
 pub mod hotkeys;
 pub mod input;
