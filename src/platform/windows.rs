@@ -28,7 +28,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SetWindowLongPtrW, WS_EX_LAYERED, WS_EX_TRANSPARENT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetWindowRect, HWND_TOPMOST, IsWindowVisible, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOSIZE,
+    GetClientRect, GetWindowRect, HWND_TOPMOST, IsWindowVisible, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOSIZE,
     SetWindowDisplayAffinity, SetWindowPos, ShowWindow, WDA_EXCLUDEFROMCAPTURE, WDA_NONE,
 };
 
@@ -71,6 +71,28 @@ pub fn set_topmost(hwnd: HWND) -> windows::core::Result<()> {
 
 /// Resize the window to `size`, keeping its top-left corner.
 pub fn resize(window: &mut Window, _hwnd: Option<HWND>, size: Size<Pixels>) { window.resize(size); }
+
+/// Change the width to `width` (logical pixels) keeping the top edge and the horizontal centre of the
+/// client area, within the work area of the window's monitor (`super::centred_left`). Like GPUI's
+/// resize it doesn't run inside the current update: a short-lived thread asks for it, and the window's
+/// own thread applies it once the update is done.
+pub fn set_width_centred(hwnd: HWND, width: f32) {
+    // HWND isn't Send; the handle stays valid for the app's lifetime.
+    let raw = hwnd.0 as isize;
+    let _ = std::thread::Builder::new().name("cluelyrs-width".into()).spawn(move || unsafe {
+        let hwnd = HWND(raw as *mut _);
+        let (mut outer, mut client, mut origin) = (RECT::default(), RECT::default(), POINT::default());
+        if GetWindowRect(hwnd, &mut outer).is_err() || GetClientRect(hwnd, &mut client).is_err() || !ClientToScreen(hwnd, &mut origin).as_bool() { return; }
+        let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+        let work = if GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mut info).as_bool() { info.rcWork } else { outer };
+        let new_width = (f64::from(width) * f64::from(GetDpiForWindow(hwnd)) / 96.0).round();
+        let old_width = f64::from(client.right - client.left);
+        let left = super::centred_left(f64::from(origin.x), old_width, new_width, f64::from(work.left), f64::from(work.right)).round() as i32;
+        // The outer frame keeps its invisible borders around the client area.
+        let (border, extra) = (origin.x - outer.left, (outer.right - outer.left) - (client.right - client.left));
+        let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), left - border, outer.top, new_width as i32 + extra, outer.bottom - outer.top, SWP_NOACTIVATE);
+    });
+}
 
 /// Move by a physical-pixel delta, clamped to the work area of the window's monitor.
 pub fn move_by(hwnd: HWND, dx: i32, dy: i32) -> windows::core::Result<()> {

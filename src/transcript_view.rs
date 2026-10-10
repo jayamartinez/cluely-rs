@@ -9,6 +9,7 @@ use std::time::Duration;
 use futures::StreamExt;
 use gpui::{AnyElement, Context, FontStyle, FontWeight, HighlightStyle, IntoElement, ParentElement, SharedString, Styled, StyledText, Window, div, px};
 
+use crate::appearance::{CardWidth, TextSize};
 use crate::archive::{self, Line, Speaker};
 use crate::audio::Source;
 use crate::listening::{self, Listening, Message, Status};
@@ -211,14 +212,15 @@ impl Overlay {
         // At most two lines, always the newest: a two-line in-progress utterance, or the last
         // committed line plus the one in progress. The strip only grows from one line to two, so
         // the answer thread below barely moves, and there is never empty space above the text.
-        let mut lines = div().flex().flex_col().justify_end().gap(px(ROW_GAP)).max_h(px(STRIP_HEIGHT)).overflow_hidden()
+        let strip = Strip::new(self.store.value.text_size, self.store.value.card_width);
+        let mut lines = div().flex().flex_col().justify_end().gap(px(ROW_GAP)).max_h(px(strip.height())).overflow_hidden()
             .mx(px(16.0)).mb(px(10.0));
         let shown = self.transcript.len().saturating_sub(SHOWN_LINES);
         for line in &self.transcript[shown..] {
-            lines = lines.child(transcript_row(line.source, archive::clock(line.at_ms), committed_text(&line.text)));
+            lines = lines.child(transcript_row(strip, line.source, archive::clock(line.at_ms), committed_text(&line.text)));
         }
         for source in [Source::Them, Source::Me] {
-            if let Some(line) = &self.provisional[slot(source)] { lines = lines.child(transcript_row(source, "now".into(), provisional_text(line))); }
+            if let Some(line) = &self.provisional[slot(source)] { lines = lines.child(transcript_row(strip, source, "now".into(), provisional_text(strip, line))); }
         }
         if self.transcript.is_empty() && self.provisional.iter().all(Option::is_none) {
             let hint = if matches!(self.listening_status, Some(Status::Listening { .. })) { "Listening for the conversation…" } else { "" };
@@ -283,7 +285,7 @@ impl Overlay {
 
 pub fn model_size_label(model: &ModelFile) -> String { format!("{:.0} MB", model.bytes as f64 / 1e6) }
 
-fn transcript_row(source: Source, when: String, text: AnyElement) -> impl IntoElement {
+fn transcript_row(strip: Strip, source: Source, when: String, text: AnyElement) -> impl IntoElement {
     let (label_color, label_bg) = match source {
         Source::Them => (theme::accent_soft(), theme::bubble()),
         Source::Me => (theme::body(), theme::raised()),
@@ -292,7 +294,7 @@ fn transcript_row(source: Source, when: String, text: AnyElement) -> impl IntoEl
         .child(div().w(px(40.0)).flex_none().text_size(px(10.0)).font_weight(FontWeight::SEMIBOLD).text_color(label_color)
             .px(px(6.0)).py(px(1.0)).rounded(px(5.0)).bg(label_bg).flex().justify_center().child(source.label()))
         .child(div().w(px(34.0)).flex_none().font_family(theme::MONO).text_size(px(10.0)).text_color(theme::muted()).pt(px(2.0)).child(when))
-        .child(div().flex_1().min_w_0().text_size(px(13.0)).line_height(px(18.0)).child(text))
+        .child(div().flex_1().min_w_0().text_size(px(strip.text_size)).line_height(px(strip.line_height)).child(text))
 }
 
 /// One row each, so the strip keeps its height; the full text is in the session archive.
@@ -303,14 +305,14 @@ fn committed_text(text: &str) -> AnyElement {
 /// Stable words in the body color, the unstable tail muted and italic, plus a question mark
 /// once the utterance reads as a question. At most two lines: a long utterance shows its newest
 /// words after a leading "…", so what is being said right now stays visible.
-fn provisional_text(line: &ProvisionalLine) -> AnyElement {
+fn provisional_text(strip: Strip, line: &ProvisionalLine) -> AnyElement {
     let mut text = line.stable.clone();
     if !line.unstable.is_empty() {
         if !text.is_empty() { text.push(' '); }
         text.push_str(&line.unstable);
     }
     let mut unstable_from = text.len() - line.unstable.len();
-    if let Some(cut) = tail_start(&text, PROVISIONAL_CHARS) {
+    if let Some(cut) = tail_start(&text, strip.provisional_chars()) {
         text = format!("{ELLIPSIS}{}", &text[cut..]);
         unstable_from = (unstable_from.max(cut) - cut) + ELLIPSIS.len();
     }
@@ -321,18 +323,38 @@ fn provisional_text(line: &ProvisionalLine) -> AnyElement {
         (question_from..question_from + if line.question { 2 } else { 0 }, HighlightStyle { color: Some(theme::accent_soft().into()), font_weight: Some(FontWeight::BOLD), ..Default::default() }),
     ].into_iter().filter(|(range, _)| !range.is_empty()));
     // The character budget keeps the text within two lines; the height cap is a backstop.
-    div().text_color(theme::body()).max_h(px(2.0 * LINE_HEIGHT)).overflow_hidden().child(styled).into_any_element()
+    div().text_color(theme::body()).max_h(px(2.0 * strip.line_height)).overflow_hidden().child(styled).into_any_element()
 }
 
-const LINE_HEIGHT: f32 = 18.0;
 const ROW_GAP: f32 = 4.0;
-/// Two text lines. Older rows above are cut off when newer ones need the room.
-const STRIP_HEIGHT: f32 = 2.0 * LINE_HEIGHT + ROW_GAP;
 const ELLIPSIS: &str = "… ";
-/// Characters that fit in two lines of the strip's text column (about 438 px at 13 px Segoe UI,
-/// whose lowercase letters average about 6 px). Budgeted at 7.3 px a character, less a word per
-/// line lost to wrapping, so real speech never needs a third line.
+/// Characters that fit in two lines of the strip's text column at the default size and width (about
+/// 438 px at 13 px Segoe UI, whose lowercase letters average about 6 px). Budgeted at 7.3 px a
+/// character, less a word per line lost to wrapping, so real speech never needs a third line.
 const PROVISIONAL_CHARS: usize = 104;
+/// The card is this much wider than the strip's text column.
+const STRIP_MARGIN: f32 = 202.0;
+
+/// The transcript strip's text as Settings › Window › Appearance sizes it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Strip { text_size: f32, line_height: f32, column: f32 }
+
+impl Strip {
+    fn new(size: TextSize, width: CardWidth) -> Self {
+        let (text_size, line_height) = size.transcript();
+        Self { text_size, line_height, column: width.card() - STRIP_MARGIN }
+    }
+
+    /// Two text lines. Older rows above are cut off when newer ones need the room.
+    fn height(self) -> f32 { 2.0 * self.line_height + ROW_GAP }
+
+    /// `PROVISIONAL_CHARS`, scaled to this column width and text size.
+    fn provisional_chars(self) -> usize {
+        let (default_size, _) = TextSize::default().transcript();
+        let default_column = CardWidth::default().card() - STRIP_MARGIN;
+        (PROVISIONAL_CHARS as f32 * self.column / default_column * default_size / self.text_size).floor() as usize
+    }
+}
 
 /// Where to start showing `text` so that at most `max_chars` characters remain (counting the
 /// leading ellipsis), cut at a word boundary. `None` when the text already fits.
@@ -371,6 +393,18 @@ mod tests {
         // Starts on a whole word.
         assert_eq!(&text[cut - 1..cut], " ");
         assert!(shown.starts_with("missing") || shown.starts_with("out") || shown.starts_with("they're"), "{shown}");
+    }
+
+    #[test]
+    fn the_strip_keeps_two_lines_at_every_size_and_width() {
+        let standard = Strip::new(TextSize::Standard, CardWidth::Standard);
+        assert_eq!((standard.height(), standard.provisional_chars()), (40.0, PROVISIONAL_CHARS), "the strip as it always was");
+        assert!(Strip::new(TextSize::Large, CardWidth::Standard).provisional_chars() < PROVISIONAL_CHARS, "larger text fits fewer characters");
+        assert!(Strip::new(TextSize::Small, CardWidth::Standard).provisional_chars() > PROVISIONAL_CHARS);
+        assert!(Strip::new(TextSize::Standard, CardWidth::Narrow).provisional_chars() < PROVISIONAL_CHARS, "a narrower card fits fewer characters");
+        assert!(Strip::new(TextSize::Standard, CardWidth::Wide).provisional_chars() > PROVISIONAL_CHARS);
+        let large = Strip::new(TextSize::Large, CardWidth::Narrow);
+        assert_eq!(large.height(), 2.0 * large.line_height + ROW_GAP);
     }
 
     #[test]

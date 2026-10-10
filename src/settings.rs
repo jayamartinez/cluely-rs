@@ -9,6 +9,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::appearance::{self, CardWidth, TextSize};
 use crate::archive::Retention;
 use crate::audio::Source;
 
@@ -87,6 +88,11 @@ pub struct Settings {
     /// macOS: show CluelyRS in the Dock and ⌘Tab. Off keeps it out, as the Windows overlay stays
     /// out of the taskbar.
     pub show_in_dock: bool,
+    /// Settings › Window › Appearance (`appearance`): the card's background opacity in percent, the
+    /// size of its reading text and its width.
+    pub background_opacity: u8,
+    pub text_size: TextSize,
+    pub card_width: CardWidth,
     /// Keep each Live session's transcript and answers in local history.
     pub save_sessions: bool,
     /// Also keep the screenshots attached to answers.
@@ -106,6 +112,7 @@ impl Default for Settings {
             api_provider: "anthropic".into(), api_models: BTreeMap::new(), custom_base_url: String::new(), saved_keys: BTreeMap::new(),
             answer_style: AnswerStyle::default(), smart_mode: false, speculative_answers: false, auto_answer: false, transcribe: true, stt_provider: SttProvider::default(),
             use_gpu: true, listen_mic: true, listen_desktop: true,
+            background_opacity: appearance::DEFAULT_OPACITY, text_size: TextSize::default(), card_width: CardWidth::default(),
             mic_device: String::new(), desktop_device: String::new(),
             hide_from_capture: true, screen_on_send: true, start_live_on_launch: false, show_in_dock: false,
             save_sessions: true, save_screenshots: true, keep_sessions: Retention::default(), mode: None,
@@ -200,6 +207,17 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn appearance_defaults_to_the_overlay_as_it_was_and_saves_under_its_own_names() {
+        let older: Settings = serde_json::from_str(r#"{"provider":"claude"}"#).unwrap();
+        assert_eq!((older.background_opacity, older.text_size, older.card_width), (80, TextSize::Standard, CardWidth::Standard));
+        let chosen = Settings { background_opacity: 0, text_size: TextSize::Large, card_width: CardWidth::Narrow, ..Settings::default() };
+        let json = serde_json::to_string(&chosen).unwrap();
+        assert!(json.contains(r#""backgroundOpacity":0"#) && json.contains(r#""textSize":"large""#) && json.contains(r#""cardWidth":"narrow""#), "{json}");
+        assert_eq!(serde_json::from_str::<Settings>(&json).unwrap(), chosen);
+        assert!(serde_json::from_str::<Settings>(r#"{"cardWidth":"huge"}"#).is_err(), "unknown widths are rejected like other invalid values");
+    }
 
     #[test]
     fn keys_saved_before_markers_are_looked_for_and_marked_once() {

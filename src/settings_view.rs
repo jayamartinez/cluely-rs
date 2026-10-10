@@ -23,6 +23,7 @@ mod model_form;
 #[cfg(target_os = "macos")]
 pub(crate) use model_form::ModelUi;
 pub(crate) use reveal::KeyReveal;
+mod appearance;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Tab { #[default] Model, Listening, Modes, Keys, Window, History }
@@ -224,7 +225,7 @@ impl Overlay {
             .child(ui::icon("icons/close.svg", 12.0, theme::body()));
         let header = ui::panel_header().child(tabs).child(close);
         let body = self.settings_body(tab, cx);
-        let mut panel = div().relative().w(px(crate::overlay::CARD_WIDTH)).flex().flex_col().rounded(px(18.0)).bg(theme::glass())
+        let mut panel = div().relative().w(px(self.store.value.card_width.card())).flex().flex_col().rounded(px(18.0)).bg(theme::glass())
             .border_1().border_color(theme::hairline()).overflow_hidden()
             .child(header)
             .child(div().id("settings-body").flex().flex_col().px(px(18.0)).pt(px(14.0)).pb(px(20.0)).max_h(px(620.0)).overflow_y_scroll().child(body));
@@ -679,6 +680,7 @@ impl Overlay {
             .child(ui::setting_row("Hide from screen capture", switch("hide-capture", s.hide_from_capture, |s, v| s.hide_from_capture = v, cx)))
             .child(ui::setting_row("Attach a screenshot to every message", switch("screen-on-send", s.screen_on_send, |s, v| s.screen_on_send = v, cx)))
             .child(ui::setting_row("Start Live when the app opens", switch("live-on-launch", s.start_live_on_launch, |s, v| s.start_live_on_launch = v, cx)).border_b_0())
+            .child(self.appearance_section(cx))
             .when(cfg!(target_os = "macos"), |tab| tab.child(dock_section(s, cx)))
     }
 }
