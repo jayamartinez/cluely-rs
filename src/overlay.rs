@@ -1057,7 +1057,10 @@ impl Overlay {
         let speed = (MOVE_START + frame as f32 * EASE_PER_FRAME).min(cruise);
         match kind {
             Motion::Move => if let Some(native) = self.native {
-                let _ = platform::move_by(native, (dx as f32 * speed).round() as i32, (dy as f32 * speed).round() as i32);
+                // The window is taller than the card (room for popovers below it); only the card has
+                // to stay on screen, so the empty space under it may go past the bottom edge.
+                let content_bottom = self.shape.borrow().iter().map(|&(_, _, _, bottom, _)| bottom).max();
+                let _ = platform::move_by(native, (dx as f32 * speed).round() as i32, (dy as f32 * speed).round() as i32, content_bottom);
             },
             Motion::Scroll => self.scroll_by(dy as f32 * speed, cx),
         }

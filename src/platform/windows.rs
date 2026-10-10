@@ -94,8 +94,10 @@ pub fn set_width_centred(hwnd: HWND, width: f32) {
     });
 }
 
-/// Move by a physical-pixel delta, clamped to the work area of the window's monitor.
-pub fn move_by(hwnd: HWND, dx: i32, dy: i32) -> windows::core::Result<()> {
+/// Move by a physical-pixel delta, clamped to the work area of the window's monitor. Below
+/// `content_bottom` (client pixels; the bottom of what is drawn) the window is transparent, so that
+/// part may go past the work area's bottom edge.
+pub fn move_by(hwnd: HWND, dx: i32, dy: i32, content_bottom: Option<i32>) -> windows::core::Result<()> {
     unsafe {
         let mut rect = RECT::default();
         GetWindowRect(hwnd, &mut rect)?;
@@ -103,8 +105,14 @@ pub fn move_by(hwnd: HWND, dx: i32, dy: i32) -> windows::core::Result<()> {
         let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
         let work = if GetMonitorInfoW(monitor, &mut info).as_bool() { info.rcWork } else { rect };
         let (width, height) = (rect.right - rect.left, rect.bottom - rect.top);
+        // The outer frame keeps invisible borders above the client area (see `set_shape`).
+        let mut client = POINT::default();
+        let visible = match content_bottom {
+            Some(bottom) if ClientToScreen(hwnd, &mut client).as_bool() => (client.y - rect.top + bottom).min(height),
+            _ => height,
+        };
         let x = (rect.left + dx).clamp(work.left, (work.right - width).max(work.left));
-        let y = (rect.top + dy).clamp(work.top, (work.bottom - height).max(work.top));
+        let y = (rect.top + dy).clamp(work.top, (work.bottom - visible).max(work.top));
         SetWindowPos(hwnd, Some(HWND_TOPMOST), x, y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE)
     }
 }
