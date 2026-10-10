@@ -572,14 +572,22 @@ impl Overlay {
             .child(div().flex().items_center().justify_between().gap(px(12.0)).pt(px(4.0))
                 .child(div().flex_1().min_w_0().text_size(px(12.0)).line_height(px(16.0)).text_color(theme::muted()).child(count))
                 .child(primary_button("open-modes", "Open Modes…")
-                    .on_mouse_down(MouseButton::Left, on_click(cx, None, |this, cx| this.open_modes_window(None, cx)))))
+                    .on_mouse_down(MouseButton::Left, crate::settings_view::listen(cx, |this, _, window, cx| {
+                        cx.stop_propagation();
+                        // The settings panel stays above every window, where it would cover the Modes window.
+                        this.close_panels(window, cx);
+                        this.open_modes_window(None, cx);
+                    }))))
             .into_any_element()
     }
 
     /// Open the Windows Modes window on `mode` (the active one when `None`), or bring it forward.
+    /// An open window keeps what it shows, such as a rename or a menu, unless asked for another mode.
     pub(crate) fn open_modes_window(&mut self, mode: Option<&str>, cx: &mut Context<Self>) {
-        let id = mode.map(str::to_string).unwrap_or_else(|| self.modes.active().id.clone());
-        self.select_mode(&id, cx);
+        // Closing it from its own title bar removes the window without clearing the handle.
+        let open = self.modes_window.is_some_and(|handle| cx.windows().iter().any(|window| window.window_id() == handle.window_id()));
+        let id = mode.map(str::to_string).or_else(|| (!open).then(|| self.modes.active().id.clone()));
+        if let Some(id) = id.filter(|id| !open || *id != self.modes_ui.selected) { self.select_mode(&id, cx); }
         crate::modes_window::open(self, cx);
     }
 
@@ -667,7 +675,8 @@ impl Overlay {
         self.modes_ui.popover = None;
         self.modes_ui.renaming = true;
         // Callers give the field the keyboard, in the window that was clicked.
-        self.modes_ui.name.update(cx, |input, cx| input.set_text(name, cx));
+        // The name starts selected, so typing replaces it.
+        self.modes_ui.name.update(cx, |input, cx| { input.set_text(name, cx); input.select_all_text(cx); });
         cx.notify();
     }
 
