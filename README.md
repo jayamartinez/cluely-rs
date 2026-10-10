@@ -33,13 +33,15 @@ paths are deep, so in a long folder path run `git config --global core.longpaths
 
 | Shortcut | Action |
 |---|---|
-| `Ctrl Shift ↵` | Start / stop a Live session |
 | `Ctrl Shift Space` | Jump into the text box; press again to return to your app, keeping what you typed (Enter sends and returns you to your app; Esc returns without sending) |
 | `Ctrl ↵` | Assist: answer from your screen and the conversation (only while Live) |
 | `Ctrl \` | Show / hide the overlay |
 | `Ctrl Alt ←↑↓→` | Move the overlay (hold to glide) |
 | `Ctrl Alt Shift ↑↓` | Scroll the answer |
 | `Esc` | Close settings |
+
+Live starts when you click the waveform in the toolbar, type a question or press a quick action, and stops when you
+click the waveform again; no shortcut starts or stops it.
 
 Only the pill, the quick actions and the text box take mouse clicks; answers and the space around the overlay are
 click-through. Move and scroll shortcuts are claimed only while the overlay is visible, and Assist only during a Live

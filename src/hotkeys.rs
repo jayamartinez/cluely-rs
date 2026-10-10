@@ -10,7 +10,6 @@ use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Action {
     Assist,
-    Live,
     /// Jump into the composer to type without clicking; pressed while typing there, jump back out.
     Focus,
     /// Open the mode switcher (or close it).
@@ -58,7 +57,6 @@ impl Action {
 #[cfg(not(target_os = "macos"))]
 pub const DEFAULTS: &[(Action, &str)] = &[
     (Action::Assist, "control+Enter"),
-    (Action::Live, "control+shift+Enter"),
     (Action::Focus, "control+shift+Space"),
     (Action::SwitchMode, "control+shift+Quote"),
     (Action::Toggle, "control+Backslash"),
@@ -76,7 +74,6 @@ pub const DEFAULTS: &[(Action, &str)] = &[
 #[cfg(target_os = "macos")]
 pub const DEFAULTS: &[(Action, &str)] = &[
     (Action::Assist, "super+Enter"),
-    (Action::Live, "super+shift+Enter"),
     (Action::Focus, "super+shift+Space"),
     (Action::SwitchMode, "super+shift+Quote"),
     (Action::Toggle, "super+Backslash"),
@@ -88,6 +85,10 @@ pub const DEFAULTS: &[(Action, &str)] = &[
     (Action::ScrollDown, "control+alt+shift+ArrowDown"),
     (Action::Close, "Escape"),
 ];
+
+// No shortcut starts or stops Live: a stray press ended the session and cleared its answers.
+// Live starts with the toolbar's waveform, by typing a question or with a quick action, and
+// stops with the waveform.
 
 pub struct Hotkeys {
     manager: GlobalHotKeyManager,
@@ -218,5 +219,13 @@ mod tests {
             assert_eq!(pretty(default(Action::SwitchMode)), "⌘ ⇧ '");
         }
         assert!(Action::SwitchMode.always(), "the switcher opens from anywhere, not only while Live");
+    }
+
+    /// Ctrl+Shift+Enter (⌘⇧↵ on macOS) used to start and stop Live; a stray press ended the
+    /// session. It is no longer claimed, and every shortcut is listed in Settings.
+    #[test]
+    fn no_shortcut_starts_or_stops_live() {
+        assert!(DEFAULTS.iter().all(|(_, accelerator)| !accelerator.ends_with("shift+Enter")), "{DEFAULTS:?}");
+        assert!(DEFAULTS.iter().all(|(_, accelerator)| accelerator.parse::<HotKey>().is_ok()));
     }
 }
