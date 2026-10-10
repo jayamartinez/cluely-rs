@@ -68,6 +68,17 @@ struct Turn {
     auto: Option<(UtteranceId, u64)>,
 }
 
+/// Add an answer to the session's History record, when one is being saved. A `stopped` answer
+/// (Live ended while it was being written) keeps the text it had, unless nothing was asked or written.
+fn save_turn(recorder: &mut Option<Recorder>, screenshots: bool, turn: &Turn, stopped: bool) {
+    let Some(recorder) = recorder else { return };
+    if stopped && turn.text.trim().is_empty() && turn.question.trim().is_empty() { return; }
+    let shot = if screenshots { turn.screenshot.as_deref() } else { None };
+    let saved = archive::Turn { at_ms: turn.at_ms, action: turn.action.to_string(), question: turn.question.clone(),
+        answer: turn.text.clone(), screenshot: None, stopped };
+    if let Err(error) = recorder.add_turn(saved, shot) { eprintln!("answer could not be saved: {error}"); }
+}
+
 pub struct Overlay {
     native: Option<NativeWindow>,
     /// The overlay's own window. Settings handlers run here even when macOS shows the settings
@@ -446,6 +457,10 @@ impl Overlay {
         // The composer's model switcher lists the subscription's models; fetch them up front.
         if live && self.codex_status.is_none() { self.refresh_subscriptions(window, cx); }
         if !live {
+            // An answer still being written is saved as stopped, with what it has so far.
+            for turn in self.turns.iter().filter(|turn| turn.status == Status::Streaming) {
+                save_turn(&mut self.recorder, self.store.value.save_screenshots, turn, true);
+            }
             // Dropping the session cancels the running request; its late replies are stale.
             self.reasoning = None;
             self.turns.clear();
@@ -831,12 +846,7 @@ impl Overlay {
             Ok(text) => {
                 turn.text = text;
                 turn.status = Status::Done;
-                if let Some(recorder) = &mut self.recorder {
-                    let shot = if self.store.value.save_screenshots { turn.screenshot.as_deref() } else { None };
-                    let saved = archive::Turn { at_ms: turn.at_ms, action: turn.action.to_string(), question: turn.question.clone(),
-                        answer: turn.text.clone(), screenshot: None };
-                    if let Err(error) = recorder.add_turn(saved, shot) { eprintln!("answer could not be saved: {error}"); }
-                }
+                save_turn(&mut self.recorder, self.store.value.save_screenshots, turn, false);
             }
             Err(reason) => turn.status = Status::Failed(reason.into()),
         }
@@ -1282,8 +1292,35 @@ fn auto_header(id: u64, heard_ms: u64, streaming: bool, hit: impl IntoElement, c
 
 #[cfg(test)]
 mod tests {
-    use super::{composer_placeholder, enclosing};
+    use super::{Status, Turn, composer_placeholder, enclosing, save_turn};
+    use crate::archive::Archive;
     use crate::settings::Settings;
+
+    /// Live stopping while an answer is written: History gets the partial answer marked as
+    /// stopped (the question and screenshot too); a stopped Assist that wrote nothing is left out.
+    #[test]
+    fn an_answer_stopped_with_live_is_saved_with_its_partial_text() {
+        let root = std::env::temp_dir().join(format!("cluelyrs-overlay-stopped-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let archive = Archive::at(root.clone());
+        let mut recorder = Some(archive.start(100, "ended".into()).unwrap());
+        let turn = |action: &str, question: &str, text: &str| Turn { id: 1, action: action.to_string().into(), question: question.into(), text: text.into(),
+            status: Status::Streaming, at_ms: 4_000, screenshot: Some(b"jpeg".to_vec()), auto: None };
+        save_turn(&mut recorder, true, &turn("Assist", "", "Done answer"), false);
+        save_turn(&mut recorder, true, &turn("Ask", "How do I scale it?", "Shard by tenant and"), true);
+        save_turn(&mut recorder, true, &turn("Assist", "", " "), true);
+        recorder.take().unwrap().finish(200).unwrap();
+        let session = archive.load("ended").unwrap();
+        assert_eq!(session.turns.len(), 2);
+        assert!(!session.turns[0].stopped);
+        let stopped = &session.turns[1];
+        assert_eq!((stopped.question.as_str(), stopped.answer.as_str(), stopped.stopped), ("How do I scale it?", "Shard by tenant and", true));
+        assert_eq!(stopped.screenshot.as_deref(), Some("002.jpg"));
+        // Complete answers are written as before: no `stopped` field.
+        let json = std::fs::read_to_string(root.join("ended").join("session.json")).unwrap();
+        assert_eq!(json.matches("\"stopped\"").count(), 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn the_placeholder_mentions_the_screen_only_while_it_is_sent() {

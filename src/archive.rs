@@ -46,6 +46,9 @@ pub struct Turn {
     pub answer: String,
     /// File name inside `screenshots/`, when a screenshot was attached and saving them is on.
     pub screenshot: Option<String>,
+    /// Live stopped while the answer was still being written: `answer` is what it had so far.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stopped: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -350,7 +353,7 @@ mod tests {
         older.add_line(Line { at_ms: 0, speaker: Speaker::Them, text: "Tell me about rate limiting.".into() }).unwrap();
         older.finish(1_100).unwrap();
         let mut newer = archive.start(2_000, "newer".into()).unwrap();
-        newer.add_turn(Turn { at_ms: 5, action: "Assist".into(), question: "".into(), answer: "Use a token bucket.".into(), screenshot: None }, Some(b"jpeg")).unwrap();
+        newer.add_turn(Turn { at_ms: 5, action: "Assist".into(), question: "".into(), answer: "Use a token bucket.".into(), screenshot: None, stopped: false }, Some(b"jpeg")).unwrap();
         newer.finish(2_060).unwrap();
 
         let list = archive.list();
