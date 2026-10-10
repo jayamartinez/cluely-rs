@@ -37,6 +37,15 @@ Think it through carefully; simple questions still get short answers.";
 const BRIEF_MAX_TOKENS: u32 = 600;
 const THOROUGH_MAX_TOKENS: u32 = 1500;
 
+/// How much of the session's earlier exchanges goes with each request, counted back from the
+/// newest: every exchange until their text reaches 32 KB (about 8k tokens) or 64
+/// exchanges (the Claude CLI takes at most 200 messages). Providers that are sent the history
+/// with every request (API, Claude subscription, and Codex when it has to start a new thread)
+/// then keep the whole of a normal session, also across a mode switch, while a very long one
+/// can't make every request grow without bound. Codex's warm thread keeps everything itself.
+const HISTORY_BYTES: usize = 32_000;
+const HISTORY_EXCHANGES: usize = 64;
+
 /// The quick actions, in the order the overlay shows them.
 pub const ACTIONS: [&str; 4] = ["Assist", "What do I say?", "Follow-ups", "Recap"];
 
@@ -80,7 +89,7 @@ pub enum Target {
 /// `conversation` is the heard conversation as prompt text (`reasoning::Conversation::render`).
 pub fn build(settings: &Settings, codex: &Arc<CodexClient>, action: &str, question: &str, history: &[Exchange], conversation: &str, screenshot: Option<Vec<u8>>) -> Result<Target, String> {
     let mut messages = Vec::new();
-    for exchange in history.iter().rev().take(8).rev() {
+    for exchange in recent(history) {
         let asked = if exchange.question.is_empty() { exchange.action.clone() } else { format!("{}: {}", exchange.action, exchange.question) };
         messages.push(Message { role: Role::User, parts: vec![Part::Text(asked)] });
         messages.push(Message { role: Role::Assistant, parts: vec![Part::Text(exchange.answer.clone())] });
@@ -94,6 +103,15 @@ pub fn build(settings: &Settings, codex: &Arc<CodexClient>, action: &str, questi
     messages.push(Message { role: Role::User, parts });
     let max_tokens = if settings.smart_mode { THOROUGH_MAX_TOKENS } else { BRIEF_MAX_TOKENS };
     target(settings, codex, system(settings), messages, max_tokens)
+}
+
+/// The newest exchanges that fit the history budget, oldest first.
+fn recent(history: &[Exchange]) -> &[Exchange] {
+    let mut bytes = 0;
+    let kept = history.iter().rev().take(HISTORY_EXCHANGES)
+        .take_while(|exchange| { bytes += exchange.action.len() + exchange.question.len() + exchange.answer.len(); bytes <= HISTORY_BYTES })
+        .count();
+    &history[history.len() - kept..]
 }
 
 /// The instructions every answer runs under (also used to open a Codex thread ahead of time):
@@ -230,13 +248,89 @@ mod tests {
         let request = match build(&interview, &CodexClient::new(), "Assist", "", &[], "", None).unwrap() { Target::Api(request, _) => request, _ => panic!("API") };
         assert_eq!(request.system, instructions, "the mode goes in the system prompt, not the turn");
         assert!(!turn_text(&request).contains("Treat my résumé"));
-        // A Codex thread is reused only while its instructions are unchanged, so switching modes opens a new one.
+        // Switching modes changes the Codex instructions too (a thread holding turns gets the new ones added; see `codex`).
         let codex = |settings: &Settings| match target(&Settings { provider: Provider::Codex, ..settings.clone() }, &CodexClient::new(), system(settings), Vec::new(), 600).unwrap() {
             Target::Codex(request, _) => request.system,
             _ => panic!("Codex"),
         };
         assert_ne!(codex(&general), codex(&interview));
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn exchanges(count: usize) -> Vec<Exchange> {
+        (1..=count).map(|n| Exchange { action: "Ask".into(), question: format!("question {n}"), answer: format!("answer {n}") }).collect()
+    }
+
+    fn interview(settings: Settings) -> Settings {
+        let mode = modes::Active { name: "Interview".into(), context: "I'm interviewing for a backend role.".into(), files: Vec::new() };
+        Settings { mode: Some(Arc::new(mode)), ..settings }
+    }
+
+    /// A local OpenAI-compatible server that answers one request with "ok" and returns its body.
+    fn fake_openai() -> (String, std::thread::JoinHandle<serde_json::Value>) {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut length = 0;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line.trim().is_empty() { break; }
+                if let Some((name, value)) = line.split_once(':') && name.eq_ignore_ascii_case("content-length") { length = value.trim().parse().unwrap(); }
+            }
+            let mut body = vec![0; length];
+            reader.read_exact(&mut body).unwrap();
+            let events = "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n";
+            let mut stream = stream;
+            write!(stream, "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{events}", events.len()).unwrap();
+            serde_json::from_slice(&body).unwrap()
+        });
+        (url, server)
+    }
+
+    /// The API providers are sent the instructions and the history with every request: after a
+    /// mode switch the next request has the new mode and every earlier exchange, not the last 8.
+    #[test]
+    fn after_a_mode_switch_an_api_request_has_the_new_mode_and_every_earlier_exchange() {
+        let (url, server) = fake_openai();
+        let switched = interview(Settings { custom_base_url: url, ..settings(false) });
+        let Target::Api(request, _) = build(&switched, &CodexClient::new(), "Assist", "", &exchanges(12), "", None).unwrap() else { panic!("API") };
+        assert_eq!(providers::stream(&request, &AtomicBool::new(false), &mut |_| {}).unwrap(), "ok");
+        let body = server.join().unwrap();
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages[0]["role"], "system");
+        assert!(messages[0]["content"].as_str().unwrap().contains("I'm interviewing for a backend role."));
+        // The system message, 12 earlier exchanges and the new turn.
+        assert_eq!(messages.len(), 1 + 24 + 1);
+        for n in 1..=12 {
+            assert_eq!(messages[2 * n - 1]["content"], format!("Ask: question {n}"));
+            assert_eq!(messages[2 * n]["content"], format!("answer {n}"));
+        }
+    }
+
+    /// The Claude subscription starts a process per answer with the request's instructions (a
+    /// prepared process is used only when its arguments match) and folds in the history.
+    #[test]
+    fn after_a_mode_switch_a_claude_request_has_the_new_mode_and_every_earlier_exchange() {
+        let switched = interview(Settings { provider: Provider::Claude, ..settings(false) });
+        let Target::Claude(request) = build(&switched, &CodexClient::new(), "Assist", "", &exchanges(12), "", None).unwrap() else { panic!("Claude") };
+        assert_eq!(request.system, system(&switched));
+        assert!(request.system.contains("I'm interviewing for a backend role."));
+        assert_eq!(request.messages.len(), 24 + 1);
+        assert!(matches!(&request.messages[0].parts[0], Part::Text(text) if text == "Ask: question 1"));
+    }
+
+    #[test]
+    fn history_is_bounded_by_size_newest_first() {
+        assert_eq!(recent(&exchanges(40)).len(), 40, "a normal session goes whole");
+        let long: Vec<Exchange> = (0..100).map(|n| Exchange { action: "Assist".into(), question: String::new(), answer: format!("{n:04}{}", "x".repeat(996)) }).collect();
+        let kept = recent(&long);
+        assert_eq!(kept.len(), 31, "32 KB of 1,006-byte exchanges");
+        assert!(kept.last().unwrap().answer.starts_with("0099"), "the newest are kept");
+        assert_eq!(recent(&exchanges(100)).len(), HISTORY_EXCHANGES);
     }
 
     #[test]

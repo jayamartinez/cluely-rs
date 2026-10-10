@@ -231,7 +231,8 @@ impl ReasoningSession {
         let context = utterance_context(speculation.utterance).provider(speculation.provider.clone());
         if speculation.key != key || speculation.cancel.load(Ordering::Relaxed) {
             if let Some(recorder) = &self.recorder { recorder.mark(Stage::SpeculationMissed, context); }
-            self.end_speculation(speculation, true);
+            let system = speculation.system.clone();
+            self.end_speculation(speculation, Some(system));
             return None;
         }
         self.cancel();
@@ -261,18 +262,29 @@ impl ReasoningSession {
 
     /// Stop the speculative answer, if any (a newer question, Live ending).
     pub fn cancel_speculation(&mut self) {
-        if let Some(speculation) = self.speculation.take() { self.end_speculation(speculation, true); }
+        if let Some(speculation) = self.speculation.take() {
+            let system = speculation.system.clone();
+            self.end_speculation(speculation, Some(system));
+        }
     }
 
-    /// With `replace`, a fresh speculation thread is opened in place of its own.
-    fn end_speculation(&mut self, speculation: Speculation, replace: bool) {
+    /// The instructions changed (another mode): a speculative answer prepared under the old ones
+    /// is dropped, and the provider is prepared with the new ones, for answers and, when one was
+    /// running, for the speculation that replaces it.
+    pub fn change_instructions(&mut self, settings: &Settings) {
+        if let Some(speculation) = self.speculation.take() { self.end_speculation(speculation, Some(answer::system(settings))); }
+        self.prewarm(settings);
+    }
+
+    /// With `replace`, a fresh speculation thread is opened in place of its own, under those instructions.
+    fn end_speculation(&mut self, speculation: Speculation, replace: Option<String>) {
         speculation.cancel.store(true, Ordering::Relaxed);
         if let Some(recorder) = &self.recorder {
             recorder.mark(Stage::SpeculationCancelled, utterance_context(speculation.utterance).provider(speculation.provider.clone()));
         }
         // Its thread may now hold a turn nobody saw: replace it rather than reuse it. The reset
         // waits for the cancelled turn to let go of the thread.
-        if replace && speculation.provider == "codex" { self.prepare_thread(&self.spec_thread, speculation.system, true); }
+        if let Some(system) = replace.filter(|_| speculation.provider == "codex") { self.prepare_thread(&self.spec_thread, system, true); }
     }
 
     fn issue(&mut self) -> Generation {
@@ -317,7 +329,7 @@ impl ReasoningSession {
 impl Drop for ReasoningSession {
     fn drop(&mut self) {
         // Live is over: nothing is opened in place of the speculation's thread.
-        if let Some(speculation) = self.speculation.take() { self.end_speculation(speculation, false); }
+        if let Some(speculation) = self.speculation.take() { self.end_speculation(speculation, None); }
         self.cancel();
     }
 }
@@ -467,6 +479,58 @@ mod tests {
         // The previous thread, without the shown exchange, was let go and a fresh spare opened.
         wait_for(&received, "thread/start", 4);
         wait_for(&received, "thread/unsubscribe", 2);
+    }
+
+    /// Switching modes mid-session (ChatGPT subscription, mocked app-server): the next answer is
+    /// a turn on the same thread, which holds every earlier turn, under the new instructions; a
+    /// running speculation is replaced by a thread opened with the new instructions, not the old.
+    #[test]
+    fn a_mode_switch_keeps_the_session_thread_and_prepares_speculation_with_the_new_mode() {
+        let (codex, received) = crate::codex::tests::scripted_client();
+        let mut session = ReasoningSession::new(codex, None);
+        let general = Settings { provider: Provider::Codex, ..Settings::default() };
+        for _ in 0..2 {
+            let (_, replies) = session.ask(&general, request()).unwrap();
+            finish(replies).unwrap();
+        }
+        session.speculate(&general, request(), 1).unwrap();
+        wait_for(&received, "turn/start", 3);
+        let mode = crate::modes::Active { name: "Interview".into(), context: "I'm interviewing for a backend role.".into(), files: Vec::new() };
+        let interview = Settings { mode: Some(Arc::new(mode)), ..general.clone() };
+        session.change_instructions(&interview);
+        assert_eq!(session.speculating(), None);
+        let (_, replies) = session.ask(&interview, request()).unwrap();
+        finish(replies).unwrap();
+        wait_for(&received, "thread/start", 3);
+        // Answers: thr_1 throughout, its last turn carrying only the new message.
+        let turns = turns(&received);
+        assert_eq!(turns[..2], [("thr_1".into(), 1), ("thr_1".into(), 1)]);
+        assert_eq!(turns.last().unwrap(), &("thr_1".to_string(), 1));
+        let messages = lock(&received).clone();
+        let injected: Vec<&serde_json::Value> = messages.iter().filter(|m| m["method"] == "thread/inject_items").collect();
+        assert_eq!(injected.len(), 1);
+        assert_eq!(injected[0]["params"]["threadId"], "thr_1");
+        assert!(injected[0]["params"]["items"][0]["content"][0]["text"].as_str().unwrap().ends_with(&answer::system(&interview)));
+        // Speculation: its thread (thr_2) is replaced by one opened under the new instructions.
+        let started: Vec<&serde_json::Value> = messages.iter().filter(|m| m["method"] == "thread/start").collect();
+        assert_eq!(started[1]["params"]["baseInstructions"], answer::system(&general));
+        assert_eq!(started[2]["params"]["baseInstructions"], answer::system(&interview));
+    }
+
+    /// Stopping Live and starting it again starts a fresh model context: the new session opens
+    /// its own Codex thread instead of continuing the previous session's.
+    #[test]
+    fn a_new_live_session_never_continues_the_previous_sessions_thread() {
+        let (codex, received) = crate::codex::tests::scripted_client();
+        let settings = Settings { provider: Provider::Codex, ..Settings::default() };
+        let mut first = ReasoningSession::new(codex.clone(), None);
+        for _ in 0..2 { let (_, replies) = first.ask(&settings, request()).unwrap(); finish(replies).unwrap(); }
+        drop(first);
+        let mut second = ReasoningSession::new(codex, None);
+        let (_, replies) = second.ask(&settings, request()).unwrap();
+        finish(replies).unwrap();
+        assert_eq!(turns(&received), [("thr_1".into(), 1), ("thr_1".into(), 1), ("thr_2".into(), 1)]);
+        wait_for(&received, "thread/unsubscribe", 1);
     }
 
     #[test]
