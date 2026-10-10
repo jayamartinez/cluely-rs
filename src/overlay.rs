@@ -174,6 +174,8 @@ pub struct Overlay {
     pub(crate) modes_ui: crate::modes_view::ModesUi,
     /// Update checks: what Settings › About shows and the notice above the text box (`update_notice`).
     pub(crate) updates: crate::update::Tracker,
+    /// The mode switcher under the card, while it's open.
+    switcher: Option<switcher::Switcher>,
     /// Windows: the Modes window, while it's open.
     pub(crate) modes_window: Option<gpui::WindowHandle<crate::modes_window::ModesWindow>>,
 }
@@ -204,7 +206,7 @@ impl Overlay {
         if let Some(native) = native { platform::enable_passthrough(native); }
         cx.spawn_in(window, async move |this, cx| loop {
             cx.background_executor().timer(Duration::from_millis(30)).await;
-            if this.update(cx, |this, cx| this.update_passthrough(cx)).is_err() { break; }
+            if this.update_in(cx, |this, window, cx| this.update_passthrough(window, cx)).is_err() { break; }
         }).detach();
         // One-second tick for the live timer; idle ticks do no work.
         cx.spawn_in(window, async move |this, cx| loop {
@@ -268,7 +270,7 @@ impl Overlay {
             listening: None, listening_status: None, listening_epoch: 0, transcript: Vec::new(), provisional: Default::default(), levels: Default::default(),
             model_installed: false, model_download: None, model_notice: None,
             open_picker: None, reveal_accounts: false, devices: None, devices_loading: false, archive_bytes: None, picker_face: Rc::default(), toggle_hover: None,
-            collapse: None, settings_height: Rc::default(), modes_ui, modes, updates: Default::default(), modes_window: None };
+            collapse: None, settings_height: Rc::default(), modes_ui, modes, updates: Default::default(), modes_window: None, switcher: None };
         overlay.refresh_model_status();
         overlay.mark_existing_keys(window, cx);
         #[cfg(target_os = "macos")]
@@ -415,20 +417,28 @@ impl Overlay {
 
     /// Size the window to its content state; transparent area outside the content still takes clicks.
     fn fit(&self, window: &mut Window) {
-        let height = if self.settings_tab.is_some() { SETTINGS_HEIGHT } else if self.live_since.is_some() { LIVE_HEIGHT }
+        let mut height = if self.settings_tab.is_some() { SETTINGS_HEIGHT } else if self.live_since.is_some() { LIVE_HEIGHT }
             else if self.update_notice_shown() { IDLE_HEIGHT + update_notice::NOTICE_HEIGHT } else { IDLE_HEIGHT };
+        // The mode switcher hangs below the card.
+        if self.switcher_open() { height = height.max(switcher::window_height(self.live_since.is_some(), self.update_notice_shown())); }
         platform::resize(window, self.native, size(px(self.store.value.card_width.window()), px(height)));
     }
 
     fn handle(&mut self, action: Action, window: &mut Window, cx: &mut Context<Self>) {
         match action {
-            Action::Toggle => self.toggle_visible(),
+            Action::Toggle => {
+                // Hiding closes the mode switcher, handing the keyboard back.
+                if self.native.is_some_and(platform::is_visible) { self.close_switcher(window, cx); }
+                self.toggle_visible();
+            }
             Action::Live => self.set_live(self.live_since.is_none(), window, cx),
             Action::Assist => self.send("Assist", String::new(), window, cx),
             Action::Focus => self.type_shortcut(window, cx),
+            Action::SwitchMode => self.switch_mode_shortcut(window, cx),
             Action::MoveUp | Action::MoveDown | Action::MoveLeft | Action::MoveRight => self.start_motion(Motion::Move, window, cx),
             Action::ScrollUp | Action::ScrollDown => self.start_motion(Motion::Scroll, window, cx),
-            Action::Close => self.close_panels(window, cx),
+            // Esc, claimed while the Windows Settings panel is open, closes the switcher over it first.
+            Action::Close => if self.switcher_open() { self.close_switcher(window, cx) } else { self.close_panels(window, cx) },
         }
     }
 
@@ -490,7 +500,7 @@ impl Overlay {
         self.open_picker.is_some() && self.settings_tab.is_some()
     }
 
-    fn update_passthrough(&mut self, cx: &mut Context<Self>) {
+    fn update_passthrough(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(native) = self.native else { return };
         let over_control = platform::cursor_in_window(native).is_some_and(|point| self.hits.contains(point));
         if over_control != self.catching_mouse {
@@ -503,6 +513,8 @@ impl Overlay {
             self.open_picker = None;
             cx.notify();
         }
+        // The mode switcher too; the app clicked takes the keyboard.
+        if self.switcher_open() && !over_control && platform::left_button_down() { self.dismiss_switcher(window, cx); }
         // Likewise, leaving a control for the click-through area sends the overlay no "hover
         // ended", so a hover tooltip is cleared here.
         if self.toggle_hover.is_some() && !over_control {
@@ -1111,6 +1123,7 @@ fn idle_hint(text: &'static str) -> impl IntoElement {
 
 mod card;
 mod update_notice;
+mod switcher;
 pub(crate) use card::CARD_WIDTH;
 /// How many audio levels the Live waveform keeps (one per bar from the middle out).
 pub(crate) const LEVEL_HISTORY: usize = 3;
@@ -1131,6 +1144,13 @@ impl Render for Overlay {
             .track_focus(&self.focus)
             .on_children_prepainted(click_through(self.native, self.hits.clone(), self.shape.clone(), self.settings_tab.is_some()))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                // Tab in the text box opens the mode switcher.
+                let modifiers = event.keystroke.modifiers;
+                if event.keystroke.key == "tab" && !modifiers.modified() && !this.switcher_open() && this.composer.focus_handle(cx).is_focused(window) {
+                    cx.stop_propagation();
+                    this.open_switcher(window, cx);
+                    return;
+                }
                 if event.keystroke.key != "escape" { return; }
                 if this.settings_tab.is_some() { this.close_panels(window, cx); }
                 else if this.composer.focus_handle(cx).is_focused(window) {
@@ -1202,20 +1222,26 @@ fn click_through(native: Option<NativeWindow>, hits: Hits, applied: Rc<RefCell<V
         let Some(native) = native else { return };
         let scale = window.scale_factor();
         hits.1.set(scale);
-        let physical = |value: gpui::Pixels| (f32::from(value) * scale).round() as i32;
-        let floating = hits.floating();
-        let shapes: Vec<platform::Shape> = children.iter().map(|bounds| (bounds, false)).chain(floating.iter().map(|bounds| (bounds, true))).map(|(bounds, float)| {
-            let height = f32::from(bounds.size.height);
-            let radius = if float { 10.0 } else if height <= 44.0 { height / 2.0 } else { 18.0 };
-            (physical(bounds.left()) - 1, physical(bounds.top()) - 1, physical(bounds.right()) + 1, physical(bounds.bottom()) + 1,
-                (radius * scale).round() as i32)
-        }).collect();
+        let shapes = region(&children, &hits.floating(), scale);
         let shapes = if settings_open { vec![enclosing(applied.borrow().iter().chain(&shapes), (18.0 * scale).round() as i32)] } else { shapes };
         if *applied.borrow() != shapes {
             platform::set_shape(native, &shapes);
             *applied.borrow_mut() = shapes;
         }
     }
+}
+
+/// The window region, in physical pixels, for the laid-out `children` of the overlay and the
+/// `floating` areas reserved for deferred content (open lists and popovers), each a rounded
+/// rectangle a pixel larger than its bounds. The same on every platform; only Windows applies it.
+fn region(children: &[Hit], floating: &[Hit], scale: f32) -> Vec<platform::Shape> {
+    let physical = |value: gpui::Pixels| (f32::from(value) * scale).round() as i32;
+    children.iter().map(|bounds| (bounds, false)).chain(floating.iter().map(|bounds| (bounds, true))).map(|(bounds, float)| {
+        let height = f32::from(bounds.size.height);
+        let radius = if float { 10.0 } else if height <= 44.0 { height / 2.0 } else { 18.0 };
+        (physical(bounds.left()) - 1, physical(bounds.top()) - 1, physical(bounds.right()) + 1, physical(bounds.bottom()) + 1,
+            (radius * scale).round() as i32)
+    }).collect()
 }
 
 /// The text box's placeholder says what an answer will see: the screen only while Screen on send is on.

@@ -1,8 +1,8 @@
 //! The overlay card, the same on Windows and macOS, laid out like the Paper artboards "macOS · Overlay
 //! v2 · Unified · Chat above composer" and "Windows · Overlay · Unified card (same as macOS)". During
 //! Live its top holds the transcript strip, the answers and the quick actions; below them sit the text
-//! box and a toolbar of plain icons (the mark, the two toggles, the Live waveform with its timer,
-//! Sessions and Settings). The card's top edge stays put, so the text box moves down as the
+//! box and a toolbar of plain icons (the mark and the mode chip, the two toggles, the Live waveform
+//! with its timer, Sessions and Settings). The card's top edge stays put, so the text box moves down as the
 //! conversation grows.
 //!
 //! Settings: macOS opens its own window. Where Settings is a panel under the card (Windows), the card
@@ -127,7 +127,7 @@ impl Overlay {
             .child(ui::icon("icons/gear.svg", 17.0, if settings_open { theme::text() } else { theme::muted() }));
         // The overlay moves with its shortcuts only (Ctrl Alt arrows, ⌃⌥ arrows on macOS), not by dragging.
         div().flex().items_center().gap(px(6.0)).h(px(46.0)).pl(px(16.0)).pr(px(10.0)).bg(self.card_fill(CARD)).rounded_b(px(19.0))
-            .child(div().flex_1().flex().items_center().child(ui::mark(22.0)))
+            .child(div().flex_1().flex().items_center().gap(px(12.0)).child(ui::mark(22.0)).child(self.mode_chip(cx)))
             .child(middle)
             .child(div().flex_1().flex().items_center().justify_end().gap(px(2.0)).child(sessions).child(settings))
             .child(self.hits.mark())

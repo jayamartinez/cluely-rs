@@ -641,7 +641,7 @@ impl Overlay {
         let mut list = div().flex().flex_col();
         for (action, _) in DEFAULTS {
             let label = match action {
-                Action::Live => "Start / stop Live", Action::Focus => "Type a question", Action::Assist => "Assist",
+                Action::Live => "Start / stop Live", Action::Focus => "Type a question", Action::SwitchMode => "Switch mode", Action::Assist => "Assist",
                 Action::Toggle => "Show / hide overlay", Action::MoveUp => "Move up", Action::MoveDown => "Move down",
                 Action::MoveLeft => "Move left", Action::MoveRight => "Move right",
                 Action::ScrollUp => "Scroll answer up", Action::ScrollDown => "Scroll answer down",
