@@ -16,7 +16,7 @@ use gpui::{App, Pixels, Size, Window};
 use objc2::MainThreadMarker;
 use objc2::rc::Retained;
 use objc2_app_kit::{
-    NSAnimatablePropertyContainer, NSAnimationContext, NSApplication, NSApplicationActivationOptions, NSApplicationActivationPolicy, NSEvent, NSEventModifierFlags, NSRunningApplication, NSScreen, NSView, NSWindow, NSWindowCollectionBehavior,
+    NSAnimatablePropertyContainer, NSAnimationContext, NSApplication, NSApplicationActivationOptions, NSApplicationActivationPolicy, NSEvent, NSEventModifierFlags, NSRunningApplication, NSScreen, NSView, NSWindow, NSWindowAnimationBehavior, NSWindowCollectionBehavior,
     NSWindowSharingType, NSWindowStyleMask, NSWorkspace,
 };
 use objc2_foundation::{NSPoint, NSRect, NSSize};
@@ -57,11 +57,15 @@ pub fn set_capture_hidden(window: NativeWindow, hidden: bool) -> std::io::Result
 }
 
 /// GPUI's panel is titled, so macOS draws a hairline border and a shadow around its transparent
-/// rectangle. Make it borderless (still non-activating) and drop the shadow.
+/// rectangle. Make it borderless (still non-activating) and drop the shadow. GPUI also gives the
+/// panel AppKit's utility-window animation, which fades it whenever it is ordered out or in, so
+/// `return_focus` (ordering it out and straight back in) would fade the whole overlay out and back
+/// after every message. Turn that off: `set_visible` animates showing and hiding itself.
 pub fn remove_frame(window: NativeWindow) {
     let native = window.get();
     native.setStyleMask(NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel);
     native.setHasShadow(false);
+    native.setAnimationBehavior(NSWindowAnimationBehavior::None);
     // Changing the style mask rebuilds the frame and leaves the window itself as first responder,
     // so key presses would never reach GPUI (the text box would show a caret but take no typing).
     native.makeFirstResponder(Some(window.view()));
