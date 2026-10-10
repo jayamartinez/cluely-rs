@@ -51,8 +51,19 @@ const GLOBAL_INSTRUCTION_NAMES: [&str; 2] = ["AGENTS.md", "AGENTS.override.md"];
 /// Every request this client may send. Anything else is refused before it reaches the pipe.
 const CLIENT_METHODS: &[&str] = &[
     "initialize", "config/read", "account/read", "account/login/start", "account/login/cancel",
-    "account/logout", "model/list", "thread/start", "thread/unsubscribe", "turn/start", "turn/interrupt",
+    "account/logout", "model/list", "thread/start", "thread/inject_items", "thread/unsubscribe", "turn/start", "turn/interrupt",
 ];
+
+/// Leads the instructions added to a session's thread when they change mid-session (another
+/// mode was chosen); see `CodexClient::reinstruct`.
+const NEW_INSTRUCTIONS: &str = "The user switched modes. From here on, the instructions below replace all earlier \
+instructions in this conversation, including the ones it started with. The conversation so far is still context.";
+
+/// How much instruction text may be added to one thread over its life (`CodexClient::reinstruct`).
+/// Each addition stays in the thread's history, so past this a change of instructions starts a
+/// new thread instead, with the session's text history folded into its first turn: one maximal
+/// mode's worth, or many switches between small ones.
+const MAX_ADDED_INSTRUCTIONS: usize = MAX_INSTRUCTIONS;
 
 /// Notifications routed to waiting operations; everything else (reasoning, tool output, plans…)
 /// is dropped by the reader.
@@ -1425,6 +1436,8 @@ pub struct CodexThread {
     system: String,
     /// Turns the server has accepted on this thread.
     turns: u32,
+    /// Bytes of instructions added to its history since it started (`CodexClient::reinstruct`).
+    added: usize,
 }
 
 impl CodexThread {
@@ -1746,10 +1759,11 @@ impl CodexClient {
     }
 
     /// One turn on a thread kept open across requests (a Live session). The thread carries the
-    /// conversation server-side, so only the last message of `req.messages` is sent; when the
-    /// app-server has been restarted since the thread opened (or no thread is open yet), a new
-    /// thread is started with the same restrictions and the whole `req.messages` history is
-    /// folded into its first turn. Cancellation interrupts the turn; the thread stays usable.
+    /// conversation server-side, so only the last message of `req.messages` is sent, also after
+    /// the instructions change (they are added to the thread; see `CodexClient::open_thread`).
+    /// When the app-server has been restarted since the thread opened (or no thread is open
+    /// yet), a new thread is started with the same restrictions and the whole `req.messages`
+    /// history is folded into its first turn. Cancellation interrupts the turn; the thread stays usable.
     pub fn stream_turn(&self, thread: &mut Option<CodexThread>, req: &ChatRequest, cancel: &AtomicBool, on_delta: &mut dyn FnMut(&str)) -> Result<String, String> {
         self.stream_turn_inner(thread, req, cancel, on_delta).map_err(|error| error.message)
     }
@@ -1757,7 +1771,9 @@ impl CodexClient {
     /// Free preparation for a Live session: start the app-server, read the model list and open
     /// the session's restricted thread now, so the first answer pays only for its turn. Opening
     /// a thread runs no model turn and costs no usage. Does nothing if a usable thread with the
-    /// same instructions is already open.
+    /// same instructions is already open. One with other instructions that already holds turns
+    /// is kept as it is: the next turn adds the instructions it runs under (see
+    /// `CodexClient::open_thread`), so edits to the active mode between answers add nothing.
     pub fn prepare_thread(&self, thread: &mut Option<CodexThread>, system: &str) -> Result<(), String> {
         let mut prepare = || -> Result<(), CodexError> {
             if system.len() > MAX_INSTRUCTIONS {
@@ -1768,15 +1784,47 @@ impl CodexClient {
             if self.catalog.lock().unwrap_or_else(std::sync::PoisonError::into_inner).is_none() {
                 let _ = self.models(&connection);
             }
-            if thread.as_ref().is_some_and(|open| Arc::ptr_eq(&open.connection, &connection) && open.system == system) {
-                return Ok(());
-            }
-            *thread = None;
-            let thread_id = self.start_thread(&connection, system)?;
-            *thread = Some(CodexThread { connection: connection.clone(), thread_id, system: system.to_string(), turns: 0 });
-            Ok(())
+            self.open_thread(&connection, thread, system, false)
         };
         prepare().map_err(|error| error.message)
+    }
+
+    /// Makes `thread` a usable thread on `connection` running under `system`. An open thread
+    /// with those instructions is kept. One that already holds turns under other instructions
+    /// (the user switched modes mid-session) is kept too, with the new instructions added to
+    /// its history, so the next answer still has every earlier turn, screenshots included.
+    /// They are added only `for_turn`, just before the turn that runs under them: the active
+    /// mode is applied again on every saved edit, and adding each version would leave every
+    /// copy in the thread. Otherwise (no thread, a restarted server, nothing to keep, an
+    /// app-server that can't add the instructions, or more added to this thread than
+    /// `MAX_ADDED_INSTRUCTIONS`) a new thread is started; its first turn folds in the history.
+    fn open_thread(&self, connection: &Arc<Connection>, thread: &mut Option<CodexThread>, system: &str, for_turn: bool) -> Result<(), CodexError> {
+        if let Some(open) = thread.as_mut().filter(|open| Arc::ptr_eq(&open.connection, connection)) {
+            if open.system == system { return Ok(()); }
+            if open.turns > 0 && open.added + system.len() <= MAX_ADDED_INSTRUCTIONS {
+                if !for_turn { return Ok(()); }
+                match self.reinstruct(connection, open, system) {
+                    Ok(()) => return Ok(()),
+                    Err(error) => eprintln!("codex: the new instructions start a new thread: {}", error.message),
+                }
+            }
+        }
+        *thread = None;
+        let thread_id = self.start_thread(connection, system)?;
+        *thread = Some(CodexThread { connection: connection.clone(), thread_id, system: system.to_string(), turns: 0, added: 0 });
+        Ok(())
+    }
+
+    /// Adds `system` to the thread's history as a developer message, without running a turn.
+    /// The thread's base instructions can't be changed once it has started, and ephemeral
+    /// threads can't be forked or resumed with new ones, so the message says it replaces them.
+    fn reinstruct(&self, connection: &Connection, open: &mut CodexThread, system: &str) -> Result<(), CodexError> {
+        let text = format!("{NEW_INSTRUCTIONS}\n\n{system}");
+        let message = json!({ "type": "message", "role": "developer", "content": [{ "type": "input_text", "text": text }] });
+        connection.call("thread/inject_items", json!({ "threadId": open.thread_id, "items": [message] }), self.limits.request)?;
+        open.system = system.to_string();
+        open.added += system.len();
+        Ok(())
     }
 
     fn stream_turn_inner(&self, thread: &mut Option<CodexThread>, req: &ChatRequest, cancel: &AtomicBool, on_delta: &mut dyn FnMut(&str)) -> Result<String, CodexError> {
@@ -1795,12 +1843,7 @@ impl CodexClient {
         if cancel.load(Ordering::Relaxed) {
             return Err(err(Kind::Cancelled));
         }
-        let reusable = thread.as_ref().is_some_and(|open| Arc::ptr_eq(&open.connection, &connection) && open.system == req.system);
-        if !reusable {
-            *thread = None;
-            let thread_id = self.start_thread(&connection, &req.system)?;
-            *thread = Some(CodexThread { connection: connection.clone(), thread_id, system: req.system.clone(), turns: 0 });
-        }
+        self.open_thread(&connection, thread, &req.system, true)?;
         let open = thread.as_mut().expect("thread was just opened");
         // A reused thread already holds the earlier exchanges; only the new message goes in.
         let messages = if open.turns > 0 { &req.messages[req.messages.len().saturating_sub(1)..] } else { &req.messages[..] };
@@ -2146,7 +2189,7 @@ pub(crate) mod tests {
                     replies.insert(0, ok(json!({ "turn": { "id": "turn_1", "items": [], "status": "inProgress" } })));
                     replies
                 }
-                "turn/interrupt" | "thread/unsubscribe" | "account/logout" | "account/login/cancel" => vec![ok(json!({}))],
+                "turn/interrupt" | "thread/unsubscribe" | "thread/inject_items" | "account/logout" | "account/login/cancel" => vec![ok(json!({}))],
                 "account/login/start" => vec![
                     ok(json!({ "type": "chatgpt", "loginId": "login_1", "authUrl": "https://auth.openai.com/oauth/authorize?x=1" })),
                     json!({ "method": "account/login/completed", "params": { "loginId": "login_1", "success": true } }),
@@ -2676,9 +2719,18 @@ pub(crate) mod tests {
         let started = methods(&launcher);
         assert_eq!(started.iter().filter(|m| *m == "thread/start").count(), 1);
         assert_eq!(started.iter().filter(|m| *m == "model/list").count(), 1);
-        // Different instructions (the answer style changed) need their own thread.
+        // Different instructions (the answer style changed): a thread without turns is replaced,
+        // one that holds turns keeps them; its next turn adds the new instructions.
+        let mut unused = None;
+        codex.prepare_thread(&mut unused, "Be brief.").unwrap();
+        codex.prepare_thread(&mut unused, "Explain clearly.").unwrap();
+        assert_eq!(methods(&launcher).iter().filter(|m| *m == "thread/start").count(), 3);
         codex.prepare_thread(&mut thread, "Explain clearly.").unwrap();
-        assert_eq!(methods(&launcher).iter().filter(|m| *m == "thread/start").count(), 2);
+        assert_eq!(methods(&launcher).iter().filter(|m| *m == "thread/start").count(), 3);
+        assert_eq!(methods(&launcher).iter().filter(|m| *m == "thread/inject_items").count(), 0);
+        let clearly = ChatRequest { system: "Explain clearly.".into(), ..request() };
+        codex.stream_turn(&mut thread, &clearly, &AtomicBool::new(false), &mut |_| {}).unwrap();
+        assert_eq!(methods(&launcher).iter().filter(|m| *m == "thread/inject_items").count(), 1);
     }
 
     #[test]
@@ -2748,6 +2800,149 @@ pub(crate) mod tests {
         let deadline = Instant::now() + Duration::from_secs(2);
         while !methods(&launcher).contains(&"thread/unsubscribe".to_string()) && Instant::now() < deadline { std::thread::sleep(Duration::from_millis(10)); }
         assert!(methods(&launcher).contains(&"thread/unsubscribe".to_string()));
+    }
+
+    fn answered(text: &str) -> Message {
+        Message { role: Role::Assistant, parts: vec![Part::Text(text.into())] }
+    }
+
+    /// `exchanges` earlier question/answer pairs, then a new question.
+    fn session_messages(exchanges: usize, question: &str) -> Vec<Message> {
+        let mut messages: Vec<Message> = (1..=exchanges).flat_map(|n| [user(&format!("question {n}")), answered(&format!("answer {n}"))]).collect();
+        messages.push(user(question));
+        messages
+    }
+
+    /// Switching modes mid-session changes the instructions. The session's thread already holds
+    /// every turn (screenshots included), so it is kept and told about the new instructions
+    /// instead of being replaced by one that only knows a replayed summary.
+    #[test]
+    fn new_instructions_mid_session_keep_the_thread_and_its_turns() {
+        let events = vec![delta("turn_1", "m", "Answer"), completed("completed")];
+        let launcher = Arc::new(FakeLauncher::new(server(chatgpt(), good_thread(), events)));
+        let codex = client(&launcher);
+        let mut thread = None;
+        let general = ChatRequest { system: "General.".into(), messages: session_messages(0, "question 1"), ..request() };
+        codex.stream_turn(&mut thread, &general, &AtomicBool::new(false), &mut |_| {}).unwrap();
+        // The mode switch prepares the thread for the next answer: the same thread, kept as it is.
+        codex.prepare_thread(&mut thread, "Interview.").unwrap();
+        assert!(!methods(&launcher).contains(&"thread/inject_items".to_string()), "the next turn adds the instructions");
+
+        // The next answer adds the new instructions, then is a turn on the same thread carrying only its own message.
+        let interview = ChatRequest { system: "Interview.".into(), messages: session_messages(1, "question 2"), ..request() };
+        codex.stream_turn(&mut thread, &interview, &AtomicBool::new(false), &mut |_| {}).unwrap();
+        let received = lock(&launcher.received).clone();
+        let injected: Vec<&Value> = received.iter().filter(|m| m["method"] == "thread/inject_items").collect();
+        assert_eq!(injected.len(), 1);
+        assert_eq!(injected[0]["params"]["threadId"], "thr_1");
+        let item = &injected[0]["params"]["items"][0];
+        assert_eq!((item["type"].clone(), item["role"].clone()), (json!("message"), json!("developer")));
+        let text = item["content"][0]["text"].as_str().unwrap();
+        assert!(text.starts_with(NEW_INSTRUCTIONS) && text.ends_with("\n\nInterview."), "{text}");
+        let turns: Vec<&Value> = received.iter().filter(|m| m["method"] == "turn/start").collect();
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[1]["params"]["threadId"], "thr_1");
+        assert_eq!(turns[1]["params"]["input"], json!([text_item("question 2".into())]));
+        let last = |method: &str| received.iter().rposition(|m| m["method"] == method).unwrap();
+        assert!(last("thread/inject_items") < last("turn/start"), "added before the turn that runs under them");
+        // Preparing again with the same instructions changes nothing.
+        codex.prepare_thread(&mut thread, "Interview.").unwrap();
+        // A turn that arrives with other instructions before any preparation is handled the same way.
+        let sales = ChatRequest { system: "Sales.".into(), messages: session_messages(2, "question 3"), ..request() };
+        codex.stream_turn(&mut thread, &sales, &AtomicBool::new(false), &mut |_| {}).unwrap();
+        let methods = methods(&launcher);
+        assert_eq!(methods.iter().filter(|m| *m == "thread/start").count(), 1);
+        assert_eq!(methods.iter().filter(|m| *m == "thread/inject_items").count(), 2);
+        assert!(!methods.contains(&"thread/unsubscribe".to_string()));
+        assert_eq!(thread.as_ref().map(|t| t.id()), Some("thr_1"));
+    }
+
+    /// The active mode is applied again on every saved edit of its context or files. Those edits
+    /// add nothing to the thread until the next answer, which adds only the latest version once.
+    #[test]
+    fn edits_to_the_active_mode_between_answers_add_its_instructions_once() {
+        let events = vec![delta("turn_1", "m", "Answer"), completed("completed")];
+        let launcher = Arc::new(FakeLauncher::new(server(chatgpt(), good_thread(), events)));
+        let codex = client(&launcher);
+        let mut thread = None;
+        let general = ChatRequest { system: "General.".into(), messages: session_messages(0, "question 1"), ..request() };
+        codex.stream_turn(&mut thread, &general, &AtomicBool::new(false), &mut |_| {}).unwrap();
+        let edited = "Interview: I'm a backend dev.";
+        for edit in ["Interview: I", "Interview: I'm a", edited, edited] {
+            codex.prepare_thread(&mut thread, edit).unwrap();
+        }
+        assert!(!methods(&launcher).contains(&"thread/inject_items".to_string()));
+        for (n, question) in [(1, "question 2"), (2, "question 3")] {
+            let asked = ChatRequest { system: edited.into(), messages: session_messages(n, question), ..request() };
+            codex.stream_turn(&mut thread, &asked, &AtomicBool::new(false), &mut |_| {}).unwrap();
+            // The same instructions again: nothing more is added.
+            codex.prepare_thread(&mut thread, edited).unwrap();
+        }
+        let received = lock(&launcher.received).clone();
+        let injected: Vec<&Value> = received.iter().filter(|m| m["method"] == "thread/inject_items").collect();
+        assert_eq!(injected.len(), 1);
+        assert!(injected[0]["params"]["items"][0]["content"][0]["text"].as_str().unwrap().ends_with(&format!("\n\n{edited}")));
+        assert_eq!(methods(&launcher).iter().filter(|m| *m == "thread/start").count(), 1);
+        assert_eq!(thread.as_ref().map(|t| t.id()), Some("thr_1"));
+    }
+
+    /// Instructions added to one thread are bounded: a switch that would take the added text
+    /// past `MAX_ADDED_INSTRUCTIONS` starts a new thread under the new instructions, and its
+    /// first turn carries the session's earlier exchanges.
+    #[test]
+    fn instructions_past_the_added_budget_start_a_new_thread_with_the_history() {
+        let events = vec![delta("turn_1", "m", "Answer"), completed("completed")];
+        let launcher = Arc::new(FakeLauncher::new(server(chatgpt(), good_thread(), events)));
+        let codex = client(&launcher);
+        let mut thread = None;
+        let general = ChatRequest { system: "General.".into(), messages: session_messages(0, "question 1"), ..request() };
+        codex.stream_turn(&mut thread, &general, &AtomicBool::new(false), &mut |_| {}).unwrap();
+        let mode = |name: &str| format!("{name}: {}", "x".repeat(MAX_ADDED_INSTRUCTIONS / 3));
+        for (n, name) in ["Interview", "Sales"].into_iter().enumerate() {
+            let switched = ChatRequest { system: mode(name), messages: session_messages(n + 1, &format!("question {}", n + 2)), ..request() };
+            codex.stream_turn(&mut thread, &switched, &AtomicBool::new(false), &mut |_| {}).unwrap();
+        }
+        assert_eq!(methods(&launcher).iter().filter(|m| *m == "thread/inject_items").count(), 2, "switches keep the thread");
+        assert_eq!(thread.as_ref().map(|t| t.id()), Some("thr_1"));
+        // A third would pass the budget: a new thread instead, opened as soon as it is prepared.
+        codex.prepare_thread(&mut thread, &mode("Support")).unwrap();
+        assert_eq!(methods(&launcher).iter().filter(|m| *m == "thread/start").count(), 2);
+        let support = ChatRequest { system: mode("Support"), messages: session_messages(3, "question 4"), ..request() };
+        codex.stream_turn(&mut thread, &support, &AtomicBool::new(false), &mut |_| {}).unwrap();
+        let received = lock(&launcher.received).clone();
+        assert_eq!(received.iter().filter(|m| m["method"] == "thread/inject_items").count(), 2);
+        let started: Vec<&Value> = received.iter().filter(|m| m["method"] == "thread/start").collect();
+        assert_eq!(started.len(), 2);
+        assert_eq!(started[1]["params"]["baseInstructions"], mode("Support"));
+        let turn = received.iter().rev().find(|m| m["method"] == "turn/start").unwrap();
+        let history = turn["params"]["input"][0]["text"].as_str().unwrap();
+        for n in 1..=3 { assert!(history.contains(&format!("User: question {n}\n\nAssistant: answer {n}")), "exchange {n}: {history}"); }
+        assert_eq!(turn["params"]["input"][1]["text"], "question 4");
+    }
+
+    /// An app-server that can't add instructions to a thread: a new thread with the new
+    /// instructions, and its first turn carries every earlier exchange of the session.
+    #[test]
+    fn without_added_instructions_a_new_thread_gets_the_whole_session() {
+        let base = server(chatgpt(), good_thread(), vec![delta("turn_1", "m", "Answer"), completed("completed")]);
+        let launcher = Arc::new(FakeLauncher::new(move |message: &Value| {
+            if message["method"] == "thread/inject_items" { return vec![json!({ "id": message["id"], "error": { "code": -32601, "message": "unknown method" } })]; }
+            base(message)
+        }));
+        let codex = client(&launcher);
+        let mut thread = None;
+        let general = ChatRequest { system: "General.".into(), messages: session_messages(0, "question 1"), ..request() };
+        codex.stream_turn(&mut thread, &general, &AtomicBool::new(false), &mut |_| {}).unwrap();
+        let interview = ChatRequest { system: "Interview.".into(), messages: session_messages(12, "question 13"), ..request() };
+        codex.stream_turn(&mut thread, &interview, &AtomicBool::new(false), &mut |_| {}).unwrap();
+        let received = lock(&launcher.received).clone();
+        let started: Vec<&Value> = received.iter().filter(|m| m["method"] == "thread/start").collect();
+        assert_eq!(started.len(), 2);
+        assert_eq!(started[1]["params"]["baseInstructions"], "Interview.");
+        let turn = received.iter().rev().find(|m| m["method"] == "turn/start").unwrap();
+        let history = turn["params"]["input"][0]["text"].as_str().unwrap();
+        for n in 1..=12 { assert!(history.contains(&format!("User: question {n}\n\nAssistant: answer {n}")), "exchange {n}: {history}"); }
+        assert_eq!(turn["params"]["input"][1]["text"], "question 13");
     }
 
     #[test]

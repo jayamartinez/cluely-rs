@@ -373,10 +373,7 @@ impl Overlay {
         let material = self.modes.active_material();
         if self.store.value.mode == material { return; }
         self.store.value.mode = material;
-        if let Some(session) = &mut self.reasoning {
-            session.cancel_speculation();
-            session.prewarm(&self.store.value);
-        }
+        if let Some(session) = &mut self.reasoning { session.change_instructions(&self.store.value); }
     }
 
     /// Open (or focus) the full-size Sessions review window.
