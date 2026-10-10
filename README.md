@@ -34,18 +34,18 @@ paths are deep, so in a long folder path run `git config --global core.longpaths
 | Shortcut | Action |
 |---|---|
 | `Ctrl Shift Space` | Jump into the text box; press again to return to your app, keeping what you typed (Enter sends and returns you to your app; Esc returns without sending) |
-| `Ctrl ↵` | Assist: answer from your screen and the conversation (only while Live) |
+| `Ctrl ↵` | Assist: answer from your screen and the conversation (starts Live if it's off) |
 | `Ctrl \` | Show / hide the overlay |
 | `Ctrl Alt ←↑↓→` | Move the overlay (hold to glide) |
 | `Ctrl Alt Shift ↑↓` | Scroll the answer |
 | `Esc` | Close settings |
 
-Live starts when you click the waveform in the toolbar, type a question or press a quick action, and stops when you
-click the waveform again; no shortcut starts or stops it.
+Live starts when you click the waveform in the toolbar, type a question, press a quick action or press Assist, and stops
+when you click the waveform again; no shortcut stops it.
 
 Only the pill, the quick actions and the text box take mouse clicks; answers and the space around the overlay are
-click-through. Move and scroll shortcuts are claimed only while the overlay is visible, and Assist only during a Live
-session, so other apps keep their shortcuts.
+click-through. Move and scroll shortcuts are claimed only while the overlay is visible, so other apps keep them. Assist
+(`Ctrl ↵`) is claimed for as long as CluelyRS runs, so other apps don't get that chord.
 
 **Answer with** (Settings → Model):
 

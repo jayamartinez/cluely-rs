@@ -36,9 +36,6 @@ impl Action {
     /// panel is open and on screen, so it never swallows Esc in other apps otherwise.
     pub fn only_while_panel(self) -> bool { matches!(self, Self::Close) }
 
-    /// Ctrl+Enter sends messages in many apps, so Assist is only claimed during a Live session.
-    pub fn only_while_live(self) -> bool { matches!(self, Self::Assist) }
-
     #[cfg(target_os = "macos")]
     fn arrow(self) -> Option<crate::platform::Arrow> {
         use crate::platform::Arrow;
@@ -51,7 +48,9 @@ impl Action {
         }
     }
 
-    fn always(self) -> bool { !self.only_while_visible() && !self.only_while_panel() && !self.only_while_live() }
+    /// Claimed for as long as CluelyRS runs. That includes Assist (Ctrl+Enter, ⌘↵ on macOS),
+    /// which starts Live when it is off, so it works any time even though other apps lose the chord.
+    fn always(self) -> bool { !self.only_while_visible() && !self.only_while_panel() }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -96,7 +95,6 @@ pub struct Hotkeys {
     by_id: HashMap<u32, Action>,
     visible_registered: bool,
     panel_registered: bool,
-    live_registered: bool,
     /// Shortcuts another application already owns; reported instead of failing startup.
     pub unavailable: Vec<Action>,
 }
@@ -121,7 +119,7 @@ impl Hotkeys {
                 let _ = sender.unbounded_send(*action);
             }
         }));
-        let mut hotkeys = Self { manager, bindings, by_id, visible_registered: false, panel_registered: false, live_registered: false, unavailable: Vec::new() };
+        let mut hotkeys = Self { manager, bindings, by_id, visible_registered: false, panel_registered: false, unavailable: Vec::new() };
         hotkeys.register(Action::always);
         Ok((hotkeys, receiver))
     }
@@ -138,12 +136,6 @@ impl Hotkeys {
         if visible == self.visible_registered { return; }
         self.visible_registered = visible;
         self.set_group(Action::only_while_visible, visible);
-    }
-
-    pub fn set_live(&mut self, live: bool) {
-        if live == self.live_registered { return; }
-        self.live_registered = live;
-        self.set_group(Action::only_while_live, live);
     }
 
     pub fn set_panel_open(&mut self, open: bool) {
@@ -227,5 +219,13 @@ mod tests {
     fn no_shortcut_starts_or_stops_live() {
         assert!(DEFAULTS.iter().all(|(_, accelerator)| !accelerator.ends_with("shift+Enter")), "{DEFAULTS:?}");
         assert!(DEFAULTS.iter().all(|(_, accelerator)| accelerator.parse::<HotKey>().is_ok()));
+    }
+
+    /// Assist works any time: it starts Live when it is off (`Overlay::send`), so it is claimed
+    /// from launch rather than only during Live.
+    #[test]
+    fn assist_is_claimed_from_launch() {
+        assert!(Action::always(Action::Assist));
+        assert!(DEFAULTS.iter().any(|(action, _)| *action == Action::Assist));
     }
 }
