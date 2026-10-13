@@ -323,7 +323,12 @@ impl Overlay {
             apply_capture_setting(native, &self.store.value);
         }
         #[cfg(target_os = "macos")]
-        if previous.show_in_dock != self.store.value.show_in_dock { self.update_dock(); }
+        if previous.show_in_dock != self.store.value.show_in_dock {
+            // Leaving the Dock would send Settings behind other apps (`settings_window::keep_in_front`).
+            let in_front = self.settings_window.filter(|&handle| !self.store.value.show_in_dock && crate::settings_window::is_in_front(handle, cx));
+            self.update_dock();
+            if let Some(handle) = in_front { crate::settings_window::keep_in_front(handle, cx); }
+        }
         // Grows and shrinks around the card's centre, keeping its top edge (the height doesn't change).
         if let Some(native) = self.native && previous.card_width != self.store.value.card_width {
             platform::set_width_centred(native, self.store.value.card_width.window());

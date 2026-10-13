@@ -337,6 +337,20 @@ async fn wait_until<Sleep: Future<Output = ()>>(ready: impl Fn() -> bool, limit:
     true
 }
 
+/// Once CluelyRS has left the Dock (`set_in_dock(false)`) while active, call `show` as
+/// [`activate_then`] does. macOS deactivates a regular app that turns into an accessory one and
+/// brings the next app forward, so the app's ordinary windows end up behind that app's, and with no
+/// Dock icon or ⌘Tab entry left to bring them back they look closed. The deactivation arrives on a
+/// later turn of the event loop, after `setActivationPolicy` returns, so activating at once would be
+/// undone by it: wait for it first (up to `ACTIVATION_WAIT`, should macOS leave the app active).
+pub fn reactivate_after_leaving_dock(cx: &mut App, show: impl FnOnce(bool, &mut App) + 'static) {
+    cx.spawn(async move |cx| {
+        let executor = cx.background_executor().clone();
+        wait_until(|| !app_is_active(), ACTIVATION_WAIT, ACTIVATION_POLL, |poll| executor.timer(poll)).await;
+        let _ = cx.update(|cx| activate_then(cx, show));
+    }).detach();
+}
+
 /// Show `window` above other windows without making it key (see [`activate_then`]).
 pub fn order_front(window: NativeWindow) {
     window.get().orderFront(None);
