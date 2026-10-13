@@ -6,7 +6,8 @@
 //! Each platform file provides the same items: `NativeWindow`, `PreviousFocus`, `Shape` and
 //! the functions `overlay` and `sessions_window` call, though macOS's `take_focus` calls back once
 //! CluelyRS is the active app rather than returning at once. macOS also provides system audio capture
-//! (`SystemAudio`), which `audio::capture` uses where Windows has WASAPI loopback.
+//! (`SystemAudio`), which `audio::capture` uses where Windows has WASAPI loopback, and the menu bar
+//! icon with its menu (`StatusMenu`), which Windows doesn't have.
 
 /// Showing and hiding the overlay fades it over this long; showing also settles it `POP_DISTANCE`
 /// (logical pixels) down into place. The same on every platform.
@@ -26,6 +27,10 @@ pub use self::macos::*;
 mod macos_system_audio;
 #[cfg(target_os = "macos")]
 pub use self::macos_system_audio::{SystemAudio, SystemAudioBuffer, SystemAudioEvent};
+#[cfg(target_os = "macos")]
+mod macos_status_item;
+#[cfg(target_os = "macos")]
+pub use self::macos_status_item::{Alert, MenuEntry, MenuKey, StatusMenu, confirm, confirm_later};
 
 /// Where a window's left edge goes when its width changes from `old_width` to `width`, keeping its
 /// horizontal centre where it was (a centred overlay stays centred) but within the screen's visible

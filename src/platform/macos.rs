@@ -13,13 +13,13 @@ use std::time::Duration;
 use block2::RcBlock;
 use dispatch2::DispatchQueue;
 use gpui::{App, Pixels, Size, Window};
-use objc2::MainThreadMarker;
+use objc2::{AnyThread, MainThreadMarker};
 use objc2::rc::Retained;
 use objc2_app_kit::{
-    NSAnimatablePropertyContainer, NSAnimationContext, NSApplication, NSApplicationActivationOptions, NSApplicationActivationPolicy, NSEvent, NSEventModifierFlags, NSRunningApplication, NSScreen, NSView, NSWindow, NSWindowAnimationBehavior, NSWindowCollectionBehavior,
+    NSAnimatablePropertyContainer, NSAnimationContext, NSApplication, NSApplicationActivationOptions, NSApplicationActivationPolicy, NSBitmapImageRep, NSEvent, NSEventModifierFlags, NSImage, NSRunningApplication, NSScreen, NSView, NSWindow, NSWindowAnimationBehavior, NSWindowCollectionBehavior,
     NSWindowSharingType, NSWindowStyleMask, NSWorkspace,
 };
-use objc2_foundation::{NSPoint, NSRect, NSSize};
+use objc2_foundation::{NSData, NSPoint, NSRect, NSSize};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 /// The overlay's own window. `native_window` keeps a strong reference for the rest of the
@@ -340,6 +340,30 @@ async fn wait_until<Sleep: Future<Output = ()>>(ready: impl Fn() -> bool, limit:
 /// Show `window` above other windows without making it key (see [`activate_then`]).
 pub fn order_front(window: NativeWindow) {
     window.get().orderFront(None);
+}
+
+/// The app icon, drawn on Apple's icon grid (`assets/app-icon`) at 256 and 512 px.
+const APP_ICON: [&[u8]; 2] = [include_bytes!("../../assets/app-icon/app-icon-256.png"), include_bytes!("../../assets/app-icon/app-icon-512.png")];
+
+/// CluelyRS runs as a bare binary, with no bundle for macOS to take an icon from, so its Dock tile
+/// (with "Show in Dock" on) would show a generic one. Give the app its icon instead.
+pub fn set_app_icon() {
+    let Some(mtm) = MainThreadMarker::new() else { return };
+    // SAFETY: a valid image, set on the main thread.
+    unsafe { NSApplication::sharedApplication(mtm).setApplicationIconImage(Some(&app_icon())) };
+}
+
+/// The app icon at 256 points, the most macOS draws a Dock tile at; each PNG covers its own scale.
+/// Alerts need it set on them too: they take a bare binary's icon from the file, a folder.
+pub fn app_icon() -> Retained<NSImage> {
+    let size = NSSize::new(256.0, 256.0);
+    let image = NSImage::initWithSize(NSImage::alloc(), size);
+    for png in APP_ICON {
+        let Some(rep) = NSBitmapImageRep::imageRepWithData(&NSData::with_bytes(png)) else { continue };
+        rep.setSize(size);
+        image.addRepresentation(&rep);
+    }
+    image
 }
 
 /// Open a folder in Finder.

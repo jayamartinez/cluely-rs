@@ -30,7 +30,7 @@ fn main() {
         input::bind_keys(cx);
         text_area::bind_keys(cx);
         #[cfg(target_os = "macos")]
-        app_menu(cx);
+        { app_menu(cx); cluely_rs::platform::set_app_icon(); }
         // Hotkeys must be created on this (the GPUI main) thread so its message loop serves them.
         let (hotkeys, presses) = match hotkeys::Hotkeys::new() {
             Ok(pair) => pair,
