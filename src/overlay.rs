@@ -206,6 +206,10 @@ pub struct Overlay {
     /// Windows: first-run setup, while its window is open; the overlay stays hidden meanwhile.
     #[cfg(windows)]
     pub(crate) setup: Option<crate::onboarding::Setup>,
+    /// Windows: created hidden for first-run setup, so not yet where `main` asked (a hidden window
+    /// starts where Windows puts new windows). The first `show` puts it top centre.
+    #[cfg(windows)]
+    unplaced: bool,
 }
 
 impl Overlay {
@@ -309,14 +313,19 @@ impl Overlay {
             open_picker: None, reveal_accounts: false, devices: None, devices_loading: false, archive_bytes: None, picker_face: Rc::default(), toggle_hover: None,
             collapse: None, settings_height: Rc::default(), modes_ui, modes, updates: Default::default(), modes_window: None, switcher: None,
             #[cfg(windows)]
-            setup: None };
+            setup: None,
+            #[cfg(windows)]
+            unplaced: false };
         overlay.refresh_model_status();
         overlay.mark_existing_keys(window, cx);
         #[cfg(target_os = "macos")]
         overlay.update_dock();
         if start_live { overlay.set_live(true, window, cx); }
         #[cfg(windows)]
-        if setup { overlay.open_setup(window, cx); }
+        if setup {
+            overlay.unplaced = true;
+            overlay.open_setup(window, cx);
+        }
         overlay.start_update_checks(window, cx);
         overlay
     }
@@ -463,11 +472,16 @@ impl Overlay {
     }
 
     fn handle(&mut self, action: Action, window: &mut Window, cx: &mut Context<Self>) {
-        // During setup the overlay stays hidden: Assist only counts as tried (nothing starts or
-        // is sent), and the other shortcuts wait until setup ends.
+        // During setup the overlay is only there to look at: Assist shows it (nothing starts or is
+        // sent), Show / hide and the move keys work as usual, and the rest wait until setup ends.
         #[cfg(windows)]
         if let Some(setup) = &mut self.setup {
-            if action == Action::Assist { setup.tried_assist = true; cx.notify(); }
+            match action {
+                Action::Assist => { setup.tried_assist = true; self.show(); cx.notify(); }
+                Action::Toggle => self.toggle_visible(),
+                Action::MoveUp | Action::MoveDown | Action::MoveLeft | Action::MoveRight => self.start_motion(Motion::Move, window, cx),
+                _ => {}
+            }
             return;
         }
         match action {
@@ -905,6 +919,10 @@ impl Overlay {
     /// Which provider the key field belongs to: the transcription provider on the Listening
     /// tab, the API-key answer provider on the Model tab.
     pub(crate) fn key_target(&self) -> String {
+        #[cfg(windows)]
+        if self.setup.as_ref().is_some_and(|setup| setup.step == crate::onboarding::Step::Transcription) {
+            return crate::stt::deepgram::PROVIDER_ID.to_string();
+        }
         if self.settings_tab == Some(Tab::Listening) { crate::stt::deepgram::PROVIDER_ID.to_string() } else { self.store.value.api_provider.clone() }
     }
 
@@ -942,12 +960,11 @@ impl Overlay {
                         this.key_notice = Some(format!("Saved to {}.", crate::secrets::STORE_NAME).into());
                         #[cfg(target_os = "macos")]
                         this.key_saved(&provider, window, cx);
+                        #[cfg(windows)]
+                        this.setup_key_saved(&provider, window, cx);
                     }
                     Err(error) => this.key_notice = Some(format!("Couldn't save the key: {error}").into()),
                 }
-                // Only macOS loads models from here.
-                #[cfg(not(target_os = "macos"))]
-                let _ = window;
                 cx.notify();
             });
         }).detach();
@@ -1057,6 +1074,8 @@ impl Overlay {
 
     pub(crate) fn show(&mut self) {
         if let Some(native) = self.native.filter(|native| !platform::is_visible(*native)) {
+            #[cfg(windows)]
+            if std::mem::take(&mut self.unplaced) { platform::place_top_centre(native); }
             platform::set_visible(native, true);
             self.hotkeys.set_overlay_visible(true);
         }

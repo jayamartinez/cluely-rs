@@ -18,6 +18,7 @@ use crate::ui;
 
 mod about;
 mod cli_location;
+pub(crate) use cli_location::install_page;
 mod reveal;
 #[cfg(target_os = "macos")]
 mod model_form;
@@ -190,7 +191,7 @@ pub(crate) fn latest_gpt_models(models: &[(String, String)]) -> Vec<(String, Str
 }
 
 /// "plus" → "ChatGPT Plus", "max_5x" → "Max 5x": the plan as the CLI reports it, made readable.
-fn plan_label(provider: Provider, plan: &str) -> String {
+pub(crate) fn plan_label(provider: Provider, plan: &str) -> String {
     let words: Vec<String> = plan.split(['_', '-', ' ']).filter(|w| !w.is_empty()).map(|word| {
         let mut chars = word.chars();
         match chars.next() { Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(), None => String::new() }
