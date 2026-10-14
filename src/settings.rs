@@ -104,6 +104,10 @@ pub struct Settings {
     pub last_update_check: Option<u64>,
     /// The version whose notice was closed in the overlay; it shows again only for a newer one.
     pub dismissed_update: String,
+    /// First-run setup was finished or skipped. A fresh install starts without it, but settings
+    /// saved before setup existed read as done, so people who already use CluelyRS never see it.
+    #[serde(default = "setup_done_when_missing")]
+    pub setup_done: bool,
     /// The active mode's meeting context and file text (see `modes`). Not saved here: the
     /// overlay fills it from `modes.json` when it starts and whenever the mode changes.
     #[serde(skip)]
@@ -122,10 +126,12 @@ impl Default for Settings {
             mic_device: String::new(), desktop_device: String::new(),
             hide_from_capture: true, screen_on_send: true, start_live_on_launch: false, show_in_dock: false,
             save_sessions: true, save_screenshots: true, keep_sessions: Retention::default(),
-            check_for_updates: true, last_update_check: None, dismissed_update: String::new(), mode: None,
+            check_for_updates: true, last_update_check: None, dismissed_update: String::new(), setup_done: false, mode: None,
         }
     }
 }
+
+fn setup_done_when_missing() -> bool { true }
 
 impl Settings {
     /// Providers that can have a saved key but have no marker: keys saved before markers existed
@@ -176,8 +182,15 @@ pub struct Store {
 }
 
 impl Store {
+    /// `CLUELYRS_SETTINGS` names another settings file (development: a first run without touching
+    /// the real settings).
     pub fn load() -> Self {
-        let path = dirs::config_dir().map(|dir| dir.join("CluelyRS").join("settings.json"));
+        let path = std::env::var_os("CLUELYRS_SETTINGS").map(PathBuf::from)
+            .or_else(|| dirs::config_dir().map(|dir| dir.join("CluelyRS").join("settings.json")));
+        Self::at(path)
+    }
+
+    fn at(path: Option<PathBuf>) -> Self {
         let mut store = Self { path, value: Settings::default(), warning: None };
         if let Some(path) = &store.path && path.exists() {
             match fs::read(path).ok().filter(|bytes| bytes.len() <= 65536).and_then(|bytes| serde_json::from_slice(&bytes).ok()) {
@@ -188,6 +201,10 @@ impl Store {
         store.publish_cli_paths();
         store
     }
+
+    /// Whether first-run setup should open: not finished or skipped yet, and the saved settings
+    /// were readable (unreadable ones fall back to defaults, which must not restart setup).
+    pub fn setup_needed(&self) -> bool { !self.value.setup_done && self.warning.is_none() }
 
     /// Hand the located CLIs to `cli_path`, which the CLIs resolve through.
     fn publish_cli_paths(&self) {
@@ -280,6 +297,34 @@ mod tests {
         let json = serde_json::to_string(&settings).unwrap();
         assert!(json.contains(r#""checkForUpdates":false"#) && json.contains(r#""lastUpdateCheck":1791500000"#) && json.contains(r#""dismissedUpdate":"0.2.0""#), "{json}");
         assert_eq!(serde_json::from_str::<Settings>(&json).unwrap(), settings);
+    }
+
+    #[test]
+    fn setup_opens_on_a_fresh_install_only() {
+        let dir = std::env::temp_dir().join(format!("cluelyrs-setup-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        let _ = fs::remove_file(&path);
+        assert!(Store::at(Some(path.clone())).setup_needed(), "no settings file: a fresh install");
+
+        fs::write(&path, r#"{"provider":"claude"}"#).unwrap();
+        let existing = Store::at(Some(path.clone()));
+        assert!(existing.value.setup_done && !existing.setup_needed(), "settings saved before setup existed");
+
+        fs::write(&path, "{ not json").unwrap();
+        let unreadable = Store::at(Some(path.clone()));
+        assert!(unreadable.warning.is_some() && !unreadable.setup_needed(), "unreadable settings never restart setup");
+
+        // Quitting midway leaves it unfinished; finishing or skipping saves it as done.
+        let mut store = Store::at(Some(path.clone()));
+        store.value = Settings::default();
+        store.save();
+        assert!(Store::at(Some(path.clone())).setup_needed());
+        store.value.setup_done = true;
+        store.save();
+        assert!(!Store::at(Some(path.clone())).setup_needed());
+        assert!(fs::read_to_string(&path).unwrap().contains(r#""setupDone": true"#));
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

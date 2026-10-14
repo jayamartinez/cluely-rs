@@ -84,7 +84,7 @@ pub(crate) struct ModelChoice {
 }
 
 /// A segmented control over `options`; clicking applies `set` and saves.
-fn choice<T: Copy + PartialEq + 'static>(
+pub(crate) fn choice<T: Copy + PartialEq + 'static>(
     name: &'static str, options: &[(T, &'static str)], current: T, set: fn(&mut Settings, T), cx: &mut Context<Overlay>,
 ) -> Div {
     let mut control = ui::segmented();
@@ -100,7 +100,7 @@ fn field(label: &'static str, control: impl IntoElement) -> Div {
 }
 
 /// A clickable switch bound to a boolean setting.
-fn switch(name: &'static str, on: bool, set: fn(&mut Settings, bool), cx: &mut Context<Overlay>) -> impl IntoElement {
+pub(crate) fn switch(name: &'static str, on: bool, set: fn(&mut Settings, bool), cx: &mut Context<Overlay>) -> impl IntoElement {
     div().id(name).flex_none().cursor_pointer()
         .on_mouse_down(MouseButton::Left, listen(cx, move |this, _, window, cx| { cx.stop_propagation(); this.update_settings(|s| set(s, !on), window, cx) }))
         .child(ui::switch(on))

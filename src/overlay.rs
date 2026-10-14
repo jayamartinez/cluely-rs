@@ -203,6 +203,9 @@ pub struct Overlay {
     switcher: Option<switcher::Switcher>,
     /// Windows: the Modes window, while it's open.
     pub(crate) modes_window: Option<gpui::WindowHandle<crate::modes_window::ModesWindow>>,
+    /// Windows: first-run setup, while its window is open; the overlay stays hidden meanwhile.
+    #[cfg(windows)]
+    pub(crate) setup: Option<crate::onboarding::Setup>,
 }
 
 impl Overlay {
@@ -218,8 +221,10 @@ impl Overlay {
             platform::remove_frame(native);
             let _ = platform::set_topmost(native);
         }
+        // Windows opens first-run setup instead of the overlay (`main` keeps the overlay hidden).
+        let setup = cfg!(windows) && store.setup_needed();
         let mut hotkeys = hotkeys;
-        hotkeys.set_overlay_visible(true);
+        hotkeys.set_overlay_visible(!setup);
         if !hotkeys.unavailable.is_empty() { eprintln!("shortcuts in use by another app: {:?}", hotkeys.unavailable); }
 
         cx.spawn_in(window, async move |this, cx| {
@@ -231,7 +236,7 @@ impl Overlay {
         cx.spawn_in(window, async move |this, cx| {
             let mut relaunches = relaunches;
             while relaunches.next().await.is_some() {
-                if this.update(cx, |this, _| this.relaunched()).is_err() { break; }
+                if this.update(cx, |this, cx| this.relaunched(cx)).is_err() { break; }
             }
         }).detach();
         // Text, answers and the transcript line let clicks through; only controls catch them.
@@ -257,7 +262,7 @@ impl Overlay {
             archive.recover();
             if store.value.save_sessions { archive.prune(store.value.keep_sessions, archive::unix_now()); }
         }
-        let start_live = store.value.start_live_on_launch;
+        let start_live = store.value.start_live_on_launch && !setup;
         let composer = cx.new(|cx| TextInput::new(composer_placeholder(&store.value), cx));
         let key_input = cx.new(|cx| TextInput::new("Paste your API key", cx).masked(true));
         let model_input = cx.new(|cx| TextInput::new("Model id, e.g. from the list below", cx));
@@ -302,12 +307,16 @@ impl Overlay {
             listening: None, listening_status: None, listening_epoch: 0, transcript: Vec::new(), provisional: Default::default(), levels: Default::default(),
             model_installed: false, model_download: None, model_notice: None,
             open_picker: None, reveal_accounts: false, devices: None, devices_loading: false, archive_bytes: None, picker_face: Rc::default(), toggle_hover: None,
-            collapse: None, settings_height: Rc::default(), modes_ui, modes, updates: Default::default(), modes_window: None, switcher: None };
+            collapse: None, settings_height: Rc::default(), modes_ui, modes, updates: Default::default(), modes_window: None, switcher: None,
+            #[cfg(windows)]
+            setup: None };
         overlay.refresh_model_status();
         overlay.mark_existing_keys(window, cx);
         #[cfg(target_os = "macos")]
         overlay.update_dock();
         if start_live { overlay.set_live(true, window, cx); }
+        #[cfg(windows)]
+        if setup { overlay.open_setup(window, cx); }
         overlay.start_update_checks(window, cx);
         overlay
     }
@@ -454,6 +463,13 @@ impl Overlay {
     }
 
     fn handle(&mut self, action: Action, window: &mut Window, cx: &mut Context<Self>) {
+        // During setup the overlay stays hidden: Assist only counts as tried (nothing starts or
+        // is sent), and the other shortcuts wait until setup ends.
+        #[cfg(windows)]
+        if let Some(setup) = &mut self.setup {
+            if action == Action::Assist { setup.tried_assist = true; cx.notify(); }
+            return;
+        }
         match action {
             Action::Toggle => {
                 // Hiding closes the mode switcher, handing the keyboard back.
@@ -1039,16 +1055,30 @@ impl Overlay {
         self.hotkeys.set_panel_open(visible && self.settings_tab.is_some());
     }
 
-    fn show(&mut self) {
+    pub(crate) fn show(&mut self) {
         if let Some(native) = self.native.filter(|native| !platform::is_visible(*native)) {
             platform::set_visible(native, true);
             self.hotkeys.set_overlay_visible(true);
         }
     }
 
+    #[cfg(windows)]
+    pub(crate) fn hide(&mut self) {
+        if let Some(native) = self.native.filter(|native| platform::is_visible(*native)) {
+            self.key_reveal.hide();
+            platform::set_visible(native, false);
+            self.hotkeys.set_overlay_visible(false);
+            self.hotkeys.set_panel_open(false);
+        }
+    }
+
     /// CluelyRS was launched again: show the overlay, kept on screen in case it was left on a screen
     /// that's gone. Moved before showing, because the pop-in holds the position it starts from.
-    fn relaunched(&mut self) {
+    #[cfg_attr(not(windows), allow(unused_variables))]
+    fn relaunched(&mut self, cx: &mut Context<Self>) {
+        // During first-run setup the overlay stays hidden: bring the setup window forward instead.
+        #[cfg(windows)]
+        if self.raise_setup(cx) { return; }
         if let Some(native) = self.native { let _ = platform::move_by(native, 0, 0, self.content_bottom()); }
         self.show();
     }

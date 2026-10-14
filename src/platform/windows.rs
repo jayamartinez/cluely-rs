@@ -295,6 +295,8 @@ fn claim(mutex: &str, event: &str) -> Option<UnboundedReceiver<()>> {
     // signal sent before the first copy starts waiting isn't lost.
     let Ok(show) = (unsafe { CreateEventW(None, false, false, &HSTRING::from(event)) }) else { return Some(unbounded().1) };
     if already_running {
+        // The running copy is in the background; let it bring its window to the front.
+        let _ = unsafe { windows::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow(windows::Win32::UI::WindowsAndMessaging::ASFW_ANY) };
         let _ = unsafe { SetEvent(show) };
         return None;
     }
@@ -312,6 +314,32 @@ pub fn open_folder(path: &Path) -> std::io::Result<()> { Command::new("explorer.
 
 /// Open File Explorer at a file's folder with the file selected.
 pub fn reveal_file(path: &Path) -> std::io::Result<()> { Command::new("explorer.exe").arg("/select,").arg(path).spawn().map(drop) }
+
+/// Where Windows lists what starts at sign-in for this user; CluelyRS's entry is its quoted path.
+const RUN_KEY: windows::core::PCWSTR = windows::core::w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
+const RUN_VALUE: windows::core::PCWSTR = windows::core::w!("CluelyRS");
+
+/// Whether CluelyRS starts at sign-in. The registry is the record: an entry added or removed
+/// elsewhere (Task Manager's Startup apps) shows here as it is.
+pub fn launch_at_login() -> bool {
+    use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_SZ, RegGetValueW};
+    // SAFETY: a presence query; nothing is written.
+    unsafe { RegGetValueW(HKEY_CURRENT_USER, RUN_KEY, RUN_VALUE, RRF_RT_REG_SZ, None, None, None) }.is_ok()
+}
+
+/// Start CluelyRS at sign-in (this executable, quoted), or stop.
+pub fn set_launch_at_login(on: bool) -> windows::core::Result<()> {
+    use windows::Win32::System::Registry::{HKEY_CURRENT_USER, REG_SZ, RegDeleteKeyValueW, RegSetKeyValueW};
+    if !on {
+        // SAFETY: both names are static, NUL-terminated strings.
+        let result = unsafe { RegDeleteKeyValueW(HKEY_CURRENT_USER, RUN_KEY, RUN_VALUE) };
+        return if result == windows::Win32::Foundation::ERROR_FILE_NOT_FOUND { Ok(()) } else { result.ok() };
+    }
+    let exe = std::env::current_exe().map_err(|error| windows::core::Error::new(windows::Win32::Foundation::E_FAIL, error.to_string()))?;
+    let command: Vec<u16> = format!("\"{}\"", exe.display()).encode_utf16().chain([0]).collect();
+    // SAFETY: `command` is NUL-terminated and its byte length is passed with it.
+    unsafe { RegSetKeyValueW(HKEY_CURRENT_USER, RUN_KEY, RUN_VALUE, REG_SZ.0, Some(command.as_ptr().cast()), (command.len() * 2) as u32) }.ok()
+}
 
 #[cfg(test)]
 mod tests {

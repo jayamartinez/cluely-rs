@@ -60,7 +60,7 @@ impl Overlay {
 
     /// The track, filled up to the value, with a tick at the default. Pressing jumps to the pointer and
     /// dragging follows it; both show on the overlay at once, and the release saves.
-    fn opacity_slider(&self, percent: u8, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn opacity_slider(&self, percent: u8, cx: &mut Context<Self>) -> impl IntoElement {
         let fraction = f32::from(percent) / 100.0;
         // Where the track was laid out this frame, so a press or a drag maps to a value.
         let track: Rc<Cell<Option<Bounds<Pixels>>>> = Rc::default();

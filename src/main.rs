@@ -40,7 +40,10 @@ fn main() {
         };
         let display = cx.primary_display();
         // As wide as Settings › Window › Card width makes it, centred.
-        let width = px(cluely_rs::settings::Store::load().value.card_width.window());
+        let store = cluely_rs::settings::Store::load();
+        let width = px(store.value.card_width.window());
+        // Windows: on first run the overlay waits, hidden, until setup is finished or skipped.
+        let show = !(cfg!(windows) && store.setup_needed());
         let origin = display.as_ref().map(|display| {
             let bounds = display.bounds();
             point(bounds.origin.x + (bounds.size.width - width) / 2.0, bounds.origin.y + px(24.0))
@@ -51,7 +54,7 @@ fn main() {
             window_background: WindowBackgroundAppearance::Transparent,
             kind: WindowKind::PopUp,
             focus: false,
-            show: true,
+            show,
             is_movable: true,
             is_resizable: false,
             is_minimizable: false,
