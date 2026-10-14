@@ -172,7 +172,8 @@ impl Render for Tooltip {
     }
 }
 
-fn tooltip(text: &'static str, cx: &mut App) -> AnyView {
+/// A small dark label shown while the pointer rests on an element (`.tooltip`).
+pub(super) fn tooltip(text: &'static str, cx: &mut App) -> AnyView {
     cx.new(|_| Tooltip(text)).into()
 }
 

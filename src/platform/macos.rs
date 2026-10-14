@@ -13,13 +13,13 @@ use std::time::Duration;
 use block2::RcBlock;
 use dispatch2::DispatchQueue;
 use gpui::{App, Pixels, Size, Window};
-use objc2::MainThreadMarker;
+use objc2::{AnyThread, MainThreadMarker};
 use objc2::rc::Retained;
 use objc2_app_kit::{
-    NSAnimatablePropertyContainer, NSAnimationContext, NSApplication, NSApplicationActivationOptions, NSApplicationActivationPolicy, NSEvent, NSEventModifierFlags, NSRunningApplication, NSScreen, NSView, NSWindow, NSWindowAnimationBehavior, NSWindowCollectionBehavior,
+    NSAnimatablePropertyContainer, NSAnimationContext, NSApplication, NSApplicationActivationOptions, NSApplicationActivationPolicy, NSBitmapImageRep, NSEvent, NSEventModifierFlags, NSImage, NSRunningApplication, NSScreen, NSView, NSWindow, NSWindowAnimationBehavior, NSWindowCollectionBehavior,
     NSWindowSharingType, NSWindowStyleMask, NSWorkspace,
 };
-use objc2_foundation::{NSPoint, NSRect, NSSize};
+use objc2_foundation::{NSData, NSPoint, NSRect, NSSize};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 /// The overlay's own window. `native_window` keeps a strong reference for the rest of the
@@ -341,9 +341,47 @@ async fn wait_until<Sleep: Future<Output = ()>>(ready: impl Fn() -> bool, limit:
     true
 }
 
+/// Once CluelyRS has left the Dock (`set_in_dock(false)`) while active, call `show` as
+/// [`activate_then`] does. macOS deactivates a regular app that turns into an accessory one and
+/// brings the next app forward, so the app's ordinary windows end up behind that app's, and with no
+/// Dock icon or ⌘Tab entry left to bring them back they look closed. The deactivation arrives on a
+/// later turn of the event loop, after `setActivationPolicy` returns, so activating at once would be
+/// undone by it: wait for it first (up to `ACTIVATION_WAIT`, should macOS leave the app active).
+pub fn reactivate_after_leaving_dock(cx: &mut App, show: impl FnOnce(bool, &mut App) + 'static) {
+    cx.spawn(async move |cx| {
+        let executor = cx.background_executor().clone();
+        wait_until(|| !app_is_active(), ACTIVATION_WAIT, ACTIVATION_POLL, |poll| executor.timer(poll)).await;
+        let _ = cx.update(|cx| activate_then(cx, show));
+    }).detach();
+}
+
 /// Show `window` above other windows without making it key (see [`activate_then`]).
 pub fn order_front(window: NativeWindow) {
     window.get().orderFront(None);
+}
+
+/// The app icon, drawn on Apple's icon grid (`assets/app-icon`) at 256 and 512 px.
+const APP_ICON: [&[u8]; 2] = [include_bytes!("../../assets/app-icon/app-icon-256.png"), include_bytes!("../../assets/app-icon/app-icon-512.png")];
+
+/// CluelyRS runs as a bare binary, with no bundle for macOS to take an icon from, so its Dock tile
+/// (with "Show in Dock" on) would show a generic one. Give the app its icon instead.
+pub fn set_app_icon() {
+    let Some(mtm) = MainThreadMarker::new() else { return };
+    // SAFETY: a valid image, set on the main thread.
+    unsafe { NSApplication::sharedApplication(mtm).setApplicationIconImage(Some(&app_icon())) };
+}
+
+/// The app icon at 256 points, the most macOS draws a Dock tile at; each PNG covers its own scale.
+/// Alerts need it set on them too: they take a bare binary's icon from the file, a folder.
+pub fn app_icon() -> Retained<NSImage> {
+    let size = NSSize::new(256.0, 256.0);
+    let image = NSImage::initWithSize(NSImage::alloc(), size);
+    for png in APP_ICON {
+        let Some(rep) = NSBitmapImageRep::imageRepWithData(&NSData::with_bytes(png)) else { continue };
+        rep.setSize(size);
+        image.addRepresentation(&rep);
+    }
+    image
 }
 
 /// Open a folder in Finder.
@@ -352,6 +390,40 @@ pub fn open_folder(path: &Path) -> std::io::Result<()> { Command::new("open").ar
 /// Open Finder at a file's folder with the file selected.
 pub fn reveal_file(path: &Path) -> std::io::Result<()> { Command::new("open").arg("-R").arg(path).spawn().map(drop) }
 
+/// Run `exe` with `args` in a new window of the user's terminal app, where its output and prompts are
+/// seen (a CLI's own sign-in). The command goes in a `.command` script that `open` hands to the app
+/// that runs them (Terminal unless the user chose another), so no AppleScript, Automation permission
+/// or synthetic input is involved. The script lives in a folder only this user can read and removes
+/// itself as it starts, so closing the window early leaves nothing behind.
+pub fn run_in_terminal(exe: &Path, args: &[&str]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+    static SCRIPTS: AtomicU64 = AtomicU64::new(0);
+    let script = terminal_script(exe, args).ok_or_else(|| std::io::Error::other("the CLI's location isn't valid text"))?;
+    let dir = std::env::temp_dir().join("cluelyrs-terminal");
+    match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
+        Err(error) if error.kind() != std::io::ErrorKind::AlreadyExists => return Err(error),
+        _ => {}
+    }
+    // An existing folder must be a real folder of this user's that nobody else can open.
+    let meta = std::fs::symlink_metadata(&dir)?;
+    if !meta.is_dir() || meta.uid() != unsafe { libc::getuid() } { return Err(std::io::Error::other("the script folder isn't private")); }
+    if meta.permissions().mode() & 0o777 != 0o700 { std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?; }
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |since| since.as_nanos());
+    let path = dir.join(format!("sign-in-{}-{nanos}-{}.command", std::process::id(), SCRIPTS.fetch_add(1, Ordering::Relaxed)));
+    std::fs::OpenOptions::new().write(true).create_new(true).mode(0o700).open(&path)?.write_all(script.as_bytes())?;
+    Command::new("open").arg(&path).spawn().map(drop)
+}
+
+/// The `.command` script `run_in_terminal` opens; `None` for a path that isn't UTF-8.
+fn terminal_script(exe: &Path, args: &[&str]) -> Option<String> {
+    let command = std::iter::once(exe.to_str()?).chain(args.iter().copied()).map(shell_quote).collect::<Vec<_>>().join(" ");
+    Some(format!("#!/bin/zsh\nrm -f -- \"$0\"\nif {command}; then\n  echo\n  echo 'Signed in. You can close this window.'\nelse\n  echo\n  echo \"Sign-in didn't finish. Close this window and try again from CluelyRS.\"\nfi\n"))
+}
+
+/// `word` as one shell word: in single quotes, each single quote written as '\''.
+fn shell_quote(word: &str) -> String { format!("'{}'", word.replace('\'', r"'\''")) }
+
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
@@ -359,7 +431,17 @@ mod tests {
 
     use futures::executor::block_on;
 
-    use super::wait_until;
+    use super::{terminal_script, wait_until};
+
+    #[test]
+    fn the_terminal_script_quotes_the_command_and_removes_itself() {
+        let script = terminal_script(std::path::Path::new("/Users/jay/My Tools/it's/claude"), &["auth", "login", "--claudeai"]).unwrap();
+        assert_eq!(script, "#!/bin/zsh\nrm -f -- \"$0\"\nif '/Users/jay/My Tools/it'\\''s/claude' 'auth' 'login' '--claudeai'; then\n  echo\n  \
+            echo 'Signed in. You can close this window.'\nelse\n  echo\n  echo \"Sign-in didn't finish. Close this window and try again from CluelyRS.\"\nfi\n");
+        // Shell syntax in a path stays text.
+        let hostile = terminal_script(std::path::Path::new("/tmp/$(touch x); `id` \"q\""), &["login"]).unwrap();
+        assert!(hostile.contains("if '/tmp/$(touch x); `id` \"q\"' 'login'; then"), "{hostile}");
+    }
 
     const LIMIT: Duration = Duration::from_millis(600);
     const POLL: Duration = Duration::from_millis(20);

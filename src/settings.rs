@@ -17,19 +17,49 @@ use crate::audio::Source;
 #[serde(rename_all = "camelCase")]
 pub enum Provider { #[default] Codex, Claude, ApiKey }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum ClaudeModel { #[default] Sonnet, Opus, Haiku }
+/// The Claude Code model, as `claude --model` takes it: an alias that follows the newest version
+/// ("sonnet", "opus", "haiku", "fable") or a full model id picked under Legacy models
+/// ("claude-opus-4-6"). Saved as that text; anything that isn't shaped like a model id is rejected.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct ClaudeModel(String);
 
 impl ClaudeModel {
-    /// Alias accepted by `claude --model`.
-    pub fn id(self) -> &'static str { match self { Self::Sonnet => "sonnet", Self::Opus => "opus", Self::Haiku => "haiku" } }
+    /// The aliases offered before Claude Code's model list is known (and on Windows).
+    pub const ALIASES: [(&str, &str); 3] = [("sonnet", "Sonnet"), ("opus", "Opus"), ("haiku", "Haiku")];
+
+    pub fn new(id: &str) -> Option<Self> { crate::claude_cli::plausible_model_id(id).then(|| Self(id.to_string())) }
+
+    pub fn id(&self) -> &str { &self.0 }
+}
+
+impl Default for ClaudeModel {
+    fn default() -> Self { Self("sonnet".into()) }
+}
+
+impl TryFrom<String> for ClaudeModel {
+    type Error = &'static str;
+    fn try_from(id: String) -> Result<Self, Self::Error> { Self::new(&id).ok_or("not a Claude model id") }
+}
+
+impl From<ClaudeModel> for String {
+    fn from(model: ClaudeModel) -> Self { model.0 }
 }
 
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum AnswerStyle { #[default] Spoken, Standard }
+
+/// The steps of the macOS first-run setup (`onboarding_window`), saved while it's open so a relaunch
+/// resumes there. Every step is listed so a newer build's step still reads; `onboarding_window::STEPS`
+/// says which ones are shown.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum OnboardingStep { Welcome, Model, Transcription, Permissions, Privacy, Shortcuts, Done }
+
+/// The setup a finished `onboarding_version` refers to; a later one can be shown to users who saw an older one.
+pub const ONBOARDING_VERSION: u32 = 1;
 
 /// Which recognizer transcribes Live audio.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -91,6 +121,9 @@ pub struct Settings {
     /// macOS: show CluelyRS in the Dock and ⌘Tab. Off keeps it out, as the Windows overlay stays
     /// out of the taskbar.
     pub show_in_dock: bool,
+    /// macOS: show the menu bar icon and its menu (Live, modes, Settings, Quit). On by default,
+    /// so settings saved before it existed keep the icon.
+    pub show_menu_bar_icon: bool,
     /// Settings › Window › Appearance (`appearance`): the card's background opacity in percent, the
     /// size of its reading text and its width.
     pub background_opacity: u8,
@@ -107,10 +140,14 @@ pub struct Settings {
     pub last_update_check: Option<u64>,
     /// The version whose notice was closed in the overlay; it shows again only for a newer one.
     pub dismissed_update: String,
-    /// First-run setup was finished or skipped. A fresh install starts without it, but settings
-    /// saved before setup existed read as done, so people who already use CluelyRS never see it.
+    /// Windows: first-run setup was finished or skipped. A fresh install starts without it, but
+    /// settings saved before setup existed read as done, so people who already use CluelyRS never see it.
     #[serde(default = "setup_done_when_missing")]
     pub setup_done: bool,
+    /// macOS: the first-run setup last finished (closed or skipped counts); 0 before it ever was.
+    pub onboarding_version: u32,
+    /// macOS: the setup step open when CluelyRS last ran; `Some` means setup is unfinished and shows again.
+    pub onboarding_step: Option<OnboardingStep>,
     /// The active mode's meeting context and file text (see `modes`). Not saved here: the
     /// overlay fills it from `modes.json` when it starts and whenever the mode changes.
     #[serde(skip)]
@@ -127,9 +164,10 @@ impl Default for Settings {
             use_gpu: true, listen_mic: true, listen_desktop: true,
             background_opacity: appearance::DEFAULT_OPACITY, text_size: TextSize::default(), card_width: CardWidth::default(),
             mic_device: String::new(), desktop_device: String::new(),
-            hide_from_capture: true, screen_on_send: true, start_live_on_launch: false, show_in_dock: false,
+            hide_from_capture: true, screen_on_send: true, start_live_on_launch: false, show_in_dock: false, show_menu_bar_icon: true,
             save_sessions: true, save_screenshots: true, keep_sessions: Retention::default(),
-            check_for_updates: true, last_update_check: None, dismissed_update: String::new(), setup_done: false, mode: None,
+            check_for_updates: true, last_update_check: None, dismissed_update: String::new(), setup_done: false,
+            onboarding_version: 0, onboarding_step: None, mode: None,
         }
     }
 }
@@ -185,6 +223,9 @@ pub struct Store {
     path: Option<PathBuf>,
     pub value: Settings,
     pub warning: Option<&'static str>,
+    /// Whether settings.json was there at launch, before anything saved this run (keys are marked and
+    /// updates checked within seconds), so a first run is told apart from a returning user.
+    pub existed: bool,
 }
 
 impl Store {
@@ -193,12 +234,13 @@ impl Store {
     pub fn load() -> Self {
         let path = std::env::var_os("CLUELYRS_SETTINGS").map(PathBuf::from)
             .or_else(|| dirs::config_dir().map(|dir| dir.join("CluelyRS").join("settings.json")));
-        Self::at(path)
+        Self::load_from(path)
     }
 
-    fn at(path: Option<PathBuf>) -> Self {
-        let mut store = Self { path, value: Settings::default(), warning: None };
-        if let Some(path) = &store.path && path.exists() {
+    fn load_from(path: Option<PathBuf>) -> Self {
+        let existed = path.as_ref().is_some_and(|path| path.exists());
+        let mut store = Self { path, value: Settings::default(), warning: None, existed };
+        if let Some(path) = &store.path && existed {
             match fs::read(path).ok().filter(|bytes| bytes.len() <= 65536).and_then(|bytes| serde_json::from_slice(&bytes).ok()) {
                 Some(value) => store.value = value,
                 None => store.warning = Some("Saved settings could not be read. Defaults are in use."),
@@ -208,9 +250,15 @@ impl Store {
         store
     }
 
-    /// Whether first-run setup should open: not finished or skipped yet, and the saved settings
-    /// were readable (unreadable ones fall back to defaults, which must not restart setup).
+    /// Whether the Windows first-run setup should open: not finished or skipped yet, and the saved
+    /// settings were readable (unreadable ones fall back to defaults, which must not restart setup).
     pub fn setup_needed(&self) -> bool { !self.value.setup_done && self.warning.is_none() }
+
+    /// Whether the macOS first-run setup opens at launch: on a first run, or when the last run quit
+    /// in the middle of it. Users from before it existed have settings and never see it unasked.
+    pub fn onboarding_pending(&self) -> bool {
+        cfg!(target_os = "macos") && (!self.existed || self.value.onboarding_step.is_some())
+    }
 
     /// Hand the located CLIs to `cli_path`, which the CLIs resolve through.
     fn publish_cli_paths(&self) {
@@ -286,6 +334,11 @@ mod tests {
         assert!(!partial.speculative_answers && !partial.auto_answer, "speculative answers are opt-in");
         assert!(partial.transcribe);
         assert!(partial.use_gpu, "the GPU is on unless turned off");
+        assert!(partial.show_menu_bar_icon && !partial.show_in_dock, "the menu bar icon shows, the Dock icon doesn't");
+        let hidden = Settings { show_menu_bar_icon: false, ..Settings::default() };
+        let json = serde_json::to_string(&hidden).unwrap();
+        assert!(json.contains(r#""showMenuBarIcon":false"#), "{json}");
+        assert_eq!(serde_json::from_str::<Settings>(&json).unwrap(), hidden);
         assert!(partial.codex_path.is_empty() && partial.claude_path.is_empty(), "the CLIs are found automatically");
         let located: Settings = serde_json::from_str(r#"{"codexPath":"/opt/tools/codex","claudePath":""}"#).unwrap();
         assert_eq!((located.codex_path.as_str(), located.claude_path.as_str()), ("/opt/tools/codex", ""));
@@ -311,30 +364,78 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("settings.json");
         let _ = fs::remove_file(&path);
-        assert!(Store::at(Some(path.clone())).setup_needed(), "no settings file: a fresh install");
+        assert!(Store::load_from(Some(path.clone())).setup_needed(), "no settings file: a fresh install");
 
         fs::write(&path, r#"{"provider":"claude"}"#).unwrap();
-        let existing = Store::at(Some(path.clone()));
+        let existing = Store::load_from(Some(path.clone()));
         assert!(existing.value.setup_done && !existing.setup_needed(), "settings saved before setup existed");
 
         fs::write(&path, "{ not json").unwrap();
-        let unreadable = Store::at(Some(path.clone()));
+        let unreadable = Store::load_from(Some(path.clone()));
         assert!(unreadable.warning.is_some() && !unreadable.setup_needed(), "unreadable settings never restart setup");
 
         // Quitting midway leaves it unfinished; finishing or skipping saves it as done.
-        let mut store = Store::at(Some(path.clone()));
+        let mut store = Store::load_from(Some(path.clone()));
         store.value = Settings::default();
         store.save();
-        assert!(Store::at(Some(path.clone())).setup_needed());
+        assert!(Store::load_from(Some(path.clone())).setup_needed());
         store.value.setup_done = true;
         store.save();
-        assert!(!Store::at(Some(path.clone())).setup_needed());
+        assert!(!Store::load_from(Some(path.clone())).setup_needed());
         assert!(fs::read_to_string(&path).unwrap().contains(r#""setupDone": true"#));
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
+    fn onboarding_state_defaults_to_never_run_and_saves_under_its_own_names() {
+        let older: Settings = serde_json::from_str(r#"{"provider":"claude"}"#).unwrap();
+        assert_eq!((older.onboarding_version, older.onboarding_step), (0, None));
+        let midway = Settings { onboarding_step: Some(OnboardingStep::Transcription), ..Settings::default() };
+        let json = serde_json::to_string(&midway).unwrap();
+        assert!(json.contains(r#""onboardingVersion":0"#) && json.contains(r#""onboardingStep":"transcription""#), "{json}");
+        assert_eq!(serde_json::from_str::<Settings>(&json).unwrap(), midway);
+    }
+
+    #[test]
+    fn existed_is_captured_at_load_and_decides_onboarding() {
+        let dir = std::env::temp_dir().join(format!("cluelyrs-settings-existed-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let path = dir.join("settings.json");
+        let mut first = Store::load_from(Some(path.clone()));
+        assert!(!first.existed);
+        first.save();
+        assert!(!first.existed, "saving during the run doesn't make it a returning user");
+        assert_eq!(first.onboarding_pending(), cfg!(target_os = "macos"));
+
+        // Setup quit midway resumes; finished setup and users from before it never see it again.
+        let mut returning = Store::load_from(Some(path.clone()));
+        assert!(returning.existed && !returning.onboarding_pending(), "an existing user");
+        returning.value.onboarding_step = Some(OnboardingStep::Model);
+        returning.save();
+        assert_eq!(Store::load_from(Some(path.clone())).onboarding_pending(), cfg!(target_os = "macos"));
+        fs::write(&path, b"not json").unwrap();
+        let unreadable = Store::load_from(Some(path));
+        assert!(unreadable.existed && unreadable.warning.is_some() && !unreadable.onboarding_pending(), "unreadable settings aren't a first run");
+        assert!(!Store::load_from(None).existed);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Saved aliases from before Legacy models still load; a full id saves as itself.
+    #[test]
+    fn claude_model_takes_aliases_and_full_ids() {
+        let older: Settings = serde_json::from_str(r#"{"claudeModel":"opus"}"#).unwrap();
+        assert_eq!(older.claude_model.id(), "opus");
+        assert_eq!(Settings::default().claude_model.id(), "sonnet");
+        let legacy = Settings { claude_model: ClaudeModel::new("claude-opus-4-6").unwrap(), ..Settings::default() };
+        let json = serde_json::to_string(&legacy).unwrap();
+        assert!(json.contains(r#""claudeModel":"claude-opus-4-6""#), "{json}");
+        assert_eq!(serde_json::from_str::<Settings>(&json).unwrap(), legacy);
+        assert!(ClaudeModel::new("--dangerously-skip").is_none());
+    }
+
+    #[test]
     fn invalid_values_are_rejected_instead_of_silently_coerced() {
         assert!(serde_json::from_str::<Settings>(r#"{"provider":"gemini"}"#).is_err());
+        assert!(serde_json::from_str::<Settings>(r#"{"claudeModel":"--help"}"#).is_err());
     }
 }

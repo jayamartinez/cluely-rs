@@ -9,7 +9,8 @@ use super::{Menu, Setup};
 use crate::claude_cli::{LATEST_MODELS, LEGACY_MODELS, alias_label, model_label};
 use crate::overlay::Overlay;
 use crate::settings::{ClaudeModel, Provider};
-use crate::settings_view::{gpt_version, listen};
+use crate::codex::gpt_version;
+use crate::settings_view::listen;
 use crate::{theme, ui};
 
 const POPOVER: u32 = 0x1d1f23;
@@ -80,7 +81,7 @@ impl Overlay {
         match self.store.value.provider {
             Provider::Claude => self.update_settings(|s| match id.as_str() {
                 "opus" | "sonnet" | "haiku" => {
-                    s.claude_model = match id.as_str() { "opus" => ClaudeModel::Opus, "haiku" => ClaudeModel::Haiku, _ => ClaudeModel::Sonnet };
+                    s.claude_model = ClaudeModel::new(&id).unwrap_or_default();
                     s.claude_model_id.clear();
                 }
                 _ => s.claude_model_id = id,
