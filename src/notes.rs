@@ -135,7 +135,7 @@ mod tests {
     #[test]
     fn long_transcripts_keep_the_most_recent_part() {
         let line = |at_ms, text: &str| crate::archive::Line { at_ms, speaker: Speaker::Them, text: text.into() };
-        let session = Session { id: "s".into(), started_at: 0, ended_at: Some(1), title: None, model: None, notes: None, turns: vec![],
+        let session = Session { id: "s".into(), started_at: 0, ended_at: Some(1), title: None, model: None, mode: None, notes: None, turns: vec![],
             transcript: vec![line(0, &"a".repeat(70_000)), line(1000, "final question?")] };
         let text = transcript(&session);
         assert!(text.len() <= MAX_TRANSCRIPT_CHARS + 40);

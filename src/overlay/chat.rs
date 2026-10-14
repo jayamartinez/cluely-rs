@@ -7,11 +7,15 @@
 //! own. Nothing is kept across launches, so the overlay starts empty after a restart.
 
 use chrono::{DateTime, Local};
-use gpui::{FontWeight, IntoElement, ParentElement, Styled, div, px};
+use gpui::{Div, FontWeight, IntoElement, ParentElement, SharedString, Styled, div, prelude::*, px};
 
 use super::{Status, Turn};
 use crate::answer::Exchange;
-use crate::theme;
+use crate::markdown::{self, Block};
+use crate::{theme, ui};
+
+/// A key phrase longer than this many characters isn't one: the answer is shown as plain body text.
+const KEY_PHRASE_MAX: usize = 220;
 
 /// Where a later session starts on the card.
 pub(super) struct Divider {
@@ -64,6 +68,92 @@ pub(super) fn stopped_mark() -> impl IntoElement {
         .child(div().text_size(px(12.0)).text_color(theme::muted()).child("Stopped when Live ended"))
 }
 
+/// The icon beside a quick action, in its pill and in the bubble of a turn it asked. Assist has none:
+/// its label reads on its own.
+pub(super) fn action_icon(action: &str) -> Option<&'static str> {
+    match action {
+        "What do I say?" => Some("icons/setup-chat.svg"),
+        "Follow-ups" => Some("icons/setup-arrow.svg"),
+        "Recap" => Some("icons/setup-history.svg"),
+        _ => None,
+    }
+}
+
+/// What was asked, right-aligned in an accent bubble: a quick action with its icon, or the typed question.
+pub(super) fn bubble(turn: &Turn) -> Div {
+    let typed = !turn.question.is_empty();
+    let label: SharedString = if typed { turn.question.clone().into() } else { turn.action.clone() };
+    let icon = if typed { None } else { action_icon(&turn.action) };
+    div().flex().justify_end().child(div().max_w(px(420.0)).flex().items_center().gap(px(6.0)).px(px(12.0)).py(px(6.0))
+        .rounded(px(theme::radius::BUBBLE)).border_1().border_color(theme::bubble_border()).bg(theme::bubble())
+        .children(icon.map(|icon| ui::icon(icon, 13.0, theme::accent_soft())))
+        .child(div().min_w_0().text_size(px(if typed { 13.0 } else { 12.0 })).line_height(px(16.0)).text_color(theme::text())
+            .when(!typed, |label| label.font_weight(FontWeight::SEMIBOLD)).child(label)))
+}
+
+/// Above an answer that was given a screenshot.
+pub(super) fn viewed_screen() -> Div {
+    div().flex().items_center().gap(px(6.0))
+        .child(ui::icon("icons/monitor.svg", 12.0, theme::placeholder()))
+        .child(div().text_size(px(11.0)).line_height(px(14.0)).text_color(theme::placeholder()).child("Viewed screen"))
+}
+
+/// An answer as the card shows it: its key phrase on a line of its own (15/22 semibold, in quotes
+/// for the actions that suggest what to say), then the rest in the body style (`key_phrase`).
+/// `size` is Settings › Window › Answer text size (14 by default); the key phrase is a pixel larger.
+pub(super) fn answer(text: &str, action: &str, size: f32) -> Div {
+    let (key, rest) = key_phrase(text);
+    let quoted = matches!(action, "Assist" | "What do I say?");
+    let mut answer = div().flex().flex_col().gap(px(6.0)).min_w_0();
+    if let Some(key) = key {
+        let key = if quoted { format!("\u{201C}{key}\u{201D}") } else { key };
+        answer = answer.child(div().text_size(px(size + 1.0)).line_height(px(((size + 1.0) * 1.47).round())).font_weight(FontWeight::SEMIBOLD)
+            .text_color(theme::text()).child(key));
+    }
+    if !rest.trim().is_empty() { answer = answer.child(markdown::render(rest, size).line_height(px((size * 1.57).round()))); }
+    answer
+}
+
+/// Split an answer into its key phrase and the rest, so the card can show the phrase on its own
+/// line. The rule works on the markdown source, so it holds while the answer streams in:
+/// - an answer that opens with a block (heading, list, quote, code, table, rule) has none;
+/// - one that opens with a bold span (`**…**`) has that span, minus a ":" or dash after it;
+/// - otherwise it's the first sentence of the first line: up to the first ".", "!" or "?" that
+///   ends the text or is followed by a space, or the whole line when it has none.
+///
+/// A phrase longer than `KEY_PHRASE_MAX` characters isn't one, and the phrase is shown as plain
+/// text (its inline markers dropped). While a sentence streams in it is the phrase so far, so the
+/// line only grows; the body appears once the sentence ends.
+pub(super) fn key_phrase(answer: &str) -> (Option<String>, &str) {
+    let text = answer.trim_start();
+    let numbered = text.find(['.', ')']).is_some_and(|end| end > 0 && end <= 3 && text[..end].bytes().all(|b| b.is_ascii_digit()) && text[end + 1..].starts_with(' '));
+    let opens_block = text.starts_with(['#', '>', '|', '`']) || text.starts_with("---") || text.starts_with("***")
+        || ["- ", "* ", "+ "].iter().any(|marker| text.starts_with(marker)) || numbered;
+    if text.is_empty() || opens_block { return (None, answer); }
+    let (key, rest) = match text.strip_prefix("**").map(|inner| (inner, inner.find("**"))) {
+        Some((inner, Some(close))) if !inner[..close].contains('\n') => (&inner[..close], inner[close + 2..].trim_start_matches([':', '\u{2014}', '\u{2013}', ' '])),
+        Some((inner, None)) if !inner.contains('\n') => (inner, ""),
+        _ => {
+            let line = text.find('\n').unwrap_or(text.len());
+            let end = text[..line].char_indices().find(|&(at, c)| matches!(c, '.' | '!' | '?') && text[at + 1..line].chars().next().is_none_or(char::is_whitespace))
+                .map_or(line, |(at, _)| at + 1);
+            (&text[..end], &text[end..])
+        }
+    };
+    let key = plain(key);
+    if key.is_empty() || key.chars().count() > KEY_PHRASE_MAX { return (None, answer); }
+    (Some(key), rest)
+}
+
+/// Markdown inline text without its markers ("**", "`", link targets).
+fn plain(inline: &str) -> String {
+    match markdown::parse(inline).first() {
+        // Inline code is padded with narrow spaces for its background, which plain text has none of.
+        Some(Block::Paragraph(text)) => text.text.replace('\u{202F}', "").trim().to_string(),
+        _ => inline.trim().to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::TimeZone;
@@ -77,6 +167,24 @@ mod tests {
 
     fn label(hour: u32, minute: u32) -> String {
         divider_label(Local.with_ymd_and_hms(2026, 10, 9, hour, minute, 0).single().unwrap())
+    }
+
+    #[test]
+    fn the_key_phrase_is_the_opening_bold_span_or_first_sentence() {
+        let split = |text| { let (key, rest) = key_phrase(text); (key, rest.trim().to_string()) };
+        assert_eq!(split("**Use a token bucket per key.** Keep buckets in Redis."), (Some("Use a token bucket per key.".into()), "Keep buckets in Redis.".into()));
+        assert_eq!(split("**Token bucket**: bursts pass."), (Some("Token bucket".into()), "bursts pass.".into()));
+        assert_eq!(split("I'd use a token bucket. Keep it in Redis.\n\nThen 429."), (Some("I'd use a token bucket.".into()), "Keep it in Redis.\n\nThen 429.".into()));
+        assert_eq!(split("Version 3.5 is out"), (Some("Version 3.5 is out".into()), String::new()), "a decimal point isn't a sentence end");
+        assert_eq!(split("Here's how:\n- one\n- two"), (Some("Here's how:".into()), "- one\n- two".into()));
+        assert_eq!(split("Use `cache.get()` first. Then"), (Some("Use cache.get() first.".into()), "Then".into()), "markers dropped");
+        assert_eq!(split("**Stream"), (Some("Stream".into()), String::new()), "an unclosed span while streaming");
+        for block in ["- a list", "1. numbered", "# Heading", "```rust\nfn x() {}", "> quote", "| a | b |"] {
+            assert_eq!(key_phrase(block).0, None, "{block}");
+        }
+        let long = "word ".repeat(60);
+        assert_eq!(key_phrase(&long).0, None, "too long to be a key phrase");
+        assert_eq!(key_phrase("").0, None);
     }
 
     #[test]

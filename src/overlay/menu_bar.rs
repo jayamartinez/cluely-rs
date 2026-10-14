@@ -290,7 +290,7 @@ fn live_status(live_since: Option<Instant>, mode: &str, now: Instant) -> String 
 }
 
 /// The Mode submenu: General, then each group under its title, a check on the active mode, and
-/// "Edit Modes…" (Settings › Modes; the Modes window on Windows).
+/// "Edit Modes…" (Settings › Modes).
 fn mode_entries(state: &MenuState) -> Vec<Entry> {
     let mut entries = Vec::new();
     for (group, modes) in &state.modes {

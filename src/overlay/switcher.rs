@@ -1,9 +1,10 @@
 //! The mode chip in the card's toolbar and the switcher list it opens below the card, laid out like
-//! the Paper artboards "Modes v2 · macOS · Overlay switcher open", "Modes v2.1 · Windows · Unified
-//! card switcher open" and "Modes v3 · Windows · Open from the switcher". It opens with a click on
+//! the Paper artboards "Overlay · Mode switcher" (Redesign v3 · Windows) and "macOS · Overlay · Mode
+//! switcher": numbered rows under a "SWITCH MODE" header, the rows scrolling past six with a fade and
+//! a thin thumb, and "Edit modes…" at the bottom. It opens with a click on
 //! the chip, Tab in the text box or the Switch mode shortcut (Ctrl Shift ' / ⌘⇧'), takes the keyboard
 //! the way the text box does (`Overlay::take_keyboard`), and is driven with ↑↓, 1–9, ↵ and Esc.
-//! "Edit modes…" opens the Windows Modes window, or Settings › Modes on macOS.
+//! "Edit modes…" opens Settings › Modes (its own window on both platforms).
 //!
 //! The same code runs on both platforms. The list is painted deferred, so its area is reserved in
 //! the window region (`Hits::reserve`, which shapes the Windows overlay) and marked for mouse
@@ -14,35 +15,44 @@ use std::rc::Rc;
 
 use gpui::{
     Bounds, Context, Focusable, FocusHandle, FontWeight, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, ParentElement, Pixels,
-    ScrollHandle, Styled, Window, deferred, div, point, prelude::*, px, rgb, size,
+    ScrollHandle, Styled, Window, deferred, div, linear_color_stop, linear_gradient, point, prelude::*, px, relative, size,
 };
 
 use super::Overlay;
+use super::card::{CONVERSATION_MAX_HEIGHT, INPUT_ROW_HEIGHT, TOOLBAR_HEIGHT};
 use crate::modes::{self, Mode, ModeStore};
+use crate::toggles::Tip;
 use crate::{theme, ui};
 
 const LIST_WIDTH: f32 = 248.0;
-/// The rows scroll past this height. The mockups draw 290; 226 keeps the whole list on a 900 px
-/// tall screen under the tallest Live card.
+/// The rows scroll past this height (about six rows), so the whole list fits on a 900 px tall
+/// screen under the tallest Live card.
 const ROWS_MAX_HEIGHT: f32 = 226.0;
-/// The chip is 20 px tall, centred in the 46 px toolbar at the card's bottom.
-const CHIP_IN_TOOLBAR: f32 = 13.0;
+/// The chip: 16 px text, 2 px padding and its border; centred in the toolbar at the card's bottom.
+const CHIP_HEIGHT: f32 = 22.0;
+const CHIP_IN_TOOLBAR: f32 = (TOOLBAR_HEIGHT - CHIP_HEIGHT) / 2.0;
+/// The list hangs this far under the card, with the pointer (on the chip's centre) in between.
+const LIST_GAP: f32 = 6.0;
+const POINTER: (f32, f32) = (12.0, 6.0);
 /// The list's top-left from the chip's: 9 px to the left, so the rows' numbers sit under the chip,
-/// and 4 px below the card.
-const LIST_FROM_CHIP: (f32, f32) = (-9.0, 46.0 - CHIP_IN_TOOLBAR + 1.0 + 4.0);
-/// The list at its tallest: border, padding, header, rows, separator and the "Edit modes…" row.
-const LIST_MAX_HEIGHT: f32 = 2.0 + 8.0 + 26.0 + ROWS_MAX_HEIGHT + 1.0 + 30.0;
+/// and `LIST_GAP` below the card (the chip's bottom is the rest of the toolbar and the card's
+/// border above the card's bottom edge).
+const LIST_FROM_CHIP: (f32, f32) = (-9.0, CHIP_HEIGHT + CHIP_IN_TOOLBAR + 1.0 + LIST_GAP);
+/// The list at its tallest: border, padding, header, rows, separator (with its margins) and the
+/// "Edit modes…" row.
+const LIST_MAX_HEIGHT: f32 = 2.0 + 8.0 + 26.0 + ROWS_MAX_HEIGHT + 9.0 + 32.0;
 /// The card's height (card.rs): its border, the text box row and the toolbar; while Live, also the
 /// conversation at its cap.
-const IDLE_CARD_HEIGHT: f32 = 1.0 + 54.0 + 46.0 + 1.0;
-const TALLEST_CARD_HEIGHT: f32 = IDLE_CARD_HEIGHT + 418.0;
+const IDLE_CARD_HEIGHT: f32 = 1.0 + INPUT_ROW_HEIGHT + TOOLBAR_HEIGHT + 1.0;
+const TALLEST_CARD_HEIGHT: f32 = IDLE_CARD_HEIGHT + CONVERSATION_MAX_HEIGHT;
 /// The card's top in the window (the overlay's top padding).
 const CARD_TOP: f32 = 8.0;
 /// Under the list: its rounded edge, and slack for a card a little taller than these heights.
 const BELOW_LIST: f32 = 24.0;
-/// The closed chip's dashed border.
-const CHIP_EDGE: u32 = 0x3a3d42;
-const FOCUSED_ROW: u32 = 0x2a2d31;
+/// The scroll thumb: 3 px wide, inset from the rows' top and bottom.
+const THUMB_INSET: f32 = 4.0;
+/// The fade over the last visible rows while more are below.
+const FADE: f32 = 36.0;
 
 /// A line of the switcher list.
 #[derive(Clone, Debug, PartialEq)]
@@ -108,7 +118,7 @@ fn step(key: &str, shift: bool, focused: usize, modes: usize) -> Step {
 /// box (the update notice) without knowing about them.
 fn list_area(chip: Bounds<Pixels>) -> Bounds<Pixels> {
     let (dx, dy) = LIST_FROM_CHIP;
-    Bounds::new(point(chip.left() + px(dx), chip.top() + px(dy)), size(px(LIST_WIDTH), px(LIST_MAX_HEIGHT)))
+    Bounds::new(point(chip.left() + px(dx), chip.top() + px(dy - LIST_GAP)), size(px(LIST_WIDTH), px(LIST_GAP + LIST_MAX_HEIGHT)))
 }
 
 /// The overlay window's height while the list is open, so the list fits under the card at its
@@ -118,7 +128,7 @@ fn list_area(chip: Bounds<Pixels>) -> Bounds<Pixels> {
 pub(super) fn window_height(live: bool, notice: bool) -> f32 {
     let card = if live { TALLEST_CARD_HEIGHT } else { IDLE_CARD_HEIGHT } + if notice { super::update_notice::NOTICE_HEIGHT } else { 0.0 };
     // The chip's top in the window: in the toolbar, which ends 1 px (the border) above the card's bottom.
-    let chip_top = CARD_TOP + card - 1.0 - 46.0 + CHIP_IN_TOOLBAR;
+    let chip_top = CARD_TOP + card - 1.0 - TOOLBAR_HEIGHT + CHIP_IN_TOOLBAR;
     chip_top + LIST_FROM_CHIP.1 + LIST_MAX_HEIGHT + BELOW_LIST
 }
 
@@ -136,27 +146,30 @@ pub(crate) struct Switcher {
 }
 
 impl Overlay {
-    /// The chip after the mark: the active mode, dashed while closed, solid while its list is open.
+    /// The chip after the viewfinder: the active mode, dashed while closed, accent while its list is
+    /// open. General shows only its name, in the placeholder colour; other modes show their icon.
+    /// Hovering the closed chip shows "Switch mode" with its shortcut under the card.
     pub(super) fn mode_chip(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let mode = self.modes.active();
         let open = self.switcher.is_some();
         let general = mode.id == modes::GENERAL;
-        let mut chip = div().id("mode-chip").relative().flex().flex_none().items_center().gap(px(5.0)).py(px(2.0)).px(px(7.0)).rounded(px(6.0))
-            .cursor_pointer().text_size(px(12.0)).line_height(px(16.0))
+        let mut chip = div().id("mode-chip").relative().flex().flex_none().items_center().gap(px(5.0)).py(px(2.0)).px(px(7.0)).rounded(px(theme::radius::CHIP))
+            .cursor_pointer().text_size(px(12.0)).line_height(px(16.0)).border_1()
             .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
                 cx.stop_propagation();
                 if this.switcher.is_some() { this.close_switcher(window, cx) } else { this.open_switcher(window, cx) }
-            }));
+            }))
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| this.hover_tip(Tip::ModeChip, *hovered, cx)));
         chip = if open {
-            chip.bg(theme::bubble()).border_1().border_color(theme::accent()).text_color(theme::text())
+            chip.bg(theme::bubble()).border_color(theme::accent()).text_color(theme::text())
         } else {
-            chip.border_1().border_dashed().border_color(rgb(CHIP_EDGE)).text_color(if general { theme::placeholder() } else { theme::body() })
-                .hover(|chip| chip.bg(gpui::rgba(0xffffff0f)))
+            chip.border_dashed().border_color(theme::chip_edge()).text_color(if general { theme::placeholder() } else { theme::body() })
+                .hover(|chip| chip.bg(theme::hover()))
         };
         if !general { chip = chip.child(ui::icon(mode.icon.path(), 12.0, if open { theme::accent_soft() } else { theme::body() })); }
-        chip = chip.child(mode.name.clone())
+        chip = chip.child(div().whitespace_nowrap().child(mode.name.clone()))
             .child(ui::icon(if open { "icons/chevron-up.svg" } else { "icons/chevron-down.svg" }, 8.0, if open { theme::muted() } else { theme::placeholder() }));
-        let Some(switcher) = &self.switcher else { return chip.into_any_element() };
+        let Some(switcher) = &self.switcher else { return self.chip_tooltip(chip, CHIP_HEIGHT).into_any_element() };
         // The chip records where it is and reserves the list's area during the main layout pass,
         // so the window region already covers the list in the frame it first appears.
         let (hits, chip_bounds) = (self.hits.clone(), switcher.chip.clone());
@@ -165,77 +178,104 @@ impl Overlay {
             hits.reserve(list_area(bounds));
         }, |_, _, _, _| {}).absolute().top_0().left_0().size_full());
         let (dx, dy) = LIST_FROM_CHIP;
-        div().relative().flex_none().child(chip)
-            .child(deferred(div().absolute().top(px(dy)).left(px(dx)).child(self.switcher_list(switcher, cx))))
-            .into_any_element()
+        let pointer = gpui::svg().path("icons/tooltip-pointer-up.svg").w(px(POINTER.0)).h(px(POINTER.1)).text_color(theme::keycap_border());
+        // The pointer hangs from the chip's centre and the list from its left edge.
+        let hung = div().absolute().top(px(dy - LIST_GAP)).left_0().w_full()
+            .child(div().absolute().top_0().left(relative(0.5)).ml(px(-POINTER.0 / 2.0)).child(pointer))
+            .child(div().absolute().top(px(LIST_GAP)).left(px(dx)).child(self.switcher_list(switcher, cx)));
+        div().relative().flex_none().child(chip).child(deferred(hung)).into_any_element()
     }
 
     fn switcher_list(&self, switcher: &Switcher, cx: &mut Context<Self>) -> impl IntoElement {
         let active = self.modes.active().id.clone();
-        let mut list = div().id("mode-rows").flex().flex_col().max_h(px(ROWS_MAX_HEIGHT)).overflow_y_scroll().track_scroll(&switcher.scroll);
+        let mut lines = div().id("mode-rows").flex().flex_col().pr(px(8.0)).max_h(px(ROWS_MAX_HEIGHT)).overflow_y_scroll().track_scroll(&switcher.scroll);
         let mut index = 0;
         for row in rows(&self.modes) {
             match row {
                 Row::Group(group) => {
-                    list = list.child(div().pl(px(29.0)).pr(px(8.0)).pt(px(8.0)).pb(px(3.0)).text_size(px(11.0)).line_height(px(14.0))
-                        .text_color(theme::placeholder()).child(group));
+                    lines = lines.child(div().px(px(8.0)).pt(px(8.0)).pb(px(3.0)).text_size(px(11.0)).line_height(px(14.0)).font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme::placeholder()).child(group.to_uppercase()));
                 }
                 Row::Mode { id, number } => {
                     let Some(mode) = self.modes.get(&id) else { continue };
-                    list = list.child(self.switcher_row(mode, number, index, id == active, index == switcher.focused, cx));
+                    lines = lines.child(self.switcher_row(mode, number, index, id == active, index == switcher.focused, cx));
                     index += 1;
                 }
             }
         }
+        // The rows scroll inside a fixed area; while more are below, the last ones fade out, and a
+        // thin thumb shows where the view is.
+        let (offset, max) = (-f32::from(switcher.scroll.offset().y), f32::from(switcher.scroll.max_offset().height));
+        let track = ROWS_MAX_HEIGHT - 2.0 * THUMB_INSET;
+        let thumb = (max > 0.5).then(|| {
+            let height = (track * ROWS_MAX_HEIGHT / (ROWS_MAX_HEIGHT + max)).max(24.0);
+            div().absolute().right(px(1.0)).top(px(THUMB_INSET + (track - height) * (offset / max).clamp(0.0, 1.0))).w(px(3.0)).h(px(height))
+                .rounded(px(2.0)).bg(theme::keycap_border())
+        });
+        let fade = (max - offset > 0.5).then(|| div().absolute().left_0().right_0().bottom_0().h(px(FADE))
+            .bg(linear_gradient(180.0, linear_color_stop(gpui::Rgba { a: 0.0, ..theme::chrome() }, 0.0), linear_color_stop(theme::chrome(), 1.0))));
+        let list = div().relative().flex_none().max_h(px(ROWS_MAX_HEIGHT))
+            .child(lines)
+            .children(fade).children(thumb);
         let edit_focused = switcher.focused == index;
-        let hint = if cfg!(target_os = "macos") { "Settings › Modes" } else { "Opens the Modes window" };
-        let edit = div().id("edit-modes").mt(px(2.0)).flex().items_center().justify_between().gap(px(8.0)).px(px(8.0)).py(px(6.0)).rounded(px(7.0))
+        // macOS says where "Edit modes…" goes; the Windows mockup shows no hint.
+        let hint = cfg!(target_os = "macos").then_some("Settings › Modes");
+        let edit = div().id("edit-modes").flex().items_center().gap(px(9.0)).px(px(8.0)).py(px(6.0)).rounded(px(theme::radius::SWITCHER_ROW)).border_1()
             .cursor_pointer()
-            .when(edit_focused, |row| row.bg(rgb(FOCUSED_ROW)))
-            .when(!edit_focused, |row| row.hover(|row| row.bg(gpui::rgba(0xffffff08))))
+            .when(edit_focused, |row| row.bg(theme::selected_row()).border_color(theme::bubble_border()))
+            .when(!edit_focused, |row| row.border_color(gpui::transparent_black()).hover(|row| row.bg(theme::row_hover())))
             .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| { cx.stop_propagation(); this.edit_modes(window, cx); }))
-            .child(div().text_size(px(12.0)).line_height(px(16.0)).text_color(if edit_focused { theme::text() } else { theme::muted() }).child("Edit modes…"))
-            .child(div().flex().items_center().gap(px(6.0)).text_size(px(11.0)).line_height(px(14.0))
-                .text_color(if edit_focused { theme::muted() } else { theme::placeholder() }).child(hint)
-                .when(edit_focused, |hint| hint.child(div().font_family(theme::MONO).child("↵"))));
+            .child(div().w(px(12.0)).flex_none())
+            .child(div().mx(px(4.0)).flex_none().child(ui::icon("icons/setup-sliders.svg", 16.0, if edit_focused { theme::accent_soft() } else { theme::muted() })))
+            .child(div().flex_1().text_size(px(13.0)).line_height(px(18.0)).text_color(if edit_focused { theme::text() } else { theme::body() }).child("Edit modes…"))
+            .children(hint.map(|hint| div().text_size(px(11.0)).line_height(px(14.0)).text_color(theme::placeholder()).child(hint)))
+            .when(edit_focused, |row| row.child(enter_mark()));
         let chip = switcher.chip.clone();
-        div().id("mode-switcher").relative().w(px(LIST_WIDTH)).flex().flex_col().p(px(4.0)).rounded(px(12.0)).bg(theme::raised())
-            .border_1().border_color(theme::keycap_border()).shadow_lg()
+        let keys = self.hotkeys.label(crate::hotkeys::Action::SwitchMode);
+        div().id("mode-switcher").relative().w(px(LIST_WIDTH)).flex().flex_col().p(px(4.0)).rounded(px(theme::radius::POPOVER)).bg(theme::chrome())
+            .border_1().border_color(theme::keycap_border())
             .track_focus(&switcher.focus)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| this.switcher_key(event, window, cx)))
             .on_mouse_down_out(cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
                 if chip.get().is_some_and(|chip| chip.contains(&event.position)) { return; }
                 this.close_switcher(window, cx);
             }))
-            .child(div().flex().items_center().justify_between().px(px(8.0)).pt(px(7.0)).pb(px(5.0))
-                .child(div().text_size(px(11.0)).line_height(px(14.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::muted()).child("MODE"))
-                .child(div().font_family(theme::MONO).text_size(px(11.0)).line_height(px(14.0)).text_color(theme::placeholder()).child("↑↓  ↵")))
+            .child(div().flex().flex_none().items_center().justify_between().h(px(26.0)).px(px(8.0))
+                .child(div().text_size(px(11.0)).line_height(px(14.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::placeholder()).child("SWITCH MODE"))
+                .child(ui::keycaps(&keys, 18.0, 10.0, theme::muted(), theme::raised())))
             .child(list)
-            .child(div().h(px(1.0)).flex_none().bg(theme::hairline()))
+            .child(div().h(px(1.0)).my(px(4.0)).flex_none().bg(theme::divider()))
             .child(edit)
             .child(self.hits.mark())
     }
 
+    /// A mode: its number, icon tile and name. The active mode has a check; the keyboard-focused
+    /// row is the selected-row fill with an accent tile and ↵.
     fn switcher_row(&self, mode: &Mode, number: Option<usize>, index: usize, active: bool, focused: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let id = mode.id.clone();
         let trailing = if active {
-            ui::icon("icons/check.svg", 14.0, theme::accent()).into_any_element()
+            ui::icon("icons/check.svg", 14.0, theme::accent_soft()).into_any_element()
         } else if focused {
-            div().font_family(theme::MONO).text_size(px(11.0)).line_height(px(14.0)).text_color(theme::muted()).child("↵").into_any_element()
+            enter_mark().into_any_element()
         } else {
             div().into_any_element()
         };
-        div().id(("switch-mode", index)).flex().flex_none().items_center().gap(px(9.0)).px(px(8.0)).py(px(6.0)).rounded(px(7.0)).cursor_pointer()
-            .when(focused, |row| row.bg(rgb(FOCUSED_ROW)))
-            .when(!focused, |row| row.hover(|row| row.bg(gpui::rgba(0xffffff08))))
+        let tile = div().size(px(24.0)).flex().flex_none().items_center().justify_center().rounded(px(theme::radius::SMALL_TILE)).border_1()
+            .bg(if focused { theme::bubble() } else { theme::raised() }).border_color(if focused { theme::bubble_border() } else { theme::hairline() })
+            .child(ui::icon(mode.icon.path(), 13.0, if focused { theme::accent_soft() } else { theme::body() }));
+        div().id(("switch-mode", index)).flex().flex_none().items_center().gap(px(9.0)).px(px(8.0)).py(px(5.0)).rounded(px(theme::radius::SWITCHER_ROW))
+            .border_1().cursor_pointer()
+            .when(focused, |row| row.bg(theme::selected_row()).border_color(theme::bubble_border()))
+            .when(!focused, |row| row.border_color(gpui::transparent_black()).hover(|row| row.bg(theme::row_hover())))
             .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, window, cx| { cx.stop_propagation(); this.choose_mode(&id, window, cx); }))
-            .child(div().w(px(12.0)).flex_none().font_family(theme::MONO).text_size(px(11.0)).line_height(px(14.0))
-                .text_color(if focused { theme::body() } else { theme::placeholder() })
+            .child(div().w(px(12.0)).flex_none().flex().justify_center().text_size(px(11.0)).line_height(px(14.0))
+                .when(focused, |number| number.font_weight(FontWeight::SEMIBOLD).text_color(theme::accent_soft()))
+                .when(!focused, |number| number.text_color(theme::placeholder()))
                 .child(number.map(|n| n.to_string()).unwrap_or_default()))
-            .child(ui::icon(mode.icon.path(), 13.0, if active { theme::accent_soft() } else if focused { theme::text() } else { theme::body() }))
-            .child(div().flex_1().min_w_0().truncate().text_size(px(13.0)).line_height(px(16.0))
-                .when(active, |name| name.font_weight(FontWeight::SEMIBOLD).text_color(theme::accent_soft()))
-                .when(!active, |name| name.text_color(theme::text()))
+            .child(tile)
+            .child(div().flex_1().min_w_0().truncate().text_size(px(13.0)).line_height(px(18.0))
+                .when(active || focused, |name| name.font_weight(FontWeight::SEMIBOLD).text_color(theme::text()))
+                .when(!active && !focused, |name| name.text_color(theme::body()))
                 .child(mode.name.clone()))
             .child(div().w(px(14.0)).flex_none().flex().justify_end().child(trailing))
     }
@@ -320,6 +360,11 @@ impl Overlay {
     }
 }
 
+/// ↵ on the keyboard-focused row.
+fn enter_mark() -> impl IntoElement {
+    div().text_size(px(13.0)).line_height(px(16.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::accent_soft()).child("↵")
+}
+
 /// The child index in the rows list of the mode at `index` (group labels are children too), or
 /// `None` for "Edit modes…", which is outside the scrolling rows.
 fn row_child(store: &ModeStore, index: usize) -> Option<usize> {
@@ -380,11 +425,11 @@ mod tests {
         Bounds::new(point(px((width.window() - width.card()) / 2.0), px(CARD_TOP)), size(px(width.card()), px(height)))
     }
 
-    /// The chip as the card lays it out (as measured on macOS): after the 22 px mark, centred in
-    /// the toolbar at the bottom of the card.
+    /// The chip as the card lays it out: after the 32 px viewfinder button, centred in the toolbar
+    /// at the bottom of the card.
     fn chip(card: Bounds<Pixels>) -> Bounds<Pixels> {
-        let left = f32::from(card.left()) + 1.0 + 16.0 + 22.0 + 12.0;
-        Bounds::new(point(px(left), card.bottom() - px(1.0 + 46.0 - CHIP_IN_TOOLBAR)), size(px(84.0), px(20.0)))
+        let left = f32::from(card.left()) + 1.0 + 8.0 + 32.0 + 6.0;
+        Bounds::new(point(px(left), card.bottom() - px(1.0 + TOOLBAR_HEIGHT - CHIP_IN_TOOLBAR)), size(px(84.0), px(CHIP_HEIGHT)))
     }
 
     /// Every card the list can hang under: each width, idle with and without the update notice, and
@@ -404,7 +449,7 @@ mod tests {
         for (width, live, notice, card) in layouts() {
             let label = format!("{width:?} live {live} notice {notice}");
             let list = list_area(chip(card));
-            assert_eq!(list.top(), card.bottom() + px(4.0), "{label}: 4 px under the card");
+            assert_eq!(list.top(), card.bottom(), "{label}: the pointer and the list hang from the card's bottom edge");
             assert_eq!(list.left(), chip(card).left() - px(9.0), "{label}");
             assert!(f32::from(list.bottom()) < window_height(live, notice), "{label}: the list ends inside the window");
             assert!(f32::from(list.right()) < width.window(), "{label}: and inside its width");
@@ -425,7 +470,7 @@ mod tests {
                 assert!(right as f32 >= physical(list.right()) && bottom as f32 >= physical(list.bottom()), "{label}");
                 assert!(right as f32 <= width.window() * scale, "{label}: the region stays inside the window's width");
                 assert!(bottom as f32 <= window_height(live, notice) * scale, "{label}: and its height");
-                assert_eq!(radius, (10.0 * scale).round() as i32, "a floating list gets the popover corner");
+                assert_eq!(radius, (theme::radius::POPOVER * scale).round() as i32, "a floating list gets the popover corner");
             }
         }
     }

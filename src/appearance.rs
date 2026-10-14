@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 /// Background opacity, in percent, unless the user picks another: exactly the card's alpha before
 /// the setting existed (0xcc).
-pub const DEFAULT_OPACITY: u8 = 80;
+pub const DEFAULT_OPACITY: u8 = 95;
 /// The opacity slider moves in steps of this many percent.
 pub const OPACITY_STEP: u8 = 5;
 
@@ -60,10 +60,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_default_opacity_is_the_card_as_it_was() {
-        // The card's fills before the setting existed.
-        assert_eq!(fill(0x121315, DEFAULT_OPACITY), rgba(0x121315cc));
-        assert_eq!(fill(0x2e3034, DEFAULT_OPACITY), rgba(0x2e3034cc));
+    fn the_default_opacity_keeps_the_card_nearly_solid() {
+        assert_eq!(fill(0x0f1012, DEFAULT_OPACITY), rgba(0x0f1012f2));
+        assert_eq!(fill(0x121315, 80), rgba(0x121315cc));
     }
 
     #[test]

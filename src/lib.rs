@@ -23,7 +23,6 @@ pub mod metrics;
 pub mod models;
 pub mod modes;
 pub mod modes_view;
-pub mod modes_window;
 pub mod notes;
 #[cfg(windows)]
 pub mod onboarding;

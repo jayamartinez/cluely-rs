@@ -49,6 +49,27 @@ pub fn mark(diameter: f32) -> impl IntoElement {
         .child(div().size(px(4.0 * scale)).rounded_full().bg(theme::accent_ink()))
 }
 
+/// The viewfinder logo as Paper draws it (app-icon.svg's mark): an accent circle with corner
+/// brackets and no focus dot. SVGs draw in one colour, so the circle is a div under the brackets.
+pub fn viewfinder(diameter: f32) -> impl IntoElement {
+    div().size(px(diameter)).flex_none().rounded_full().bg(theme::accent())
+        .child(gpui::svg().path("icons/viewfinder.svg").size(px(diameter)).text_color(theme::accent_ink()))
+}
+
+/// A shortcut as a row of keycaps ("Ctrl Shift '" or "⌘ ⇧ '"), `height` tall. Words use `size`; a
+/// lone symbol (' ↵ arrows) is drawn larger so it reads at keycap size, as in the mockups.
+pub fn keycaps(label: &str, height: f32, size: f32, color: Rgba, fill: Rgba) -> Div {
+    div().flex().items_center().gap(px(3.0)).children(label.split(' ').filter(|key| !key.is_empty()).map(|key| {
+        let modifier = matches!(key, "⌘" | "⇧" | "⌥" | "⌃");
+        let glyph = key.chars().count() == 1 && !key.chars().all(char::is_alphanumeric);
+        let text = if modifier { size + 1.0 } else if glyph { size + 3.0 } else { size };
+        div().h(px(height)).min_w(px(height)).px(px(if glyph { 4.0 } else { 6.0 })).flex().items_center().justify_center().flex_none()
+            .rounded(px(theme::radius::KEYCAP)).bg(fill).border_1().border_color(theme::keycap_border())
+            .text_size(px(text)).line_height(px(text + 2.0)).font_weight(FontWeight::SEMIBOLD).text_color(color)
+            .child(SharedString::from(key.to_string()))
+    }))
+}
+
 pub fn section_label(text: &'static str) -> impl IntoElement {
     div().text_size(px(11.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::muted()).child(text)
 }
