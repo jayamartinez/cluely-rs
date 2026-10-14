@@ -19,6 +19,8 @@ use crate::ui;
 
 mod about;
 mod cli_location;
+#[cfg(windows)]
+pub(crate) use cli_location::install_page;
 #[cfg(target_os = "macos")]
 mod onboarding;
 mod reveal;
@@ -87,7 +89,7 @@ pub(crate) struct ModelChoice {
 }
 
 /// A segmented control over `options`; clicking applies `set` and saves.
-fn choice<T: Copy + PartialEq + 'static>(
+pub(crate) fn choice<T: Copy + PartialEq + 'static>(
     name: &'static str, options: &[(T, &'static str)], current: T, set: fn(&mut Settings, T), cx: &mut Context<Overlay>,
 ) -> Div {
     let mut control = ui::segmented();
@@ -103,7 +105,7 @@ fn field(label: &'static str, control: impl IntoElement) -> Div {
 }
 
 /// A clickable switch bound to a boolean setting.
-fn switch(name: &'static str, on: bool, set: fn(&mut Settings, bool), cx: &mut Context<Overlay>) -> impl IntoElement {
+pub(crate) fn switch(name: &'static str, on: bool, set: fn(&mut Settings, bool), cx: &mut Context<Overlay>) -> impl IntoElement {
     div().id(name).flex_none().cursor_pointer()
         .on_mouse_down(MouseButton::Left, listen(cx, move |this, _, window, cx| { cx.stop_propagation(); this.update_settings(|s| set(s, !on), window, cx) }))
         .child(ui::switch(on))
@@ -204,6 +206,7 @@ pub(crate) fn latest_gpt_models(models: &[(String, String)]) -> Vec<(String, Str
 
 /// A Claude model's name: the version its alias last resolved to ("Opus 5.5"), else what Claude
 /// Code's model list calls it, else the alias ("Opus") or the id made readable.
+#[cfg(not(windows))]
 fn claude_label(s: &Settings, catalog: &[crate::chat::ModelEntry], id: &str) -> String {
     if let Some(resolved) = s.claude_models.get(id) { return crate::claude_cli::model_label(resolved); }
     if let Some(entry) = catalog.iter().find(|entry| entry.id == id) { return entry.name.clone(); }
@@ -213,7 +216,7 @@ fn claude_label(s: &Settings, catalog: &[crate::chat::ModelEntry], id: &str) -> 
 /// "plus" → "ChatGPT Plus", "max_5x" → "Max 5x": the plan as the CLI reports it, made readable.
 /// ChatGPT's ids don't all read as its plans' names ("prolite" is Pro Lite, and Team is now
 /// Business), so the known ones are named; any other id is title-cased.
-fn plan_label(provider: Provider, plan: &str) -> String {
+pub(crate) fn plan_label(provider: Provider, plan: &str) -> String {
     let id = plan.to_ascii_lowercase().replace(['_', '-', ' '], "");
     let chatgpt = provider == Provider::Codex || id.starts_with("chatgpt");
     let known = match id.strip_prefix("chatgpt").unwrap_or(&id) {
@@ -470,12 +473,28 @@ impl Overlay {
                 ModelChoice { picker: Picker::CodexModel, value, options, selected: s.codex_model.clone(), set: |s, v| s.codex_model = v }
             }
             Provider::Claude => {
-                let catalog = self.claude_status.as_ref().map_or(&[][..], |status| status.catalog.as_slice());
-                let label = |id: &str| claude_label(s, catalog, id);
-                ModelChoice { picker: Picker::ClaudeModel, value: label(s.claude_model.id()),
-                    options: ClaudeModel::ALIASES.iter().map(|(id, _)| (id.to_string(), label(id))).collect(),
-                    selected: s.claude_model.id().to_string(),
-                    set: |s, v| if let Some(model) = ClaudeModel::new(&v) { s.claude_model = model } }
+                #[cfg(windows)]
+                {
+                    // The version each alias resolves to, once Claude Code has reported it.
+                    let label = |id: &str| crate::claude_cli::alias_label(id, &s.claude_models);
+                    // A model chosen by id (setup's model picker) shows by its own name.
+                    let value = if !s.claude_model_id.is_empty() { crate::claude_cli::model_label(&s.claude_model_id) } else { label(s.claude_model.id()) };
+                    ModelChoice { picker: Picker::ClaudeModel, value, options: ClaudeModel::ALIASES.iter().map(|(id, _)| (id.to_string(), label(id))).collect(),
+                        selected: s.claude_model_arg().to_string(),
+                        set: |s, v| {
+                            s.claude_model = ClaudeModel::new(&v).unwrap_or_default();
+                            s.claude_model_id.clear();
+                        } }
+                }
+                #[cfg(not(windows))]
+                {
+                    let catalog = self.claude_status.as_ref().map_or(&[][..], |status| status.catalog.as_slice());
+                    let label = |id: &str| claude_label(s, catalog, id);
+                    ModelChoice { picker: Picker::ClaudeModel, value: label(s.claude_model.id()),
+                        options: ClaudeModel::ALIASES.iter().map(|(id, _)| (id.to_string(), label(id))).collect(),
+                        selected: s.claude_model.id().to_string(),
+                        set: |s, v| if let Some(model) = ClaudeModel::new(&v) { s.claude_model = model } }
+                }
             }
             Provider::ApiKey => {
                 let suggestions: Vec<String> = match crate::providers::preset(&s.api_provider) {

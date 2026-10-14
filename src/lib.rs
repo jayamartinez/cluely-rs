@@ -25,6 +25,8 @@ pub mod modes;
 pub mod modes_view;
 pub mod modes_window;
 pub mod notes;
+#[cfg(windows)]
+pub mod onboarding;
 #[cfg(target_os = "macos")]
 pub mod onboarding_window;
 pub mod overlay;

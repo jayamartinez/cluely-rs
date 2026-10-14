@@ -229,13 +229,21 @@ pub struct Overlay {
     switcher: Option<switcher::Switcher>,
     /// Windows: the Modes window, while it's open.
     pub(crate) modes_window: Option<gpui::WindowHandle<crate::modes_window::ModesWindow>>,
+    /// Windows: first-run setup, while its window is open; the overlay stays hidden meanwhile.
+    #[cfg(windows)]
+    pub(crate) setup: Option<crate::onboarding::Setup>,
+    /// Windows: created hidden for first-run setup, so not yet where `main` asked (a hidden window
+    /// starts where Windows puts new windows). The first `show` puts it top centre.
+    #[cfg(windows)]
+    unplaced: bool,
     /// macOS: the menu bar icon and its menu (`menu_bar`).
     #[cfg(target_os = "macos")]
     menu_bar: Option<menu_bar::MenuBar>,
 }
 
 impl Overlay {
-    pub fn new(hotkeys: Hotkeys, presses: UnboundedReceiver<Action>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    /// `relaunches` yields each time CluelyRS is launched again while this copy runs (`platform::single_instance`).
+    pub fn new(hotkeys: Hotkeys, presses: UnboundedReceiver<Action>, relaunches: UnboundedReceiver<()>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let native = platform::native_window(window);
         let mut store = Store::load();
         // A first run (or one that quit during setup) opens setup with the overlay hidden; main.rs
@@ -249,14 +257,22 @@ impl Overlay {
             platform::remove_frame(native);
             let _ = platform::set_topmost(native);
         }
+        // Windows opens first-run setup instead of the overlay (`main` keeps the overlay hidden).
+        let setup = cfg!(windows) && store.setup_needed();
         let mut hotkeys = hotkeys;
-        hotkeys.set_overlay_visible(!onboarding);
+        hotkeys.set_overlay_visible(!setup && !onboarding);
         if !hotkeys.unavailable.is_empty() { eprintln!("shortcuts in use by another app: {:?}", hotkeys.unavailable); }
 
         cx.spawn_in(window, async move |this, cx| {
             let mut presses = presses;
             while let Some(action) = presses.next().await {
                 if this.update_in(cx, |this, window, cx| this.handle(action, window, cx)).is_err() { break; }
+            }
+        }).detach();
+        cx.spawn_in(window, async move |this, cx| {
+            let mut relaunches = relaunches;
+            while relaunches.next().await.is_some() {
+                if this.update(cx, |this, cx| this.relaunched(cx)).is_err() { break; }
             }
         }).detach();
         // Text, answers and the transcript line let clicks through; only controls catch them.
@@ -271,9 +287,9 @@ impl Overlay {
             if this.update(cx, |this, cx| if this.live_since.is_some() { cx.notify() }).is_err() { break; }
         }).detach();
 
-        // Every quit (⌘Q, the menu, Settings › About, a quit Apple Event) passes here: stop
-        // transcribing and free parakeet.cpp's Metal backend before exit, or ggml aborts.
-        #[cfg(target_os = "macos")]
+        // Every quit (⌘Q, the menu, Settings › About, a quit Apple Event; Settings › About on Windows)
+        // passes here: stop transcribing and free parakeet.cpp's backend before exit. With Metal ggml
+        // aborts otherwise; on Windows (CPU) it's an orderly stop of the transcriber before exit.
         cx.on_app_quit(|this, _| { this.stop_listening(); crate::stt::parakeet::shutdown(); async {} }).detach();
 
         let archive = Archive::default_location();
@@ -282,15 +298,15 @@ impl Overlay {
             archive.recover();
             if store.value.save_sessions { archive.prune(store.value.keep_sessions, archive::unix_now()); }
         }
-        // Live on launch waits for setup to finish (`finish_onboarding`).
-        let start_live = store.value.start_live_on_launch && !onboarding;
+        // Live on launch waits for setup to finish (Windows `onboarding`, macOS `finish_onboarding`).
+        let start_live = store.value.start_live_on_launch && !setup && !onboarding;
         let composer = cx.new(|cx| TextInput::new(composer_placeholder(&store.value), cx));
         let key_input = cx.new(|cx| TextInput::new("Paste your API key", cx).masked(true));
         // macOS has the model typed, with an example id for the provider; Windows lists models below.
         #[cfg(target_os = "macos")]
         let model_placeholder = crate::settings_view::model_placeholder(&store.value.api_provider);
         #[cfg(not(target_os = "macos"))]
-        let model_placeholder = "Model id, e.g. from the list below";
+        let model_placeholder = MODEL_PLACEHOLDER;
         let model_input = cx.new(|cx| TextInput::new(model_placeholder, cx));
         let base_url_input = cx.new(|cx| TextInput::new("https://your-endpoint.example/v1", cx));
         model_input.update(cx, |input, cx| input.set_text(store.value.api_model().to_string(), cx));
@@ -347,6 +363,10 @@ impl Overlay {
             model_installed: false, model_download: None, model_notice: None,
             open_picker: None, reveal_accounts: false, devices: None, devices_loading: false, archive_bytes: None, picker_face: Rc::default(), toggle_hover: None,
             collapse: None, settings_height: Rc::default(), modes_ui, modes, updates: Default::default(), modes_window: None, switcher: None,
+            #[cfg(windows)]
+            setup: None,
+            #[cfg(windows)]
+            unplaced: false,
             #[cfg(target_os = "macos")]
             menu_bar: None };
         overlay.refresh_model_status();
@@ -354,6 +374,11 @@ impl Overlay {
         #[cfg(target_os = "macos")]
         { overlay.update_dock(); overlay.start_menu_bar(window, cx); }
         if start_live { overlay.set_live(true, window, cx); }
+        #[cfg(windows)]
+        if setup {
+            overlay.unplaced = true;
+            overlay.open_setup(window, cx);
+        }
         // Deferred: the setup window reads the overlay, which doesn't exist until this returns.
         #[cfg(target_os = "macos")]
         if onboarding {
@@ -575,6 +600,18 @@ impl Overlay {
     }
 
     fn handle(&mut self, action: Action, window: &mut Window, cx: &mut Context<Self>) {
+        // During setup the overlay is only there to look at: Assist shows it (nothing starts or is
+        // sent), Show / hide and the move keys work as usual, and the rest wait until setup ends.
+        #[cfg(windows)]
+        if let Some(setup) = &mut self.setup {
+            match action {
+                Action::Assist => { setup.tried_assist = true; self.show(); cx.notify(); }
+                Action::Toggle => self.toggle_visible(),
+                Action::MoveUp | Action::MoveDown | Action::MoveLeft | Action::MoveRight => self.start_motion(Motion::Move, window, cx),
+                _ => {}
+            }
+            return;
+        }
         match action {
             Action::Toggle => {
                 // Hiding closes the mode switcher, handing the keyboard back.
@@ -637,6 +674,13 @@ impl Overlay {
         }
         self.fit(window);
         cx.notify();
+    }
+
+    /// Quit CluelyRS (Settings › About). Live ends first, as when it's stopped, so the session is saved
+    /// to History; `on_app_quit` then stops the transcriber.
+    pub(crate) fn quit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.live_since.is_some() { self.set_live(false, window, cx); }
+        cx.quit();
     }
 
     /// Open a History record when Live starts and close it when Live stops.
@@ -1064,6 +1108,10 @@ impl Overlay {
     /// (macOS: in the Settings window, or setup's Transcription step), the API-key answer provider
     /// on the Model tab.
     pub(crate) fn key_target(&self) -> String {
+        #[cfg(windows)]
+        if self.setup.as_ref().is_some_and(|setup| setup.step == crate::onboarding::Step::Transcription) {
+            return crate::stt::deepgram::PROVIDER_ID.to_string();
+        }
         #[cfg(target_os = "macos")]
         let listening = match self.onboarding_window {
             Some(_) => self.store.value.onboarding_step == Some(crate::settings::OnboardingStep::Transcription),
@@ -1107,7 +1155,7 @@ impl Overlay {
                 crate::secrets::set(&target, &key).map(|()| crate::secrets::masked(&key).unwrap_or_default())
                     .map_err(|error| format!("Couldn't save the key: {error}"))
             }).await;
-            let _ = this.update_in(cx, |this, _, cx| {
+            let _ = this.update_in(cx, |this, _window, cx| {
                 match saved {
                     Ok(hint) => {
                         this.key_input.update(cx, |input, cx| input.clear(cx));
@@ -1115,6 +1163,8 @@ impl Overlay {
                         this.key_notice = Some(format!("Saved to {}.", crate::secrets::STORE_NAME).into());
                         #[cfg(target_os = "macos")]
                         this.key_saved(&provider);
+                        #[cfg(windows)]
+                        this.setup_key_saved(&provider, _window, cx);
                     }
                     Err(notice) => this.key_notice = Some(notice.into()),
                 }
@@ -1218,12 +1268,39 @@ impl Overlay {
         self.hotkeys.set_panel_open(visible && self.settings_tab.is_some());
     }
 
-    fn show(&mut self) {
+    pub(crate) fn show(&mut self) {
         if let Some(native) = self.native.filter(|native| !platform::is_visible(*native)) {
+            #[cfg(windows)]
+            if std::mem::take(&mut self.unplaced) { platform::place_top_centre(native); }
             platform::set_visible(native, true);
             self.hotkeys.set_overlay_visible(true);
         }
     }
+
+    #[cfg(windows)]
+    pub(crate) fn hide(&mut self) {
+        if let Some(native) = self.native.filter(|native| platform::is_visible(*native)) {
+            self.key_reveal.hide();
+            platform::set_visible(native, false);
+            self.hotkeys.set_overlay_visible(false);
+            self.hotkeys.set_panel_open(false);
+        }
+    }
+
+    /// CluelyRS was launched again: show the overlay, kept on screen in case it was left on a screen
+    /// that's gone. Moved before showing, because the pop-in holds the position it starts from.
+    #[cfg_attr(not(windows), allow(unused_variables))]
+    fn relaunched(&mut self, cx: &mut Context<Self>) {
+        // During first-run setup the overlay stays hidden: bring the setup window forward instead.
+        #[cfg(windows)]
+        if self.raise_setup(cx) { return; }
+        if let Some(native) = self.native { let _ = platform::move_by(native, 0, 0, self.content_bottom()); }
+        self.show();
+    }
+
+    /// The window is taller than the card (room for popovers below it); only the card has to stay on
+    /// screen, so the empty space under it may go past the bottom edge (`platform::move_by`).
+    fn content_bottom(&self) -> Option<i32> { self.shape.borrow().iter().map(|&(_, _, _, bottom, _)| bottom).max() }
 
     /// Start one polling loop per motion kind; it reads every arrow each frame, so
     /// holding two arrows moves diagonally and releasing the chord stops it.
@@ -1250,10 +1327,7 @@ impl Overlay {
         let speed = (MOVE_START + frame as f32 * EASE_PER_FRAME).min(cruise);
         match kind {
             Motion::Move => if let Some(native) = self.native {
-                // The window is taller than the card (room for popovers below it); only the card has
-                // to stay on screen, so the empty space under it may go past the bottom edge.
-                let content_bottom = self.shape.borrow().iter().map(|&(_, _, _, bottom, _)| bottom).max();
-                let _ = platform::move_by(native, (dx as f32 * speed).round() as i32, (dy as f32 * speed).round() as i32, content_bottom);
+                let _ = platform::move_by(native, (dx as f32 * speed).round() as i32, (dy as f32 * speed).round() as i32, self.content_bottom());
             },
             Motion::Scroll => self.scroll_by(dy as f32 * speed, cx),
         }
@@ -1472,6 +1546,10 @@ fn region(children: &[Hit], floating: &[Hit], scale: f32) -> Vec<platform::Shape
             (radius * scale).round() as i32)
     }).collect()
 }
+
+/// Settings › Model's model box placeholder; setup swaps in an example id while it is open.
+#[cfg(not(target_os = "macos"))]
+pub(crate) const MODEL_PLACEHOLDER: &str = "Model id, e.g. from the list below";
 
 /// The text box's placeholder says what an answer will see: the screen only while Screen on send is on.
 fn composer_placeholder(settings: &Settings) -> &'static str {

@@ -24,6 +24,31 @@ use crate::chat::{ChatRequest, Effort, SubscriptionStatus};
 use crate::cli_path::{self, Cli};
 use crate::providers::{Message, Part, Role};
 
+/// The model picker's latest models (id or alias, what it's for). The aliases follow each family's
+/// newest version; Fable has none, so it goes by id.
+pub const LATEST_MODELS: [(&str, &str); 4] = [
+    ("opus", "Complex work and everyday tasks"), ("claude-fable-5-1", "Toughest challenges"),
+    ("sonnet", "Efficient for simpler tasks"), ("haiku", "Fastest answers"),
+];
+
+/// The version each alias points at today, shown until Claude Code reports what it resolved the
+/// alias to (`resolved_models`), so model names always carry their number.
+pub const ALIAS_VERSIONS: [(&str, &str); 3] = [("opus", "claude-opus-5-5"), ("sonnet", "claude-sonnet-5-5"), ("haiku", "claude-haiku-5-5")];
+
+/// "Opus 5.5" for an alias: the version Claude Code last reported (`reported`, alias → id), or
+/// else the one the alias points at today.
+pub fn alias_label(alias: &str, reported: &std::collections::BTreeMap<String, String>) -> String {
+    let id = reported.get(alias).map(String::as_str)
+        .or_else(|| ALIAS_VERSIONS.iter().find(|(known, _)| *known == alias).map(|(_, id)| *id))
+        .unwrap_or(alias);
+    model_label(id)
+}
+
+/// Earlier versions the model picker offers under Legacy models, newest first.
+pub const LEGACY_MODELS: [&str; 8] = [
+    "claude-opus-4-6", "claude-sonnet-4-6", "claude-opus-4-5", "claude-sonnet-4-5", "claude-haiku-4-5", "claude-opus-4-1", "claude-opus-4", "claude-sonnet-4",
+];
+
 const MAX_MESSAGES: usize = 200;
 const MAX_TEXT: usize = 1_000_000;
 const MAX_IMAGE_BYTES: usize = 15 * 1024 * 1024;

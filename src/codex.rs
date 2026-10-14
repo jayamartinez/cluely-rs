@@ -1517,7 +1517,9 @@ pub struct CodexClient {
 struct Catalog {
     default_model: Option<String>,
     efforts: HashMap<String, Vec<String>>,
-    /// Each model's description, shortened for the picker.
+    /// Each model's description ("Workhorse model"), for the Windows setup's model picker.
+    details: std::collections::BTreeMap<String, String>,
+    /// Each model's description, shortened for the macOS picker.
     notes: HashMap<String, String>,
 }
 
@@ -1580,6 +1582,7 @@ impl CodexClient {
                 let catalog = self.catalog.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone().unwrap_or_default();
                 status.default_model = catalog.default_model;
                 status.catalog = picker_catalog(&status.models, &catalog.notes);
+                status.details = catalog.details;
             }
             Ok((Account::Other, _)) => status.error = Some(err(Kind::AuthUnsupported).message),
             Ok((Account::None, _)) => {}
@@ -1679,6 +1682,9 @@ impl CodexClient {
                     .filter(|level| EFFORT_ORDER.contains(level)).map(str::to_string).collect();
                 catalog.efforts.insert(id.to_string(), efforts);
                 if model.get("isDefault") == Some(&Value::Bool(true)) { catalog.default_model = Some(id.to_string()); }
+                if let Some(detail) = model.get("description").and_then(Value::as_str).map(str::trim).filter(|detail| !detail.is_empty()) {
+                    catalog.details.insert(id.to_string(), detail.chars().take(80).collect());
+                }
                 if let Some(note) = model.get("description").and_then(Value::as_str) { catalog.notes.insert(id.to_string(), crate::chat::short_note(note)); }
                 let name = model.get("displayName").and_then(Value::as_str).map(str::trim).filter(|name| !name.is_empty()).unwrap_or(id);
                 models.push((id.to_string(), name.chars().take(80).collect()));
@@ -2711,6 +2717,7 @@ pub(crate) mod tests {
             installed: true, custom_location: false, signed_in: true, account: Some("me@example.com".into()), plan: Some("plus".into()),
             models: vec![("gpt-5".into(), "GPT-5".into())], default_model: Some("gpt-5".into()), error: None,
             catalog: vec![ModelEntry { id: "gpt-5".into(), name: "GPT-5".into(), note: "Everyday work".into(), legacy: false }],
+            details: [("gpt-5".to_string(), "For everyday work.".to_string())].into(),
         });
         assert_eq!(methods(&launcher), ["initialize", "initialized", "account/read", "model/list"]);
         let init = lock(&launcher.received)[0].clone();

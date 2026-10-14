@@ -71,6 +71,9 @@ pub enum SttProvider { #[default] Parakeet, Deepgram }
 pub struct Settings {
     pub provider: Provider,
     pub claude_model: ClaudeModel,
+    /// A Claude model chosen by its id instead of an alias (Fable, or a legacy version from the
+    /// model picker); empty uses `claude_model`.
+    pub claude_model_id: String,
     /// The model id Claude Code last reported for each alias ("opus" → "claude-opus-5-5"), so the
     /// pickers can show real version numbers before this run's first answer.
     pub claude_models: BTreeMap<String, String>,
@@ -137,9 +140,13 @@ pub struct Settings {
     pub last_update_check: Option<u64>,
     /// The version whose notice was closed in the overlay; it shows again only for a newer one.
     pub dismissed_update: String,
-    /// The first-run setup last finished (closed or skipped counts); 0 before it ever was.
+    /// Windows: first-run setup was finished or skipped. A fresh install starts without it, but
+    /// settings saved before setup existed read as done, so people who already use CluelyRS never see it.
+    #[serde(default = "setup_done_when_missing")]
+    pub setup_done: bool,
+    /// macOS: the first-run setup last finished (closed or skipped counts); 0 before it ever was.
     pub onboarding_version: u32,
-    /// The setup step open when CluelyRS last ran; `Some` means setup is unfinished and shows again.
+    /// macOS: the setup step open when CluelyRS last ran; `Some` means setup is unfinished and shows again.
     pub onboarding_step: Option<OnboardingStep>,
     /// The active mode's meeting context and file text (see `modes`). Not saved here: the
     /// overlay fills it from `modes.json` when it starts and whenever the mode changes.
@@ -150,7 +157,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            provider: Provider::default(), claude_model: ClaudeModel::default(), claude_models: BTreeMap::new(), codex_model: String::new(),
+            provider: Provider::default(), claude_model: ClaudeModel::default(), claude_model_id: String::new(), claude_models: BTreeMap::new(), codex_model: String::new(),
             codex_path: String::new(), claude_path: String::new(),
             api_provider: "anthropic".into(), api_models: BTreeMap::new(), custom_base_url: String::new(), saved_keys: BTreeMap::new(),
             answer_style: AnswerStyle::default(), smart_mode: false, speculative_answers: false, auto_answer: false, transcribe: true, stt_provider: SttProvider::default(),
@@ -159,11 +166,13 @@ impl Default for Settings {
             mic_device: String::new(), desktop_device: String::new(),
             hide_from_capture: true, screen_on_send: true, start_live_on_launch: false, show_in_dock: false, show_menu_bar_icon: true,
             save_sessions: true, save_screenshots: true, keep_sessions: Retention::default(),
-            check_for_updates: true, last_update_check: None, dismissed_update: String::new(),
+            check_for_updates: true, last_update_check: None, dismissed_update: String::new(), setup_done: false,
             onboarding_version: 0, onboarding_step: None, mode: None,
         }
     }
 }
+
+fn setup_done_when_missing() -> bool { true }
 
 impl Settings {
     /// Providers that can have a saved key but have no marker: keys saved before markers existed
@@ -192,6 +201,9 @@ impl Settings {
     /// Model for the selected API provider; empty until the user picks one.
     pub fn api_model(&self) -> &str { self.api_models.get(&self.api_provider).map(String::as_str).unwrap_or("") }
 
+    /// What `claude --model` gets: the chosen id, or else the alias.
+    pub fn claude_model_arg(&self) -> &str { if self.claude_model_id.is_empty() { self.claude_model.id() } else { &self.claude_model_id } }
+
     /// The sources Live captures.
     pub fn sources(&self) -> Vec<Source> {
         let mut sources = Vec::new();
@@ -217,7 +229,13 @@ pub struct Store {
 }
 
 impl Store {
-    pub fn load() -> Self { Self::load_from(dirs::config_dir().map(|dir| dir.join("CluelyRS").join("settings.json"))) }
+    /// `CLUELYRS_SETTINGS` names another settings file (development: a first run without touching
+    /// the real settings).
+    pub fn load() -> Self {
+        let path = std::env::var_os("CLUELYRS_SETTINGS").map(PathBuf::from)
+            .or_else(|| dirs::config_dir().map(|dir| dir.join("CluelyRS").join("settings.json")));
+        Self::load_from(path)
+    }
 
     fn load_from(path: Option<PathBuf>) -> Self {
         let existed = path.as_ref().is_some_and(|path| path.exists());
@@ -231,6 +249,10 @@ impl Store {
         store.publish_cli_paths();
         store
     }
+
+    /// Whether the Windows first-run setup should open: not finished or skipped yet, and the saved
+    /// settings were readable (unreadable ones fall back to defaults, which must not restart setup).
+    pub fn setup_needed(&self) -> bool { !self.value.setup_done && self.warning.is_none() }
 
     /// Whether the macOS first-run setup opens at launch: on a first run, or when the last run quit
     /// in the middle of it. Users from before it existed have settings and never see it unasked.
@@ -334,6 +356,34 @@ mod tests {
         let json = serde_json::to_string(&settings).unwrap();
         assert!(json.contains(r#""checkForUpdates":false"#) && json.contains(r#""lastUpdateCheck":1791500000"#) && json.contains(r#""dismissedUpdate":"0.2.0""#), "{json}");
         assert_eq!(serde_json::from_str::<Settings>(&json).unwrap(), settings);
+    }
+
+    #[test]
+    fn setup_opens_on_a_fresh_install_only() {
+        let dir = std::env::temp_dir().join(format!("cluelyrs-setup-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        let _ = fs::remove_file(&path);
+        assert!(Store::load_from(Some(path.clone())).setup_needed(), "no settings file: a fresh install");
+
+        fs::write(&path, r#"{"provider":"claude"}"#).unwrap();
+        let existing = Store::load_from(Some(path.clone()));
+        assert!(existing.value.setup_done && !existing.setup_needed(), "settings saved before setup existed");
+
+        fs::write(&path, "{ not json").unwrap();
+        let unreadable = Store::load_from(Some(path.clone()));
+        assert!(unreadable.warning.is_some() && !unreadable.setup_needed(), "unreadable settings never restart setup");
+
+        // Quitting midway leaves it unfinished; finishing or skipping saves it as done.
+        let mut store = Store::load_from(Some(path.clone()));
+        store.value = Settings::default();
+        store.save();
+        assert!(Store::load_from(Some(path.clone())).setup_needed());
+        store.value.setup_done = true;
+        store.save();
+        assert!(!Store::load_from(Some(path.clone())).setup_needed());
+        assert!(fs::read_to_string(&path).unwrap().contains(r#""setupDone": true"#));
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

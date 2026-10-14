@@ -16,7 +16,8 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 const NOTE_LINES: usize = 3;
 
 impl Overlay {
-    /// The Windows panel's About tab: the app's name and version over the Updates group.
+    /// The Windows panel's About tab: the app's name and version over the Updates group, then Quit, as
+    /// in the macOS Settings window. Without a Dock or menu bar this is the only way to quit on Windows.
     pub(crate) fn about_tab(&self, cx: &mut Context<Self>) -> Div {
         div().flex().flex_col().gap(px(18.0))
             .child(div().flex().items_center().gap(px(12.0))
@@ -25,6 +26,9 @@ impl Overlay {
                     .child(div().text_size(px(15.0)).font_weight(FontWeight::BOLD).text_color(theme::text()).child("CluelyRS"))
                     .child(div().text_size(px(12.0)).text_color(theme::muted()).child(format!("Version {VERSION}")))))
             .child(self.updates_section(cx))
+            .children(run_setup(cx))
+            .child(div().flex().child(button("quit", "Quit CluelyRS", false)
+                .on_mouse_down(MouseButton::Left, listen(cx, |this, _, window, cx| this.quit(window, cx)))))
     }
 
     /// UPDATES: the status row and "Check for updates automatically".
@@ -100,6 +104,20 @@ impl Overlay {
             .child(notes)
             .child(actions)
             .into_any_element()
+    }
+}
+
+/// Windows: SETUP, which opens first-run setup again (`onboarding`).
+fn run_setup(cx: &mut Context<Overlay>) -> Option<Div> {
+    #[cfg(not(windows))]
+    { let _ = cx; None }
+    #[cfg(windows)]
+    {
+        let run = button("run-setup", "Run setup again", false)
+            .on_mouse_down(MouseButton::Left, listen(cx, |this, _, window, cx| this.open_setup(window, cx)));
+        Some(div().flex().flex_col().gap(px(8.0))
+            .child(ui::section_label("SETUP"))
+            .child(switch_row("First-run setup", "The steps from the first launch. Your settings stay as they are.", run)))
     }
 }
 
