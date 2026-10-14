@@ -30,6 +30,8 @@ mod model_form;
 pub(crate) use model_form::{ModelUi, model_placeholder};
 pub(crate) use reveal::KeyReveal;
 mod appearance;
+#[cfg(windows)]
+pub(crate) mod fluent;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Tab { #[default] Model, Listening, Modes, Keys, Window, History, About }
@@ -44,7 +46,7 @@ impl Tab {
 
 /// The dropdowns in Settings; at most one is open.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Picker { CodexModel, ClaudeModel, AnswerStyle, ApiProvider, ApiModel, SttProvider, Mic, Desktop }
+pub enum Picker { CodexModel, ClaudeModel, AnswerStyle, ApiProvider, ApiModel, SttProvider, Mic, Desktop, TextSize, CardWidth, Retention, ModeGroup }
 
 /// Like `cx.listener`, but the handler always gets the overlay's own window. On macOS the settings
 /// are shown in their own window, and handlers resize the overlay and start work tied to its
@@ -313,7 +315,6 @@ impl Overlay {
 
     /// Lay out content for another window (Settings, setup) with a throwaway `Hits`: the overlay's
     /// own hit-testing must only see the overlay's controls.
-    #[cfg(target_os = "macos")]
     pub(crate) fn in_window<R>(&mut self, cx: &mut Context<Self>, build: impl FnOnce(&Self, &mut Context<Self>) -> R) -> R {
         let hits = std::mem::take(&mut self.hits);
         let built = build(self, cx);

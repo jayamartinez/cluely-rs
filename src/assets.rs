@@ -156,6 +156,8 @@ const ICONS: &[(&str, &[u8])] = &[
     ("logos/together.svg", include_bytes!("../assets/logos/together.svg")),
     ("logos/lmstudio.svg", include_bytes!("../assets/logos/lmstudio.svg")),
     ("app-icon/app-icon.svg", include_bytes!("../assets/app-icon/app-icon.svg")),
+    // The overlay (v3): the viewfinder's corner brackets, drawn over an accent circle (`ui::viewfinder`).
+    ("icons/viewfinder.svg", include_bytes!("../assets/icons/viewfinder.svg")),
 ];
 
 pub struct Assets;

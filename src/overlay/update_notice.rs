@@ -16,8 +16,8 @@ pub(super) const NOTICE_HEIGHT: f32 = 38.0;
 /// How often the schedule is looked at. A check is due at most every few hours; this only
 /// decides how soon after launch (or after Live) it starts.
 const TICK: Duration = Duration::from_secs(5);
-/// The card's toolbar colour, which the row shares (`card`), at the card's background opacity.
-const ROW: u32 = 0x121315;
+/// The card's colour, which the row shares (`card`), at the card's background opacity.
+const ROW: u32 = theme::CARD;
 const HOVER: u32 = 0xffffff0f;
 
 impl Overlay {
@@ -77,7 +77,7 @@ impl Overlay {
     }
 
     pub(super) fn update_notice_shown(&self) -> bool {
-        self.live_since.is_none() && self.settings_tab.is_none() && self.updates.notice(&self.store.value.dismissed_update).is_some()
+        self.live_since.is_none() && self.updates.notice(&self.store.value.dismissed_update).is_some()
     }
 
     /// "Update available · v0.2.0", Download (the release page) and ✕, which hides the row until a
@@ -100,7 +100,7 @@ impl Overlay {
                 this.fit(window);
             }))
             .child(ui::icon("icons/close.svg", 10.0, theme::muted()));
-        Some(div().flex().flex_none().items_center().gap(px(8.0)).h(px(NOTICE_HEIGHT)).pl(px(18.0)).pr(px(9.0)).bg(crate::appearance::fill(ROW, self.store.value.background_opacity)).rounded_t(px(19.0))
+        Some(div().flex().flex_none().items_center().gap(px(8.0)).h(px(NOTICE_HEIGHT)).pl(px(18.0)).pr(px(9.0)).bg(crate::appearance::fill(ROW, self.store.value.background_opacity)).rounded_t(px(theme::radius::CARD - 1.0))
             .child(div().size(px(6.0)).flex_none().rounded_full().bg(theme::accent()))
             .child(div().text_size(px(12.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child("Update available"))
             .child(div().flex_1().min_w_0().text_size(px(12.0)).text_color(theme::muted()).child(format!("v{version}")))

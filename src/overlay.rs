@@ -31,14 +31,12 @@ use crate::theme;
 use crate::ui;
 use crate::platform::{self, NativeWindow, PreviousFocus};
 
-/// The overlay window; the Live panel is 40 px narrower.
-pub const WIDTH: f32 = 680.0;
-/// The card, its hint and room for a toggle's popover below it.
-pub const IDLE_HEIGHT: f32 = 270.0;
-/// The card at its tallest (about 520 px) and room for a toggle's popover below it.
+/// The overlay window; the card is 40 px narrower.
+pub const WIDTH: f32 = 640.0;
+/// The idle card and room for a tooltip below it.
+pub const IDLE_HEIGHT: f32 = 160.0;
+/// The card at its tallest (about 520 px) and room for a tooltip below it.
 const LIVE_HEIGHT: f32 = 680.0;
-/// The card, the Settings panel under it (Windows) and room for an open picker list below them.
-const SETTINGS_HEIGHT: f32 = 820.0;
 /// macOS sign-in in Terminal: how often the account is checked, and for how long.
 #[cfg(target_os = "macos")]
 const SIGN_IN_POLL: Duration = Duration::from_secs(2);
@@ -47,8 +45,6 @@ const SIGN_IN_WAIT: Duration = Duration::from_secs(300);
 /// Every this many sign-in polls (30 s), Codex is checked fully whatever `codex login status` says.
 #[cfg(target_os = "macos")]
 const CODEX_FULL_CHECK: u32 = 15;
-/// How long Settings takes to collapse into the conversation after a message is sent from under it.
-const COLLAPSE: Duration = Duration::from_millis(200);
 /// Held movement eases in so a tap nudges, then cruises. Pixels per ~16 ms frame.
 const MOVE_START: f32 = 4.0;
 const MOVE_CRUISE: f32 = 22.0;
@@ -103,7 +99,6 @@ pub struct Overlay {
     pub(crate) own_window: gpui::AnyWindowHandle,
     pub(crate) hotkeys: Hotkeys,
     pub(crate) store: Store,
-    settings_tab: Option<Tab>,
     /// The Sessions review window, while it's open.
     sessions_window: Option<gpui::WindowHandle<SessionsWindow>>,
     /// macOS shows settings in their own window, while it's open.
@@ -213,12 +208,8 @@ pub struct Overlay {
     pub(crate) archive_bytes: Option<u64>,
     /// Where the open dropdown's face was laid out, so a click on it closes rather than reopens.
     pub(crate) picker_face: Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
-    /// The toolbar toggle under the pointer (shows its state popover).
-    pub(crate) toggle_hover: Option<crate::toggles::Toggle>,
-    /// When Settings started collapsing into the conversation (a message was sent from under it).
-    collapse: Option<Instant>,
-    /// The Settings panel's laid-out height, which the collapse starts from.
-    settings_height: Rc<std::cell::Cell<f32>>,
+    /// The toolbar control under the pointer whose tooltip shows under the card (`toggles`).
+    pub(crate) tip: Option<crate::toggles::Tip>,
     /// The modes and which one is active (`modes`); its context and files are on `store.value.mode`.
     pub(crate) modes: crate::modes::ModeStore,
     /// Settings › Modes (`modes_view`).
@@ -227,8 +218,11 @@ pub struct Overlay {
     pub(crate) updates: crate::update::Tracker,
     /// The mode switcher under the card, while it's open.
     switcher: Option<switcher::Switcher>,
-    /// Windows: the Modes window, while it's open.
-    pub(crate) modes_window: Option<gpui::WindowHandle<crate::modes_window::ModesWindow>>,
+    /// The Sessions panel in place of the card, while it's open.
+    sessions_panel: Option<sessions_panel::SessionsPanel>,
+    /// Windows: the Settings window and what it shows (`settings_view::fluent`).
+    #[cfg(windows)]
+    pub(crate) fluent: crate::settings_view::fluent::Fluent,
     /// Windows: first-run setup, while its window is open; the overlay stays hidden meanwhile.
     #[cfg(windows)]
     pub(crate) setup: Option<crate::onboarding::Setup>,
@@ -310,7 +304,7 @@ impl Overlay {
         }
         // Live on launch waits for setup to finish (Windows `onboarding`, macOS `finish_onboarding`).
         let start_live = store.value.start_live_on_launch && !setup && !onboarding;
-        let composer = cx.new(|cx| TextInput::new(composer_placeholder(&store.value), cx));
+        let composer = cx.new(|cx| TextInput::new(composer_placeholder(&store.value), cx).with_text_size(14.0, 20.0));
         let key_input = cx.new(|cx| TextInput::new("Paste your API key", cx).masked(true));
         // macOS has the model typed, with an example id for the provider; Windows lists models below.
         #[cfg(target_os = "macos")]
@@ -343,7 +337,7 @@ impl Overlay {
         let modes_ui = crate::modes_view::ModesUi::new(&modes, window, cx);
         #[cfg(target_os = "macos")]
         let model_ui = crate::settings_view::ModelUi::new(&key_input, window, cx);
-        let mut overlay = Self { native, own_window: window.window_handle(), hotkeys, store, settings_tab: None, sessions_window: None,
+        let mut overlay = Self { native, own_window: window.window_handle(), hotkeys, store, sessions_window: None,
             #[cfg(target_os = "macos")]
             settings_window: None,
             #[cfg(target_os = "macos")]
@@ -371,8 +365,10 @@ impl Overlay {
             motion: None, live_since: None, turns: Vec::new(), session: 0, dividers: Vec::new(), scroll: ScrollHandle::new(),
             listening: None, listening_status: None, listening_epoch: 0, transcript: Vec::new(), provisional: Default::default(), levels: Default::default(),
             model_installed: false, model_download: None, model_notice: None,
-            open_picker: None, reveal_accounts: false, devices: None, devices_loading: false, archive_bytes: None, picker_face: Rc::default(), toggle_hover: None,
-            collapse: None, settings_height: Rc::default(), modes_ui, modes, updates: Default::default(), modes_window: None, switcher: None,
+            open_picker: None, reveal_accounts: false, devices: None, devices_loading: false, archive_bytes: None, picker_face: Rc::default(), tip: None,
+            modes_ui, modes, updates: Default::default(), switcher: None, sessions_panel: None,
+            #[cfg(windows)]
+            fluent: Default::default(),
             #[cfg(windows)]
             setup: None,
             #[cfg(any(target_os = "macos", windows))]
@@ -455,10 +451,11 @@ impl Overlay {
         self.prepare_tab(tab, window, cx);
         #[cfg(target_os = "macos")]
         crate::settings_window::open(tab, cx);
-        #[cfg(not(target_os = "macos"))]
+        // Windows: the Settings window (`settings_view::fluent`).
+        #[cfg(windows)]
         {
-            self.settings_tab = Some(tab);
-            self.open_panel(window, cx);
+            crate::settings_view::fluent::open(self, tab, None, cx);
+            self.fluent_prepare(tab, window, cx);
         }
     }
 
@@ -558,7 +555,11 @@ impl Overlay {
     }
 
     /// Open (or focus) the full-size Sessions review window.
-    pub fn open_sessions(&mut self, cx: &mut Context<Self>) {
+    pub fn open_sessions(&mut self, cx: &mut Context<Self>) { self.open_sessions_at(None, cx); }
+
+    /// Open (or focus) the Sessions window, showing session `id` when one is given (the overlay's
+    /// Sessions panel).
+    pub(crate) fn open_sessions_at(&mut self, id: Option<String>, cx: &mut Context<Self>) {
         let Some(root) = self.archive.as_ref().map(|archive| archive.root().to_path_buf()) else { return };
         let _ = std::fs::create_dir_all(&root);
         // On macOS the window becomes key only once CluelyRS is active (`platform::activate_then`):
@@ -570,30 +571,23 @@ impl Overlay {
             cx.defer(move |cx| platform::activate_then(cx, move |active, cx| {
                 let mut handle = overlay.read(cx).sessions_window;
                 sessions_window::open(&mut handle, root, codex, active, cx);
+                show_session(handle, id, cx);
                 overlay.update(cx, |overlay, _| overlay.sessions_window = handle);
             }));
         }
         #[cfg(not(target_os = "macos"))]
-        sessions_window::open(&mut self.sessions_window, root, self.codex.clone(), true, cx);
+        {
+            sessions_window::open(&mut self.sessions_window, root, self.codex.clone(), true, cx);
+            show_session(self.sessions_window, id, cx);
+        }
     }
 
-    #[cfg(not(target_os = "macos"))]
-    fn open_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // Esc works through the global shortcut; focus also lets it work when the overlay is active.
-        window.focus(&self.focus);
-        self.hotkeys.set_panel_open(true);
-        self.fit(window);
-        cx.notify();
-    }
-
-    /// Close settings and return to the overlay.
+    /// Close any open dropdown and hide what Settings revealed (accounts, a saved key), as when
+    /// setup opens. Settings itself is a window of its own on both platforms.
     pub fn close_panels(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.settings_tab = None;
-        self.collapse = None;
         self.open_picker = None;
         self.reveal_accounts = false;
         self.key_reveal.hide();
-        self.hotkeys.set_panel_open(false);
         self.fit(window);
         cx.notify();
     }
@@ -606,8 +600,10 @@ impl Overlay {
 
     /// Size the window to its content state; transparent area outside the content still takes clicks.
     fn fit(&self, window: &mut Window) {
-        let mut height = if self.settings_tab.is_some() { SETTINGS_HEIGHT } else if self.live_since.is_some() || !self.turns.is_empty() { LIVE_HEIGHT }
+        let mut height = if self.live_since.is_some() || !self.turns.is_empty() { LIVE_HEIGHT }
             else if self.update_notice_shown() { IDLE_HEIGHT + update_notice::NOTICE_HEIGHT } else { IDLE_HEIGHT };
+        // The Sessions panel replaces the card, taller than it is idle.
+        if self.sessions_panel_open() { height = height.max(SESSIONS_PANEL_WINDOW_HEIGHT); }
         // The mode switcher hangs below the card.
         if self.switcher_open() { height = height.max(switcher::window_height(self.live_since.is_some() || !self.turns.is_empty(), self.update_notice_shown())); }
         platform::resize(window, self.native, size(px(self.store.value.card_width.window()), px(height)));
@@ -637,12 +633,14 @@ impl Overlay {
             #[cfg(target_os = "macos")]
             Action::Assist if self.onboarding_window.is_some() => self.practice_assist(cx),
             Action::Assist => self.send("Assist", String::new(), window, cx),
-            Action::Focus => self.type_shortcut(window, cx),
-            Action::SwitchMode => self.switch_mode_shortcut(window, cx),
+            // The text box and the mode chip are on the card, which the Sessions panel replaces.
+            Action::Focus => { self.close_sessions_panel(false, window, cx); self.type_shortcut(window, cx) }
+            Action::SwitchMode => { self.close_sessions_panel(false, window, cx); self.switch_mode_shortcut(window, cx) }
             Action::MoveUp | Action::MoveDown | Action::MoveLeft | Action::MoveRight => self.start_motion(Motion::Move, window, cx),
             Action::ScrollUp | Action::ScrollDown => self.start_motion(Motion::Scroll, window, cx),
             // Esc, claimed while the Windows Settings panel is open, closes the switcher over it first.
-            Action::Close => if self.switcher_open() { self.close_switcher(window, cx) } else { self.close_panels(window, cx) },
+            Action::Close => if self.switcher_open() { self.close_switcher(window, cx) }
+                else if self.sessions_panel_open() { self.close_sessions_panel(true, window, cx) } else { self.close_panels(window, cx) },
         }
     }
 
@@ -669,12 +667,6 @@ impl Overlay {
             if let Some(metrics) = self.metrics.take() { std::thread::spawn(move || metrics.export()); }
         }
         self.record(live);
-        // Starting Live closes Settings, unless a message sent from under it is starting Live: then
-        // Settings collapses into the conversation (see `send_composer`).
-        if live && self.collapse.is_none() {
-            self.settings_tab = None;
-            self.hotkeys.set_panel_open(false);
-        }
         if live {
             // A new session: earlier turns stay on the card under a divider, but the model,
             // speculation and the transcript start empty.
@@ -718,16 +710,11 @@ impl Overlay {
         }
         if live && self.store.value.save_sessions && let Some(archive) = &self.archive {
             match archive.start_now() {
-                Ok(recorder) => self.recorder = Some(recorder),
+                // The mode gives the session its icon in the Sessions panel.
+                Ok(mut recorder) => { recorder.set_mode(&self.modes.active().id); self.recorder = Some(recorder) }
                 Err(error) => eprintln!("session recording unavailable: {error}"),
             }
         }
-    }
-
-    /// Whether the open dropdown is shown in the overlay's Settings panel rather than in the macOS
-    /// Settings window.
-    fn picker_in_overlay(&self) -> bool {
-        self.open_picker.is_some() && self.settings_tab.is_some()
     }
 
     fn update_passthrough(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -738,26 +725,21 @@ impl Overlay {
             platform::set_mouse_passthrough(native, !over_control);
         }
         // A press anywhere that isn't one of the overlay's controls (the click-through answer
-        // area, or another app) never reaches the overlay, so an open list closes from here.
-        if self.picker_in_overlay() && !over_control && platform::left_button_down() {
-            self.open_picker = None;
-            cx.notify();
-        }
-        // The mode switcher too; the app clicked takes the keyboard.
+        // area, or another app) never reaches the overlay, so the mode switcher closes from here;
+        // the app clicked takes the keyboard.
         if self.switcher_open() && !over_control && platform::left_button_down() { self.dismiss_switcher(window, cx); }
         // Likewise, leaving a control for the click-through area sends the overlay no "hover
         // ended", so a hover tooltip is cleared here.
-        if self.toggle_hover.is_some() && !over_control {
-            self.toggle_hover = None;
+        if self.tip.is_some() && !over_control {
+            self.tip = None;
             cx.notify();
         }
     }
 
-    /// Start Live if needed, take the foreground and put the caret in the composer. With Settings
-    /// open, Settings stays and Live waits for the message: sending collapses it (`send_composer`).
+    /// Start Live if needed, take the foreground and put the caret in the composer.
     fn focus_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.show();
-        if self.live_since.is_none() && self.settings_tab.is_none() { self.set_live(true, window, cx); }
+        if self.live_since.is_none() { self.set_live(true, window, cx); }
         self.take_keyboard(cx);
         window.focus(&self.composer.focus_handle(cx));
         cx.notify();
@@ -898,11 +880,6 @@ impl Overlay {
         let question = input.read(cx).text().trim().to_string();
         if question.is_empty() { return; }
         input.update(cx, |input, cx| input.clear(cx));
-        // Sent from under Settings: Settings collapses into the conversation the answer appears in.
-        if self.settings_tab.is_some() && self.collapse.is_none() {
-            self.open_picker = None;
-            self.collapse = Some(Instant::now());
-        }
         self.send("Ask", question, window, cx);
         self.return_to_previous_app();
     }
@@ -911,6 +888,8 @@ impl Overlay {
     /// A speculative answer prepared for exactly this context is shown at once instead.
     fn send(&mut self, action: &str, question: String, window: &mut Window, cx: &mut Context<Self>) {
         self.show();
+        // The answer shows on the card, which the Sessions panel replaces.
+        self.close_sessions_panel(false, window, cx);
         if self.live_since.is_none() { self.set_live(true, window, cx); }
         let utterance = self.latest_heard_utterance();
         if let Some(session) = &self.reasoning { session.note_requested(utterance); }
@@ -1141,8 +1120,8 @@ impl Overlay {
             Some(_) => self.store.value.onboarding_step == Some(crate::settings::OnboardingStep::Transcription),
             None => self.settings_window_tab == Some(Tab::Listening),
         };
-        #[cfg(not(target_os = "macos"))]
-        let listening = self.settings_tab == Some(Tab::Listening);
+        #[cfg(windows)]
+        let listening = self.fluent.tab == Some(Tab::Listening);
         if listening { crate::stt::deepgram::PROVIDER_ID.to_string() } else { self.store.value.api_provider.clone() }
     }
 
@@ -1288,8 +1267,6 @@ impl Overlay {
         if !visible { self.key_reveal.hide(); }
         platform::set_visible(native, visible);
         self.hotkeys.set_overlay_visible(visible);
-        // A hidden panel must not keep claiming Esc.
-        self.hotkeys.set_panel_open(visible && self.settings_tab.is_some());
     }
 
     pub(crate) fn show(&mut self) {
@@ -1307,7 +1284,6 @@ impl Overlay {
             self.key_reveal.hide();
             platform::set_visible(native, false);
             self.hotkeys.set_overlay_visible(false);
-            self.hotkeys.set_panel_open(false);
         }
     }
 
@@ -1367,16 +1343,6 @@ impl Overlay {
         cx.notify();
     }
 
-    /// How far Settings has collapsed into the conversation (eased, 0 to 1) while it does. Each
-    /// frame asks for the next; at the end Settings closes and the window shrinks once.
-    fn collapse_progress(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<f32> {
-        let started = self.collapse?;
-        let progress = card::collapse_eased(started.elapsed(), COLLAPSE);
-        if progress >= 1.0 { cx.defer_in(window, |this, window, cx| this.close_panels(window, cx)); }
-        else { window.request_animation_frame(); }
-        Some(progress)
-    }
-
     fn elapsed(&self) -> String {
         let seconds = self.live_since.map(|start| start.elapsed().as_secs()).unwrap_or(0);
         format!("{:02}:{:02}", seconds / 60, seconds % 60)
@@ -1385,70 +1351,78 @@ impl Overlay {
 
 
 impl Overlay {
-    /// The conversation shown above the card's text box: transcript strip, answer thread and quick
-    /// actions.
+    /// The conversation shown between the card's text box and its toolbar: what was heard, the
+    /// answer thread (each turn's bubble, "Viewed screen" when it had a screenshot, the answer with
+    /// its key phrase) and the quick actions.
     fn live_parts(&self, cx: &mut Context<Self>) -> (gpui::Div, gpui::Stateful<gpui::Div>, gpui::Div) {
-        let ticker = self.transcript_block();
-        let mut thread = div().id("thread").flex().flex_col().gap(px(14.0)).px(px(18.0)).py(px(14.0))
-            .flex_1().overflow_y_scroll().track_scroll(&self.scroll);
+        let heard = self.transcript_block();
+        let mut thread = div().id("thread").flex().flex_col().gap(px(12.0)).flex_1().overflow_y_scroll().track_scroll(&self.scroll);
         if self.turns.is_empty() {
             thread = thread.child(div().text_size(px(13.0)).text_color(theme::muted())
                 .child(format!("Press {} to answer from your screen and the conversation.", self.hotkeys.label(Action::Assist))));
         }
         for (index, turn) in self.turns.iter().enumerate() {
             for divider in self.dividers.iter().filter(|divider| divider.before == index) { thread = thread.child(chat::divider(&divider.label)); }
-            let asked = if turn.question.is_empty() { turn.action.to_string() } else { turn.question.clone() };
             let header: AnyElement = match turn.auto {
                 Some((utterance, shown_ms)) => {
                     // An early start is shown before its line is committed; then the line's time counts.
                     let heard = self.transcript.iter().find(|line| line.id == utterance).map_or(shown_ms, |line| line.at_ms);
                     auto_header(turn.id, heard, turn.status == Status::Streaming, self.hits.mark(), cx).into_any_element()
                 }
-                None => div().flex().justify_end().child(div().max_w(px(420.0)).text_size(px(13.0)).text_color(theme::text())
-                    .px(px(12.0)).py(px(6.0)).rounded(px(12.0)).border_1().border_color(theme::bubble_border()).bg(theme::bubble())
-                    .child(asked)).into_any_element(),
+                None => chat::bubble(turn).into_any_element(),
             };
+            let size = self.store.value.text_size.answer();
             let body: AnyElement = match &turn.status {
                 Status::Failed(reason) => div().text_size(px(13.0)).line_height(px(20.0)).text_color(gpui::rgb(0xffb4a8)).child(reason.clone()).into_any_element(),
                 Status::Streaming if turn.text.is_empty() => div().text_size(px(13.0)).text_color(theme::muted()).child("Thinking…").into_any_element(),
-                _ => div().id(("answer", turn.id as usize)).min_w_0().text_color(theme::text()).child(crate::markdown::render(&turn.text, self.store.value.text_size.answer()))
+                _ => div().id(("answer", turn.id as usize)).min_w_0().child(chat::answer(&turn.text, &turn.action, size))
                     .when(turn.status == Status::Stopped, |answer| answer.child(chat::stopped_mark())).into_any_element(),
             };
-            thread = thread.child(header).child(body);
+            // "Viewed screen" sits with the answer, above it.
+            let viewed = turn.screenshot.is_some() && !matches!(turn.status, Status::Failed(_));
+            let answer = div().flex().flex_col().gap(px(6.0)).min_w_0().when(viewed, |answer| answer.child(chat::viewed_screen())).child(body);
+            thread = thread.child(header).child(answer);
         }
         // A session that has started but asked nothing yet.
         for divider in self.dividers.iter().filter(|divider| divider.before == self.turns.len()) { thread = thread.child(chat::divider(&divider.label)); }
         let ready = self.answer_ready();
-        let mut actions = div().flex().items_center().gap(px(4.0)).px(px(12.0)).pt(px(8.0)).pb(px(8.0));
+        let mut actions = div().flex().items_center().gap(px(6.0));
         for (index, label) in answer::ACTIONS.into_iter().enumerate() {
-            let action = div().id(("action", index)).relative().flex().items_center().gap(px(6.0)).rounded(px(8.0)).cursor_pointer()
-                .text_size(px(13.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).hover(|b| b.bg(theme::raised()))
-                .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, window, cx| this.send(label, String::new(), window, cx)))
-                .child(label).child(self.hits.mark());
-            // A speculative answer for this action and context is already being written.
-            actions = actions.child(if ready == Some(label) {
-                action.px(px(9.0)).py(px(5.0)).bg(gpui::rgb(0x0d1830)).border_1().border_color(theme::bubble_border()).text_color(gpui::rgb(0xdce7ff))
+            let prepared = ready == Some(label);
+            let action = div().id(("action", index)).relative().flex().flex_none().items_center().gap(px(6.0)).px(px(10.0)).py(px(5.0))
+                .rounded(px(theme::radius::QUICK_ACTION)).border_1().cursor_pointer().text_size(px(12.0)).line_height(px(16.0)).font_weight(FontWeight::SEMIBOLD)
+                .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, window, cx| this.send(label, String::new(), window, cx)));
+            // A speculative answer for this action and context is already being written: the pill
+            // turns accent, with a dot in place of its icon.
+            let action = if prepared {
+                action.bg(theme::bubble()).border_color(theme::bubble_border()).text_color(theme::accent_soft())
                     .child(div().size(px(12.0)).flex_none().rounded_full().bg(gpui::rgba(0x4c8dff2e)).flex().items_center().justify_center()
                         .child(div().size(px(6.0)).rounded_full().bg(theme::accent())))
-            } else { action.px(px(10.0)).py(px(6.0)) });
+            } else {
+                action.bg(theme::raised()).border_color(theme::hairline()).text_color(theme::body()).hover(|action| action.bg(theme::pressed()))
+                    .children(chat::action_icon(label).map(|icon| ui::icon(icon, 12.0, theme::body())))
+            };
+            actions = actions.child(action.child(label).child(self.hits.mark()));
         }
         if ready.is_some() {
-            actions = actions.child(div().flex_1().flex().justify_end().pr(px(4.0)).text_size(px(12.0)).text_color(theme::muted())
+            actions = actions.child(div().flex_1().min_w_0().flex().justify_end().truncate().text_size(px(12.0)).text_color(theme::muted())
                 .child("Answer ready for their last question"));
         }
-        (ticker, thread, actions)
+        (heard, thread, actions)
     }
 }
 
-/// The line under the idle overlay saying what Start does.
-fn idle_hint(text: &'static str) -> impl IntoElement {
-    div().text_size(px(12.0)).text_color(theme::body()).px(px(12.0)).py(px(5.0)).rounded_full().bg(gpui::rgba(0x0f1012b3)).child(text)
+/// After the Sessions window opens, show session `id` in it.
+fn show_session(handle: Option<gpui::WindowHandle<SessionsWindow>>, id: Option<String>, cx: &mut gpui::App) {
+    let (Some(handle), Some(id)) = (handle, id) else { return };
+    let _ = handle.update(cx, |window, _, cx| window.select(&id, cx));
 }
 
 mod card;
 mod chat;
 mod update_notice;
 mod switcher;
+mod sessions_panel;
 #[cfg(any(target_os = "macos", windows))]
 mod menu_bar;
 #[cfg(windows)]
@@ -1457,21 +1431,17 @@ pub(crate) use card::CARD_WIDTH;
 /// How many audio levels the Live waveform keeps (one per bar from the middle out).
 pub(crate) const LEVEL_HISTORY: usize = 3;
 
-/// What Start does, under the idle card.
-#[cfg(target_os = "macos")]
-const IDLE_HINT: &str = "Start listens to your Mac's audio + mic and attaches your screen to every message.";
-#[cfg(not(target_os = "macos"))]
-const IDLE_HINT: &str = "Start listens to your desktop + mic and attaches your screen to every message.";
+/// The window while the Sessions panel replaces the card: the overlay's top padding, the panel
+/// and room under it.
+const SESSIONS_PANEL_WINDOW_HEIGHT: f32 = 8.0 + sessions_panel::PANEL_HEIGHT + 20.0;
 
 impl Render for Overlay {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let live = self.live_since.is_some();
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.hits.clear();
-        let collapse = self.collapse_progress(window, cx);
-        let mut root = div().size_full().flex().flex_col().items_center().gap(px(10.0)).pt(px(8.0)).pb(px(12.0))
+        div().size_full().flex().flex_col().items_center().gap(px(10.0)).pt(px(8.0)).pb(px(12.0))
             .font_family(theme::FONT).text_color(theme::text())
             .track_focus(&self.focus)
-            .on_children_prepainted(click_through(self.native, self.hits.clone(), self.shape.clone(), self.settings_tab.is_some()))
+            .on_children_prepainted(click_through(self.native, self.hits.clone(), self.shape.clone()))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 // Tab in the text box opens the mode switcher.
                 let modifiers = event.keystroke.modifiers;
@@ -1481,29 +1451,13 @@ impl Render for Overlay {
                     return;
                 }
                 if event.keystroke.key != "escape" { return; }
-                if this.settings_tab.is_some() { this.close_panels(window, cx); }
+                if this.sessions_panel_open() { this.close_sessions_panel(true, window, cx); }
                 else if this.composer.focus_handle(cx).is_focused(window) {
                     this.composer.update(cx, |input, cx| input.clear(cx));
                     this.return_to_previous_app();
                 }
-            }));
-        root = root.child(self.card(collapse, cx));
-        // Settings as a panel under the card (Windows; macOS opens its own window and never sets
-        // `settings_tab`). While collapsing it shrinks from its laid-out height and fades out.
-        if let Some(tab) = self.settings_tab {
-            let panel = div().relative().flex_none().child(self.settings_panel(tab, cx));
-            root = root.child(match collapse {
-                Some(progress) => panel.h(px(self.settings_height.get() * (1.0 - progress))).overflow_hidden().opacity(1.0 - progress),
-                None => {
-                    let height = self.settings_height.clone();
-                    panel.child(gpui::canvas(move |bounds, _, _| height.set(f32::from(bounds.size.height)), |_, _, _, _| {})
-                        .absolute().top_0().left_0().size_full())
-                }
-            });
-        } else if !live && self.turns.is_empty() {
-            root = root.child(idle_hint(IDLE_HINT));
-        }
-        root
+            }))
+            .child(self.card(cx))
     }
 }
 
@@ -1541,18 +1495,14 @@ impl Hits {
     }
 }
 
-/// Shape the window to what is visible (the card, Settings, the hint, open popovers), so the space
-/// around them is click-through; inside them `update_passthrough` decides per cursor position.
-/// While Settings is open (`settings_open`) the shape is held at one rectangle around everything
-/// shown since it opened, so collapsing Settings into the conversation never reshapes the window:
-/// changing the window region every frame stalled each frame for 20–80 ms.
-fn click_through(native: Option<NativeWindow>, hits: Hits, applied: Rc<RefCell<Vec<platform::Shape>>>, settings_open: bool) -> impl Fn(Vec<gpui::Bounds<gpui::Pixels>>, &mut Window, &mut gpui::App) + 'static {
+/// Shape the window to what is visible (the card, open popovers and tooltips), so the space around
+/// them is click-through; inside them `update_passthrough` decides per cursor position.
+fn click_through(native: Option<NativeWindow>, hits: Hits, applied: Rc<RefCell<Vec<platform::Shape>>>) -> impl Fn(Vec<gpui::Bounds<gpui::Pixels>>, &mut Window, &mut gpui::App) + 'static {
     move |children, window, _| {
         let Some(native) = native else { return };
         let scale = window.scale_factor();
         hits.1.set(scale);
         let shapes = region(&children, &hits.floating(), scale);
-        let shapes = if settings_open { vec![enclosing(applied.borrow().iter().chain(&shapes), (18.0 * scale).round() as i32)] } else { shapes };
         if *applied.borrow() != shapes {
             platform::set_shape(native, &shapes);
             *applied.borrow_mut() = shapes;
@@ -1562,12 +1512,13 @@ fn click_through(native: Option<NativeWindow>, hits: Hits, applied: Rc<RefCell<V
 
 /// The window region, in physical pixels, for the laid-out `children` of the overlay and the
 /// `floating` areas reserved for deferred content (open lists and popovers), each a rounded
-/// rectangle a pixel larger than its bounds. The same on every platform; only Windows applies it.
+/// rectangle a pixel larger than its bounds, with the card's corner (the overlay's own children:
+/// the card, the Windows Settings panel) or the popovers' (the mode switcher, tooltips). The same
+/// on every platform; only Windows applies it.
 fn region(children: &[Hit], floating: &[Hit], scale: f32) -> Vec<platform::Shape> {
     let physical = |value: gpui::Pixels| (f32::from(value) * scale).round() as i32;
     children.iter().map(|bounds| (bounds, false)).chain(floating.iter().map(|bounds| (bounds, true))).map(|(bounds, float)| {
-        let height = f32::from(bounds.size.height);
-        let radius = if float { 10.0 } else if height <= 44.0 { height / 2.0 } else { 18.0 };
+        let radius = if float { theme::radius::POPOVER } else { theme::radius::CARD };
         (physical(bounds.left()) - 1, physical(bounds.top()) - 1, physical(bounds.right()) + 1, physical(bounds.bottom()) + 1,
             (radius * scale).round() as i32)
     }).collect()
@@ -1579,14 +1530,7 @@ pub(crate) const MODEL_PLACEHOLDER: &str = "Model id, e.g. from the list below";
 
 /// The text box's placeholder says what an answer will see: the screen only while Screen on send is on.
 fn composer_placeholder(settings: &Settings) -> &'static str {
-    if settings.screen_on_send { "Ask about your screen or conversation…" } else { "Ask about your conversation…" }
-}
-
-/// One rounded rectangle around `shapes`.
-fn enclosing<'a>(shapes: impl Iterator<Item = &'a platform::Shape>, radius: i32) -> platform::Shape {
-    shapes.fold((i32::MAX, i32::MAX, i32::MIN, i32::MIN, radius), |(left, top, right, bottom, radius), &(l, t, r, b, _)| {
-        (left.min(l), top.min(t), right.max(r), bottom.max(b), radius)
-    })
+    if settings.screen_on_send { "Ask about your screen or conversation" } else { "Ask about your conversation" }
 }
 
 /// Whether CluelyRS belongs in the Dock (and ⌘Tab). While setup is open it always does: setup is an
@@ -1631,7 +1575,7 @@ fn auto_header(id: u64, heard_ms: u64, streaming: bool, hit: impl IntoElement, c
 
 #[cfg(test)]
 mod tests {
-    use super::{Status, Turn, composer_placeholder, enclosing, save_turn};
+    use super::{Status, Turn, composer_placeholder, save_turn};
     use crate::archive::Archive;
     use crate::settings::Settings;
 
@@ -1685,16 +1629,7 @@ mod tests {
     fn the_placeholder_mentions_the_screen_only_while_it_is_sent() {
         let on = Settings { screen_on_send: true, ..Settings::default() };
         let off = Settings { screen_on_send: false, ..Settings::default() };
-        assert_eq!(composer_placeholder(&on), "Ask about your screen or conversation…");
-        assert_eq!(composer_placeholder(&off), "Ask about your conversation…");
-    }
-
-    #[test]
-    fn open_settings_hold_one_rectangle_around_every_shape() {
-        let shapes = [(10, 0, 650, 104, 36), (10, 114, 650, 700, 36)];
-        assert_eq!(enclosing(shapes.iter(), 36), (10, 0, 650, 700, 36));
-        // Held across frames: once it encloses everything, a smaller frame doesn't shrink it.
-        let held = enclosing(shapes.iter(), 36);
-        assert_eq!(enclosing([held, (10, 0, 650, 300, 36)].iter(), 36), held);
+        assert_eq!(composer_placeholder(&on), "Ask about your screen or conversation");
+        assert_eq!(composer_placeholder(&off), "Ask about your conversation");
     }
 }

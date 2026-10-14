@@ -102,7 +102,8 @@ impl SessionsWindow {
         cx.notify();
     }
 
-    fn select(&mut self, id: &str, cx: &mut Context<Self>) {
+    /// Show session `id` (also from the overlay's Sessions panel, `Overlay::open_sessions_at`).
+    pub(crate) fn select(&mut self, id: &str, cx: &mut Context<Self>) {
         self.session = self.archive.load(id);
         self.tab = Tab::Summary;
         self.notice = None;

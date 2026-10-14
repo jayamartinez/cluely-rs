@@ -289,7 +289,7 @@ mod tests {
     #[test]
     fn appearance_defaults_to_the_overlay_as_it_was_and_saves_under_its_own_names() {
         let older: Settings = serde_json::from_str(r#"{"provider":"claude"}"#).unwrap();
-        assert_eq!((older.background_opacity, older.text_size, older.card_width), (80, TextSize::Standard, CardWidth::Standard));
+        assert_eq!((older.background_opacity, older.text_size, older.card_width), (appearance::DEFAULT_OPACITY, TextSize::Standard, CardWidth::Standard));
         let chosen = Settings { background_opacity: 0, text_size: TextSize::Large, card_width: CardWidth::Narrow, ..Settings::default() };
         let json = serde_json::to_string(&chosen).unwrap();
         assert!(json.contains(r#""backgroundOpacity":0"#) && json.contains(r#""textSize":"large""#) && json.contains(r#""cardWidth":"narrow""#), "{json}");

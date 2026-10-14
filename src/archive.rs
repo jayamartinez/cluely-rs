@@ -92,6 +92,9 @@ pub struct Session {
     /// Which provider and model answered, for the header ("Claude · Sonnet").
     #[serde(default)]
     pub model: Option<String>,
+    /// The mode it was recorded in (its id), for its icon in the overlay's Sessions panel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
     pub transcript: Vec<Line>,
     pub turns: Vec<Turn>,
     #[serde(default)]
@@ -103,6 +106,7 @@ pub struct Session {
 pub struct Summary {
     pub id: String,
     pub title: Option<String>,
+    pub mode: Option<String>,
     pub started_at: u64,
     pub ended_at: Option<u64>,
     pub lines: usize,
@@ -169,7 +173,7 @@ impl Archive {
     pub fn start(&self, started_at: u64, id: String) -> std::io::Result<Recorder> {
         let dir = self.dir(&id).ok_or_else(|| std::io::Error::other("invalid session id"))?;
         fs::create_dir_all(&dir)?;
-        let recorder = Recorder { dir, session: Session { id, started_at, ended_at: None, title: None, model: None,
+        let recorder = Recorder { dir, session: Session { id, started_at, ended_at: None, title: None, model: None, mode: None,
             transcript: Vec::new(), turns: Vec::new(), notes: None } };
         recorder.flush()?;
         Ok(recorder)
@@ -186,7 +190,7 @@ impl Archive {
                     .find(|text| !text.trim().is_empty()).unwrap_or("").chars().take(120).collect(),
                 screenshots: session.turns.iter().filter(|turn| turn.screenshot.is_some()).count(),
                 lines: session.transcript.len(), turns: session.turns.len(),
-                title: session.title, id: session.id, started_at: session.started_at, ended_at: session.ended_at,
+                title: session.title, mode: session.mode, id: session.id, started_at: session.started_at, ended_at: session.ended_at,
             })
             .collect();
         summaries.sort_by_key(|summary| std::cmp::Reverse(summary.started_at));
@@ -307,6 +311,9 @@ impl Recorder {
     /// Stamp the end time. A session where nothing was heard or asked is discarded
     /// instead of cluttering History; returns `None` in that case.
     pub fn id(&self) -> &str { &self.session.id }
+
+    /// Record the mode the session runs in; it is written with the next change.
+    pub fn set_mode(&mut self, mode: &str) { self.session.mode = Some(mode.to_string()); }
 
     pub fn finish(mut self, ended_at: u64) -> std::io::Result<Option<Session>> {
         if self.session.transcript.is_empty() && self.session.turns.is_empty() {
