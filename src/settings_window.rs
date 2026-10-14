@@ -116,6 +116,7 @@ pub fn keep_in_front(handle: WindowHandle<SettingsWindow>, cx: &mut App) {
 fn closed(overlay: &Entity<Overlay>, cx: &mut App) {
     overlay.update(cx, |overlay, _| {
         overlay.settings_window = None;
+        overlay.settings_window_tab = None;
         overlay.key_reveal.hide();
         overlay.update_dock();
     });
@@ -160,15 +161,6 @@ impl SettingsWindow {
         }
     }
 
-    /// Settings show accounts and keys, so while the overlay hides from screen capture, so do they.
-    fn apply_capture(&mut self, cx: &App) {
-        let settings = &self.overlay.read(cx).store.value;
-        let Some(native) = self.native else { return };
-        if self.capture_hidden == Some(settings.hide_from_capture) { return; }
-        self.capture_hidden = Some(settings.hide_from_capture);
-        overlay::apply_capture_setting(native, settings);
-    }
-
     fn toolbar(&self, title: &'static str, cx: &mut Context<Self>) -> impl IntoElement {
         let mut tabs = div().flex().justify_center().gap(px(4.0));
         for (index, (page, label, icon)) in PAGES.into_iter().enumerate() {
@@ -189,27 +181,46 @@ impl SettingsWindow {
             .child(tabs)
     }
 
-    /// The app's name and version, Updates (`settings_view::about`) and Quit.
+    /// The app's name and version, Updates (`settings_view::about`), Run setup again… and Quit.
     fn about(&self, cx: &mut Context<Self>) -> AnyElement {
         let updates = self.overlay.update(cx, |overlay, cx| overlay.updates_section(cx));
+        let about_button = |id: &'static str, label: &'static str| div().id(id).px(px(14.0)).py(px(7.0)).rounded(px(9.0)).cursor_pointer()
+            .border_1().border_color(theme::hairline()).text_size(px(12.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::body()).child(label);
+        // Setup changes what Live uses, so it waits until Live is off. Settings closes as it opens.
+        let live = self.overlay.read(cx).live_since.is_some();
+        let overlay = self.overlay.clone();
+        let setup = about_button("run-setup", "Run setup again…").when(live, |button| button.opacity(0.45).cursor_default())
+            .when(!live, |button| button.on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                closed(&overlay, cx);
+                window.remove_window();
+                let own = overlay.read(cx).own_window;
+                let _ = own.update(cx, |_, window, cx| overlay.update(cx, |overlay, cx| overlay.open_onboarding(window, cx)));
+            }));
         div().flex().flex_col().gap(px(22.0)).pt(px(10.0))
             .child(div().flex().flex_col().items_center().gap(px(10.0))
                 .child(ui::mark(56.0))
                 .child(div().pt(px(6.0)).text_size(px(20.0)).font_weight(FontWeight::BOLD).text_color(theme::text()).child("CluelyRS"))
                 .child(div().text_size(px(12.0)).text_color(theme::muted()).child(format!("Version {}", env!("CARGO_PKG_VERSION")))))
             .child(updates)
-            .child(div().flex().justify_center()
-                .child(div().id("quit").px(px(14.0)).py(px(7.0)).rounded(px(9.0)).cursor_pointer()
-                    .border_1().border_color(theme::hairline()).text_size(px(12.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::body())
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.quit())
-                    .child("Quit CluelyRS")))
+            .child(div().flex().justify_center().gap(px(8.0))
+                .child(setup)
+                .child(about_button("quit", "Quit CluelyRS").on_mouse_down(MouseButton::Left, |_, _, cx| cx.quit())))
             .into_any_element()
     }
 }
 
+/// Settings and setup show accounts and keys, so while the overlay hides from screen capture, so do
+/// they. `applied` is the exclusion last set, so it is only set again when the setting changes.
+pub(crate) fn sync_capture(native: Option<NativeWindow>, applied: &mut Option<bool>, settings: &crate::settings::Settings) {
+    let Some(native) = native else { return };
+    if *applied == Some(settings.hide_from_capture) { return; }
+    *applied = Some(settings.hide_from_capture);
+    overlay::apply_capture_setting(native, settings);
+}
+
 impl Render for SettingsWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.apply_capture(cx);
+        sync_capture(self.native, &mut self.capture_hidden, &self.overlay.read(cx).store.value);
         let title = PAGES.iter().find(|(page, ..)| *page == self.page).map(|(_, label, _)| *label).unwrap_or("Settings");
         window.set_window_title(title);
         let body = match self.page {

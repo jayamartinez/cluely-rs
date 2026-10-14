@@ -14,18 +14,19 @@ use crate::theme;
 
 /// What differs between the two subscription CLIs.
 #[derive(Clone, Copy)]
-struct CliDetails {
-    name: &'static str,
-    install_page: &'static str,
+pub(super) struct CliDetails {
+    pub(super) name: &'static str,
+    pub(super) install_page: &'static str,
     /// The same rules the automatic search applies to a file.
     check: fn(&Path) -> Result<(), String>,
     set: fn(&mut Settings, String),
 }
 
 /// Where to read how to install the provider's CLI.
+#[cfg(windows)]
 pub(crate) fn install_page(provider: Provider) -> Option<&'static str> { details(provider).map(|cli| cli.install_page) }
 
-fn details(provider: Provider) -> Option<CliDetails> {
+pub(super) fn details(provider: Provider) -> Option<CliDetails> {
     match provider {
         Provider::Codex => Some(CliDetails {
             name: "Codex CLI",
@@ -100,7 +101,7 @@ impl Overlay {
     }
 
     /// Save the CLI's location (empty: automatic), then check the subscription again with it.
-    fn set_cli_location(&mut self, provider: Provider, path: String, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn set_cli_location(&mut self, provider: Provider, path: String, window: &mut Window, cx: &mut Context<Self>) {
         let Some(cli) = details(provider) else { return };
         self.cli_error = None;
         self.update_settings(|s| (cli.set)(s, path), window, cx);

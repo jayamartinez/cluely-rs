@@ -30,7 +30,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use base64::Engine;
 use serde_json::{Map, Value, json};
 
-use crate::chat::{ChatRequest, Effort, SubscriptionStatus};
+use crate::chat::{ChatRequest, Effort, ModelEntry, SubscriptionStatus};
 use crate::cli_path::{self, Cli};
 use crate::providers::{Message, Part, Role};
 
@@ -785,6 +785,28 @@ fn fold_input(messages: &[Message]) -> Result<Vec<Value>, CodexError> {
     Ok(items)
 }
 
+/// GPT version of a Codex model id: "gpt-6.1-sol" → (6, 1), "gpt-6-luna" → (6, 0); `None` for other shapes.
+pub(crate) fn gpt_version(id: &str) -> Option<(u32, u32)> {
+    let version = id.to_ascii_lowercase().strip_prefix("gpt-")?.split('-').next()?.to_string();
+    let mut parts = version.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = match parts.next() { Some(minor) => minor.parse().ok()?, None => 0 };
+    Some((major, minor))
+}
+
+/// The macOS picker's list, in `model/list` order: every model of the newest GPT generation (a
+/// future 6.2 joins it on its own), then older generations under Legacy models. Ids that carry no
+/// GPT version are never called legacy.
+fn picker_catalog(models: &[(String, String)], notes: &HashMap<String, String>) -> Vec<ModelEntry> {
+    let newest = models.iter().filter_map(|(id, _)| gpt_version(id)).map(|(major, _)| major).max();
+    let entry = |(id, name): &(String, String)| ModelEntry {
+        id: id.clone(), name: name.clone(), note: notes.get(id).cloned().unwrap_or_default(),
+        legacy: gpt_version(id).is_some_and(|(major, _)| Some(major) != newest),
+    };
+    let (latest, legacy): (Vec<_>, Vec<_>) = models.iter().map(entry).partition(|entry| !entry.legacy);
+    latest.into_iter().chain(legacy).collect()
+}
+
 fn valid_model(model: &str) -> bool {
     !model.is_empty() && model.len() <= 200 && model.chars().all(|c| c.is_ascii_graphic())
 }
@@ -865,6 +887,35 @@ fn is_launcher_script(path: &Path) -> bool {
 /// Where the Codex CLI was found, or a user-safe reason it wasn't.
 pub fn executable() -> Result<PathBuf, String> {
     SystemLauncher.resolve().map_err(|error| error.message)
+}
+
+/// What `codex login status` says: signed in (`Some(true)`) or out, or `None` when it can't be asked
+/// (no CLI, one without the command, no answer within `LOGIN_STATUS_WAIT`). It only reads local
+/// files, unlike the app-server, which keeps the account it read when it started.
+#[cfg(target_os = "macos")]
+pub fn login_status() -> Option<bool> {
+    const LOGIN_STATUS_WAIT: Duration = Duration::from_secs(5);
+    let mut child = Command::new(executable().ok()?).args(["login", "status"])
+        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().ok()?;
+    let deadline = Instant::now() + LOGIN_STATUS_WAIT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return login_reported(status.code()),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+}
+
+/// `codex login status` exits 0 signed in and 1 signed out; anything else (2 is the usage error of
+/// a CLI without the command) says nothing.
+#[cfg(target_os = "macos")]
+fn login_reported(code: Option<i32>) -> Option<bool> {
+    match code { Some(0) => Some(true), Some(1) => Some(false), _ => None }
 }
 
 /// Whether a file the user picked can be used as the Codex CLI, by the rules of the search.
@@ -1466,8 +1517,10 @@ pub struct CodexClient {
 struct Catalog {
     default_model: Option<String>,
     efforts: HashMap<String, Vec<String>>,
-    /// Each model's description ("Workhorse model"), for the model picker.
+    /// Each model's description ("Workhorse model"), for the Windows setup's model picker.
     details: std::collections::BTreeMap<String, String>,
+    /// Each model's description, shortened for the macOS picker.
+    notes: HashMap<String, String>,
 }
 
 /// The model and reasoning effort a turn runs with.
@@ -1528,6 +1581,7 @@ impl CodexClient {
                 status.models = self.models(&connection).unwrap_or_default();
                 let catalog = self.catalog.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone().unwrap_or_default();
                 status.default_model = catalog.default_model;
+                status.catalog = picker_catalog(&status.models, &catalog.notes);
                 status.details = catalog.details;
             }
             Ok((Account::Other, _)) => status.error = Some(err(Kind::AuthUnsupported).message),
@@ -1631,6 +1685,7 @@ impl CodexClient {
                 if let Some(detail) = model.get("description").and_then(Value::as_str).map(str::trim).filter(|detail| !detail.is_empty()) {
                     catalog.details.insert(id.to_string(), detail.chars().take(80).collect());
                 }
+                if let Some(note) = model.get("description").and_then(Value::as_str) { catalog.notes.insert(id.to_string(), crate::chat::short_note(note)); }
                 let name = model.get("displayName").and_then(Value::as_str).map(str::trim).filter(|name| !name.is_empty()).unwrap_or(id);
                 models.push((id.to_string(), name.chars().take(80).collect()));
                 if models.len() >= MAX_MODELS {
@@ -1980,6 +2035,15 @@ pub(crate) mod tests {
     use std::sync::Condvar;
     use std::sync::atomic::AtomicUsize;
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn login_status_reads_only_its_two_exit_codes() {
+        assert_eq!(login_reported(Some(0)), Some(true));
+        assert_eq!(login_reported(Some(1)), Some(false));
+        assert_eq!(login_reported(Some(2)), None, "a CLI without `login status`");
+        assert_eq!(login_reported(None), None, "killed by a signal");
+    }
+
     // --- In-memory transport -----------------------------------------------------------------
 
     #[derive(Default)]
@@ -2184,7 +2248,7 @@ pub(crate) mod tests {
                 }))],
                 "account/read" => vec![ok(json!({ "account": account.clone(), "requiresOpenaiAuth": true }))],
                 "model/list" => vec![ok(json!({ "data": [
-                    { "id": "gpt-5", "displayName": "GPT-5", "hidden": false, "isDefault": true,
+                    { "id": "gpt-5", "displayName": "GPT-5", "description": "For everyday work.", "hidden": false, "isDefault": true,
                       "supportedReasoningEfforts": [{ "reasoningEffort": "minimal", "description": "" }, { "reasoningEffort": "low", "description": "" },
                           { "reasoningEffort": "medium", "description": "" }, { "reasoningEffort": "high", "description": "" }, { "reasoningEffort": "xhigh", "description": "" }] },
                     { "id": "secret", "displayName": "Hidden", "hidden": true },
@@ -2651,11 +2715,28 @@ pub(crate) mod tests {
         let status = client(&launcher).status();
         assert_eq!(status, SubscriptionStatus {
             installed: true, custom_location: false, signed_in: true, account: Some("me@example.com".into()), plan: Some("plus".into()),
-            models: vec![("gpt-5".into(), "GPT-5".into())], default_model: Some("gpt-5".into()), error: None, ..SubscriptionStatus::default()
+            models: vec![("gpt-5".into(), "GPT-5".into())], default_model: Some("gpt-5".into()), error: None,
+            catalog: vec![ModelEntry { id: "gpt-5".into(), name: "GPT-5".into(), note: "Everyday work".into(), legacy: false }],
+            details: [("gpt-5".to_string(), "For everyday work.".to_string())].into(),
         });
         assert_eq!(methods(&launcher), ["initialize", "initialized", "account/read", "model/list"]);
         let init = lock(&launcher.received)[0].clone();
         assert_eq!(init["params"]["capabilities"]["experimentalApi"], false);
+    }
+
+    /// The picker lists every model of the newest GPT generation, Astra too, and the older ones as legacy.
+    #[test]
+    fn picker_catalog_puts_older_generations_under_legacy() {
+        let models: Vec<(String, String)> = ["gpt-6-astra", "gpt-6-sol", "gpt-5.6-sol", "gpt-6-luna", "gpt-5.6-terra", "codex-mini"]
+            .map(|id| (id.to_string(), id.to_uppercase())).to_vec();
+        let notes = HashMap::from([("gpt-6-astra".to_string(), "Frontier intelligence".to_string())]);
+        let catalog = picker_catalog(&models, &notes);
+        let ids = |legacy: bool| catalog.iter().filter(|entry| entry.legacy == legacy).map(|entry| entry.id.as_str()).collect::<Vec<_>>();
+        assert_eq!(ids(false), ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "codex-mini"]);
+        assert_eq!(ids(true), ["gpt-5.6-sol", "gpt-5.6-terra"]);
+        assert!(catalog.iter().position(|entry| entry.legacy) > catalog.iter().rposition(|entry| !entry.legacy), "latest first");
+        assert_eq!((catalog[0].name.as_str(), catalog[0].note.as_str()), ("GPT-6-ASTRA", "Frontier intelligence"));
+        assert!(picker_catalog(&[], &notes).is_empty());
     }
 
     #[test]
@@ -3123,6 +3204,7 @@ pub(crate) mod tests {
             "installed={} signed_in={} has_account={} plan={:?} models={} error={:?}",
             status.installed, status.signed_in, status.account.is_some(), status.plan, status.models.len(), status.error
         );
+        for entry in &status.catalog { println!("{:<16} {:<16} legacy={} {}", entry.id, entry.name, entry.legacy, entry.note); }
         codex.shutdown();
         assert!(status.installed && status.error.is_none());
     }

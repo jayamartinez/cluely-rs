@@ -61,6 +61,23 @@ impl AnswerState {
 
 fn cli_slot(provider: Provider) -> usize { if provider == Provider::Codex { 0 } else { 1 } }
 
+/// A provider preset's logo for the Provider dropdown. Brands without a usable mark get the globe;
+/// a custom endpoint gets the link.
+fn provider_logo(id: &str) -> &'static str {
+    match id {
+        "anthropic" => "icons/logo-anthropic.svg",
+        "openai" => "icons/logo-openai.svg",
+        "openrouter" => "icons/logo-openrouter.svg",
+        "gemini" => "icons/logo-gemini.svg",
+        "deepseek" => "icons/logo-deepseek.svg",
+        "mistral" => "icons/logo-mistral.svg",
+        "ollama" => "icons/logo-ollama.svg",
+        "lmstudio" => "icons/logo-lmstudio.svg",
+        "custom" => "icons/setup-link.svg",
+        _ => "icons/setup-globe.svg",
+    }
+}
+
 impl Overlay {
     /// Look for both CLIs in the background, to show where they are (or that they're missing).
     pub(super) fn find_clis(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -168,7 +185,7 @@ impl Overlay {
     }
 
     /// A key was saved during setup. An answer key is checked at once by listing its provider's
-    /// models, which fills the model list too.
+    /// models; the list itself isn't shown, as setup takes a typed model id.
     pub(crate) fn setup_key_saved(&mut self, provider: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(setup) = &mut self.setup else { return };
         setup.replacing_key = false;
@@ -300,13 +317,14 @@ impl Overlay {
         let s = &self.store.value;
         let presets = providers::PRESETS.iter().map(|preset| (preset.id.to_string(), preset.label.to_string())).collect();
         let current = providers::preset(&s.api_provider);
-        let dropdown = self.setup_dropdown(setup, Menu::ApiProvider, current.map_or("Choose a provider", |preset| preset.label), presets, &s.api_provider, 32.0,
-            |this, id, window, cx| {
+        let dropdown = self.setup_dropdown(setup, Menu::ApiProvider, current.map_or("Choose a provider", |preset| preset.label), presets, Some(provider_logo),
+            &s.api_provider, 32.0, |this, id, window, cx| {
                 if let Some(setup) = &mut this.setup { setup.answer.changed(); setup.replacing_key = false; }
                 this.loaded_models.clear();
                 this.update_settings(|s| s.api_provider = id, window, cx);
                 let model = this.store.value.api_model().to_string();
                 this.model_input.update(cx, |input, cx| input.set_text(model, cx));
+                this.show_model_example(cx);
             }, cx);
         let mut provider = labelled("icons/setup-globe.svg", "Provider", dropdown);
         let Some(preset) = current else { return (vec![provider], None) };
@@ -332,22 +350,22 @@ impl Overlay {
         (rows, status)
     }
 
-    /// The model, from the provider's list (a typed id for providers that don't list), and Test.
+    /// The model box takes a typed id on the API key path; its placeholder shows one the chosen
+    /// provider takes. The box is Settings › Model's too, so `close_setup` puts its own back.
+    pub(super) fn show_model_example(&self, cx: &mut Context<Self>) {
+        let example = providers::preset(&self.store.value.api_provider).and_then(|preset| preset.suggested_models.first());
+        let placeholder = example.map_or_else(|| "Type the model id".to_string(), |model| format!("e.g. {model}"));
+        self.model_input.update(cx, |input, cx| input.set_placeholder(placeholder, cx));
+    }
+
+    /// The model, from the plan's picker or typed for an API key, and Test.
     fn setup_model_row(&self, enabled: bool, cx: &mut Context<Self>) -> Div {
         let Some(setup) = &self.setup else { return div() };
-        let choice = self.model_choice();
-        let provider = self.store.value.provider;
-        let picker = if provider != Provider::ApiKey {
-            // The plans share the searchable picker (latest, then legacy models).
-            self.plan_model_picker(setup, enabled, cx)
-        } else if choice.options.is_empty() {
+        let picker = if self.store.value.provider == Provider::ApiKey {
             self.text_field("setup-model-id", self.model_input.clone())
         } else {
-            let set = choice.set;
-            self.setup_dropdown(setup, Menu::Model, choice.value, choice.options, &choice.selected, 32.0, move |this, id, window, cx| {
-                if let Some(setup) = &mut this.setup { setup.answer.test = None; }
-                if this.store.value.provider == Provider::ApiKey { this.choose_model(id, window, cx) } else { this.update_settings(|s| set(s, id), window, cx) }
-            }, cx)
+            // The plans share the searchable picker (latest, then legacy models).
+            self.plan_model_picker(setup, enabled, cx)
         };
         let testing = matches!(setup.answer.test, Some(Test::Running));
         let test = div().id("setup-test").w(px(76.0)).h(px(32.0)).flex_none().flex().items_center().justify_center().gap(px(6.0)).rounded(px(8.0))

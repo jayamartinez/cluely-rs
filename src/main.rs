@@ -39,11 +39,12 @@ fn main() {
             Err(error) => { eprintln!("global shortcuts unavailable: {error}"); cx.quit(); return; }
         };
         let display = cx.primary_display();
-        // As wide as Settings › Window › Card width makes it, centred.
         let store = cluely_rs::settings::Store::load();
+        // As wide as Settings › Window › Card width makes it, centred.
         let width = px(store.value.card_width.window());
-        // Windows: on first run the overlay waits, hidden, until setup is finished or skipped.
-        let show = !(cfg!(windows) && store.setup_needed());
+        // On first run the overlay waits, hidden, until setup is finished or skipped (Windows), or
+        // until the macOS first-run setup finishes.
+        let show = !(cfg!(windows) && store.setup_needed()) && !store.onboarding_pending();
         let origin = display.as_ref().map(|display| {
             let bounds = display.bounds();
             point(bounds.origin.x + (bounds.size.width - width) / 2.0, bounds.origin.y + px(24.0))

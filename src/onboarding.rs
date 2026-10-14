@@ -100,6 +100,7 @@ impl Overlay {
             launch_at_login: platform::launch_at_login(), answer: answer::AnswerState::default(), replacing_key: false, audio: None, heard: [false; 2],
             model_search, legacy_open: false, model_face: Default::default(), viewport: Cell::new(px(642.0)) });
         self.find_clis(window, cx);
+        self.show_model_example(cx);
         let overlay = cx.weak_entity();
         // Deferred: the window reads the overlay while it draws, and the overlay is being updated now.
         cx.defer(move |cx| {
@@ -135,6 +136,7 @@ impl Overlay {
             }
         }
         self.key_input.update(cx, |input, cx| input.clear(cx));
+        self.model_input.update(cx, |input, cx| input.set_placeholder(overlay::MODEL_PLACEHOLDER, cx));
         self.key_notice = None;
         self.show();
         cx.notify();

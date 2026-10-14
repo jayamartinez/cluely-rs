@@ -203,10 +203,10 @@ impl Overlay {
             match default { Some(name) => format!("Default · {name}"), None if self.devices_loading => "Finding devices…".into(), None => "Default".into() }
         };
         let mic = self.source_card(setup, Source::Me, s.listen_mic, self.setup_dropdown(setup, Menu::Mic, value(&s.mic_device, devices.default_microphone.as_ref()),
-            options(&devices.microphones, devices.default_microphone.as_ref()), &s.mic_device, 36.0,
+            options(&devices.microphones, devices.default_microphone.as_ref()), None, &s.mic_device, 36.0,
             |this, name, window, cx| this.change_audio(|s| s.mic_device = name, window, cx), cx), cx);
         let desktop = self.source_card(setup, Source::Them, s.listen_desktop, self.setup_dropdown(setup, Menu::Desktop, value(&s.desktop_device, devices.default_playback.as_ref()),
-            options(&devices.playback, devices.default_playback.as_ref()), &s.desktop_device, 36.0,
+            options(&devices.playback, devices.default_playback.as_ref()), None, &s.desktop_device, 36.0,
             |this, name, window, cx| this.change_audio(|s| s.desktop_device = name, window, cx), cx), cx);
         let mut page = page().child(heading("Check what it hears", "Say something, and play a video.")).child(mic).child(desktop);
         if let Some(error) = setup.audio.as_ref().and_then(|check| check.error.clone()) {

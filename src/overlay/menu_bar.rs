@@ -1,7 +1,7 @@
 //! CluelyRS's own menu, from the menu bar icon on macOS and the tray icon on Windows, laid out like
 //! the Paper artboards "macOS · Menu bar icon, open while Live is on" and "Tray v2 · Windows · 2
 //! Right-click menu": what Live is doing, the overlay, Live, the modes, Settings and Sessions, the
-//! icon itself (and the Dock on macOS), updates and Quit. macOS draws it with AppKit
+//! icon itself (and the Dock and setup on macOS), updates and Quit. macOS draws it with AppKit
 //! (`platform::StatusMenu`), Windows in popups of the overlay's own (`tray_menu`); this decides what
 //! it holds and carries out what is chosen. Chosen items reach the overlay through a channel, as the
 //! global shortcuts do (`hotkeys`).
@@ -30,7 +30,10 @@ pub(super) enum Command {
     ToggleOverlay, ToggleLive, Mode(String), EditModes, Settings, Sessions,
     #[cfg(target_os = "macos")]
     ToggleDock,
-    HideIcon, CheckForUpdates, Quit,
+    HideIcon, CheckForUpdates,
+    #[cfg(target_os = "macos")]
+    RunSetup,
+    Quit,
 }
 
 pub(super) type Entry = MenuEntry<Command>;
@@ -200,6 +203,9 @@ impl Overlay {
             #[cfg(windows)]
             Command::HideIcon => self.ask_hide_tray_icon(None, cx),
             Command::CheckForUpdates => self.check_for_updates_from_menu(window, cx),
+            // Disabled while Live is on, as Settings › About's button is; Live may have started since the menu opened.
+            #[cfg(target_os = "macos")]
+            Command::RunSetup => if self.live_since.is_none() { self.open_onboarding(window, cx) },
             // `on_app_quit` stops Live first.
             #[cfg(target_os = "macos")]
             Command::Quit => cx.quit(),
@@ -239,7 +245,8 @@ fn mode_sections(store: &ModeStore) -> Sections {
 /// macOS menus capitalise each word of an item; Windows only the first ("Show overlay").
 fn title(macos: &'static str, windows: &'static str) -> &'static str { if cfg!(target_os = "macos") { macos } else { windows } }
 
-/// The menu, top to bottom. "Run Setup Again…" will be one more item after Check for Updates….
+/// The menu, top to bottom. On macOS, setup changes what Live uses, so "Run Setup Again…" waits
+/// until Live is off; Windows runs setup again from Settings › About.
 pub(super) fn entries(state: &MenuState, overlay_visible: bool, now: Instant) -> Vec<Entry> {
     let mut overlay = MenuEntry::item(if overlay_visible { title("Hide Overlay", "Hide overlay") } else { title("Show Overlay", "Show overlay") }, Command::ToggleOverlay);
     if let Some(key) = toggle_key() { overlay = overlay.key(key); }
@@ -264,9 +271,10 @@ pub(super) fn entries(state: &MenuState, overlay_visible: bool, now: Instant) ->
         MenuEntry::item(title("Hide Menu Bar Icon…", "Hide tray icon…"), Command::HideIcon),
         MenuEntry::Separator,
         MenuEntry::item(title("Check for Updates…", "Check for updates…"), Command::CheckForUpdates),
-        MenuEntry::Separator,
-        quit,
     ]);
+    #[cfg(target_os = "macos")]
+    entries.push(MenuEntry::item("Run Setup Again…", Command::RunSetup).enabled(state.live_since.is_none()));
+    entries.extend([MenuEntry::Separator, quit]);
     entries
 }
 
@@ -389,10 +397,10 @@ mod tests {
         let now = Instant::now();
         let menu = entries(&state(), false, now);
         assert_eq!(lines(&menu), ["(Live is off)", "—", "Show Overlay", "Start Live", "Mode ▸", "—", "Settings…", "Sessions…", "—", "Show in Dock",
-            "Hide Menu Bar Icon…", "—", "Check for Updates…", "—", "Quit CluelyRS"]);
+            "Hide Menu Bar Icon…", "—", "Check for Updates…", "Run Setup Again…", "—", "Quit CluelyRS"]);
         let command = |title| match find(&menu, title) { MenuEntry::Item { command, .. } => command.clone(), _ => unreachable!() };
-        assert_eq!([command("Show Overlay"), command("Start Live"), command("Settings…"), command("Show in Dock"), command("Hide Menu Bar Icon…"), command("Quit CluelyRS")],
-            [Command::ToggleOverlay, Command::ToggleLive, Command::Settings, Command::ToggleDock, Command::HideIcon, Command::Quit]);
+        assert_eq!([command("Show Overlay"), command("Start Live"), command("Settings…"), command("Show in Dock"), command("Hide Menu Bar Icon…"), command("Run Setup Again…"), command("Quit CluelyRS")],
+            [Command::ToggleOverlay, Command::ToggleLive, Command::Settings, Command::ToggleDock, Command::HideIcon, Command::RunSetup, Command::Quit]);
         let key = |title| match find(&menu, title) { MenuEntry::Item { key, .. } => *key, _ => unreachable!() };
         assert_eq!(key("Settings…"), Some(MenuKey { key: ",", command: true, ..MenuKey::default() }));
         assert_eq!(key("Quit CluelyRS"), Some(MenuKey { key: "q", command: true, ..MenuKey::default() }));
@@ -421,6 +429,8 @@ mod tests {
         let menu = entries(&live, true, now);
         assert_eq!(lines(&menu)[..5], ["(Live · Interview · 12 min)", "—", title("Hide Overlay", "Hide overlay"), "Stop Live", "Mode ▸"]);
         assert!(lines(&menu).contains(&"Sessions… ⌀".to_string()), "no data folder to keep sessions in");
+        #[cfg(target_os = "macos")]
+        assert!(lines(&menu).contains(&"Run Setup Again… ⌀".to_string()), "setup waits until Live is off");
         #[cfg(target_os = "macos")]
         assert!(lines(&entries(&MenuState { show_in_dock: true, ..live }, true, now)).contains(&"✓ Show in Dock".to_string()));
     }

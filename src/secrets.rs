@@ -1,5 +1,6 @@
 //! Provider API keys stored in the OS credential store via `keyring`: the Windows Credential
-//! Manager on Windows, the login Keychain on macOS.
+//! Manager on Windows, the login Keychain on macOS (saved and removed through the Security
+//! framework directly, so each is one Keychain access: `write_store`, `delete_store`).
 //!
 //! Key material is never logged, formatted into errors, or returned except by [`get`].
 //! Every call here can block, and on macOS show a Keychain prompt, so none runs on the UI thread
@@ -26,30 +27,87 @@ pub fn get(provider_id: &str) -> Option<String> {
 /// Stores `key` (trimmed) for `provider_id`, replacing any previous key.
 pub fn set(provider_id: &str, key: &str) -> Result<()> {
     let key = normalize_key(key)?;
-    match entry(provider_id)?.set_password(&key) {
+    validate_provider_id(provider_id)?;
+    match write_store(provider_id, &key) {
         Ok(()) => {
             cache::put(provider_id, Some(key));
             Ok(())
         }
         Err(error) => {
             cache::forget(provider_id);
-            Err(store_error("save", &error))
+            Err(error)
         }
     }
 }
 
 /// Deletes the stored key; succeeds when there was nothing to delete.
 pub fn remove(provider_id: &str) -> Result<()> {
-    match entry(provider_id)?.delete_credential() {
-        Ok(()) | Err(keyring::Error::NoEntry) => {
+    validate_provider_id(provider_id)?;
+    match delete_store(provider_id) {
+        Ok(()) => {
             cache::put(provider_id, None);
             Ok(())
         }
         Err(error) => {
             cache::forget(provider_id);
-            Err(store_error("remove", &error))
+            Err(error)
         }
     }
+}
+
+/// macOS writes with `SecItemAdd`, or `SecItemUpdate` when the key exists, and never reads the old
+/// key first. `keyring` reads it before replacing it, and each of those calls is checked against the
+/// item's access list on its own: a rebuilt (unsigned) CluelyRS isn't on it, so one Save asked for
+/// the login password twice.
+#[cfg(target_os = "macos")]
+fn write_store(provider_id: &str, key: &str) -> Result<()> {
+    security_framework::passwords::set_generic_password(SERVICE, &account(provider_id), key.as_bytes())
+        .map_err(|error| keychain_error("save", error.code()))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn write_store(provider_id: &str, key: &str) -> Result<()> {
+    entry(provider_id)?.set_password(key).map_err(|error| store_error("save", &error))
+}
+
+/// macOS deletes with `SecItemDelete`, by service and account: one access check (one prompt at
+/// most), and the key is never read. `keyring` read it first (a prompt of its own), then deleted it
+/// (another) without checking whether the delete was allowed.
+#[cfg(target_os = "macos")]
+fn delete_store(provider_id: &str) -> Result<()> {
+    deleted(security_framework::passwords::delete_generic_password(SERVICE, &account(provider_id)).map_err(|error| error.code()))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn delete_store(provider_id: &str) -> Result<()> {
+    match entry(provider_id)?.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(error) => Err(store_error("remove", &error)),
+    }
+}
+
+/// A Keychain delete's outcome: nothing stored to delete counts as deleted.
+#[cfg(target_os = "macos")]
+fn deleted(result: std::result::Result<(), i32>) -> Result<()> {
+    match result {
+        Ok(()) | Err(ERR_SEC_ITEM_NOT_FOUND) => Ok(()),
+        Err(status) => Err(keychain_error("remove", status)),
+    }
+}
+
+#[cfg(target_os = "macos")]
+const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
+
+/// A Keychain status as a short fixed message, like `store_error`.
+#[cfg(target_os = "macos")]
+fn keychain_error(action: &str, status: i32) -> anyhow::Error {
+    let reason = match status {
+        // errSecUserCanceled, errSecAuthFailed: the prompt was cancelled, or the password refused.
+        -128 | -25293 => "Keychain access wasn't allowed",
+        ERR_SEC_ITEM_NOT_FOUND => "no key is stored",
+        _ => "the credential store reported an error",
+    };
+    anyhow::anyhow!("Could not {action} the API key: {reason}.")
 }
 
 /// A display-safe hint such as `••••3f9a` for `key`, as it would be stored; `None` for an invalid key.
@@ -280,6 +338,19 @@ mod tests {
         assert_eq!(masked(""), None);
     }
 
+    /// Nothing to delete counts as deleted; a refused or cancelled prompt doesn't, so the key's
+    /// marker stays (it used to report the key removed while it was still stored).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn keychain_deletes_report_refusals_and_accept_missing_keys() {
+        assert!(deleted(Ok(())).is_ok());
+        assert!(deleted(Err(ERR_SEC_ITEM_NOT_FOUND)).is_ok());
+        for refused in [-128, -25293] {
+            assert_eq!(deleted(Err(refused)).unwrap_err().to_string(), "Could not remove the API key: Keychain access wasn't allowed.");
+        }
+        assert_eq!(deleted(Err(-25291)).unwrap_err().to_string(), "Could not remove the API key: the credential store reported an error.");
+    }
+
     #[test]
     fn store_errors_do_not_include_secret_bytes() {
         let error = store_error("save", &keyring::Error::BadEncoding(b"sk-topsecret".to_vec()));
@@ -318,6 +389,11 @@ mod tests {
             assert!(get(PROVIDER).is_some());
         }
         eprintln!("get(): {:?} per read over {READS} reads", started.elapsed() / READS);
+
+        // Replacing updates the stored item in place.
+        let replacement = "sk-dummy-replaced-9876";
+        set(PROVIDER, replacement).unwrap();
+        assert_eq!(read_store(PROVIDER).as_deref(), Some(replacement));
 
         remove(PROVIDER).unwrap();
         assert_eq!(get(PROVIDER), None);
