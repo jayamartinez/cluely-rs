@@ -10,7 +10,7 @@ use gpui::{
 
 use super::about::spinner;
 use super::cli_location::details;
-use super::model_form::text_box;
+use super::model_form::{provider_logo, text_box};
 use super::reveal::tooltip;
 use super::{Picker, button, choice, listen, masked, menu_bar_switch, plan_label, recommended, saved_key_label, switch};
 use crate::archive::Retention;
@@ -38,12 +38,9 @@ mod copy {
     pub const MODEL: (&str, &str) = ("Choose what answers", "A subscription you already have, or your own key.");
     pub const CHATGPT: (&str, &str) = ("ChatGPT subscription", "logos/openai.svg");
     pub const CLAUDE: (&str, &str) = ("Claude subscription", "logos/claude.svg");
-    pub const API_KEY: (&str, &str) = ("Your API key", "+ Ollama, Custom");
+    pub const API_KEY: &str = "Your API key";
+    /// The logos in the option's header; "+ N more" follows for the other providers.
     pub const API_LOGOS: [&str; 4] = ["logos/anthropic.svg", "logos/openai.svg", "logos/googlegemini.svg", "logos/openrouter.svg"];
-    /// The providers offered as chips (preset id, label, logo); the others are in Settings › Model.
-    pub const PRESETS: [(&str, &str, &str); 6] = [("anthropic", "Anthropic", "logos/anthropic.svg"), ("openai", "OpenAI", "logos/openai.svg"),
-        ("gemini", "Gemini", "logos/googlegemini.svg"), ("openrouter", "OpenRouter", "logos/openrouter.svg"), ("ollama", "Ollama", "logos/ollama.svg"),
-        ("custom", "Custom", "icons/server.svg")];
     pub const LOCAL: &str = "Runs on this computer · no key needed";
     pub const SIGNING_IN: (&str, &str) = ("Finish in Terminal", "Waiting for Terminal…");
     pub const CHATGPT_PLAN: &str = "Uses your ChatGPT plan, not an API key";
@@ -262,9 +259,9 @@ fn permission_note(allowed: bool, asked: bool) -> Option<&'static str> {
     match (allowed, asked) { (true, _) => None, (false, true) => Some("after a restart"), (false, false) => Some("not allowed") }
 }
 
-/// An API provider's logo, or a key for one without a chip.
-fn preset_logo(id: &str) -> &'static str {
-    copy::PRESETS.iter().find(|(preset, ..)| *preset == id).map_or("icons/key-round.svg", |(.., logo)| logo)
+/// A provider's name on its chip: short enough for three chips a row.
+fn chip_label(preset: &providers::Preset) -> &'static str {
+    match preset.id { "gemini" => "Gemini", "custom" => "Custom", _ => preset.label.trim_end_matches(" (local)") }
 }
 
 impl Overlay {
@@ -373,10 +370,11 @@ impl Overlay {
         let preset = providers::preset(&s.api_provider);
         let ready = preset.is_some_and(|p| !p.needs_key || s.saved_keys.contains_key(p.id));
         let logos = copy::API_LOGOS.iter().fold(div().flex().items_center().gap(px(9.0)).h(px(16.0)), |strip, logo| strip.child(ui::icon(logo, 13.0, theme::muted())))
-            .child(copy::API_KEY.1);
+            .child(format!("+ {} more", providers::PRESETS.len() - copy::API_LOGOS.len()));
         let mut rows = Vec::new();
         if selected {
-            let chips = copy::PRESETS.iter().fold(div().flex().flex_wrap().gap(px(8.0)).w(px(442.0)), |chips, &(id, label, logo)| {
+            let chips = providers::PRESETS.iter().fold(div().flex().flex_wrap().gap(px(8.0)).w(px(442.0)), |chips, preset| {
+                let (id, label, logo) = (preset.id, chip_label(preset), provider_logo(preset.id));
                 let (chosen, color) = (s.api_provider == id, if s.api_provider == id { theme::text() } else { theme::body() });
                 chips.child(div().id(id).w(px(142.0)).h(px(34.0)).flex().items_center().gap(px(8.0)).px(px(10.0)).rounded(px(8.0)).cursor_pointer().border_1()
                     .bg(if chosen { rgb(SELECTED) } else { theme::field() }).border_color(if chosen { theme::accent() } else { theme::hairline() })
@@ -388,12 +386,12 @@ impl Overlay {
                 if preset.base_url.is_empty() { rows.push(line("icons/link.svg", "Base URL", false).child(text_box(&self.base_url_input, "base-url-box"))); }
                 rows.push(if preset.local { line("icons/key-round.svg", "API key", false).child(text(13.0, theme::muted(), copy::LOCAL)) }
                     else { line("icons/key-round.svg", "API key", true).child(div().flex_1().min_w_0().child(self.key_control(preset, cx))) });
-                rows.push(line("icons/sparkles.svg", "Model", true).child(div().flex_1().min_w_0().child(self.model_control(preset, cx))));
+                rows.push(line("icons/sparkles.svg", "Model", true).child(div().flex_1().min_w_0().child(self.model_control(preset))));
             }
             rows.push(self.test_line(test, setup));
         }
         let badge = if ready { status(Some("icons/check-circle.svg"), "Ready", theme::ok()) } else { status_badge("Not set") };
-        option("provider-api", ui::icon("icons/key-round.svg", 16.0, rgb(TILE_ICON)), copy::API_KEY.0, logos, Some(badge), selected, rows,
+        option("provider-api", ui::icon("icons/key-round.svg", 16.0, rgb(TILE_ICON)), copy::API_KEY, logos, Some(badge), selected, rows,
             pick(cx, |s| s.provider = Provider::ApiKey))
     }
 
@@ -642,7 +640,7 @@ impl Overlay {
         let (name, logo, tint) = match s.provider {
             Provider::Codex => (copy::CHATGPT.0, copy::CHATGPT.1, theme::body()),
             Provider::Claude => (copy::CLAUDE.0, copy::CLAUDE.1, rgb(CLAUDE_ORANGE)),
-            Provider::ApiKey => (providers::preset(&s.api_provider).map_or(copy::API_KEY.0, |preset| preset.label), preset_logo(&s.api_provider), theme::body()),
+            Provider::ApiKey => (providers::preset(&s.api_provider).map_or(copy::API_KEY, |preset| preset.label), provider_logo(&s.api_provider), theme::body()),
         };
         let answers = div().child(ui::icon(logo, 14.0, tint)).child(text(13.0, theme::text(), name)).child(text(12.0, theme::muted(), self.model_choice().value).truncate());
         let (icon, name, state) = match (s.transcribe, s.stt_provider) {
@@ -720,8 +718,8 @@ mod tests {
         assert_eq!(words(&Settings::default()), ["Hidden", "Screenshots", "30 days"]);
         let changed = Settings { hide_from_capture: false, screen_on_send: false, save_sessions: false, ..Settings::default() };
         assert_eq!(words(&changed), ["Visible when sharing", "No screenshots", "Not saved"]);
-        assert_eq!(preset_logo("gemini"), "logos/googlegemini.svg");
-        assert_eq!(preset_logo("xai"), "icons/key-round.svg", "providers without a chip");
+        let labels: Vec<&str> = providers::PRESETS.iter().map(chip_label).collect();
+        assert_eq!(labels, ["Anthropic", "OpenAI", "OpenRouter", "Gemini", "xAI Grok", "Groq", "DeepSeek", "Mistral", "Together AI", "Ollama", "LM Studio", "Custom"]);
     }
 
     #[test]

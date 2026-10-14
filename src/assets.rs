@@ -85,7 +85,7 @@ const ICONS: &[(&str, &[u8])] = &[
     ("icons/move.svg", include_bytes!("../assets/icons/move.svg")),
     ("icons/chevrons-up-down.svg", include_bytes!("../assets/icons/chevrons-up-down.svg")),
     ("icons/shield.svg", include_bytes!("../assets/icons/shield.svg")),
-    // Setup (`onboarding_window`): provider and service logos, the app tile.
+    // Setup and Settings › Model (macOS): provider and service logos, the app tile.
     ("logos/anthropic.svg", include_bytes!("../assets/logos/anthropic.svg")),
     ("logos/claude.svg", include_bytes!("../assets/logos/claude.svg")),
     ("logos/deepgram.svg", include_bytes!("../assets/logos/deepgram.svg")),
@@ -93,6 +93,12 @@ const ICONS: &[(&str, &[u8])] = &[
     ("logos/ollama.svg", include_bytes!("../assets/logos/ollama.svg")),
     ("logos/openai.svg", include_bytes!("../assets/logos/openai.svg")),
     ("logos/openrouter.svg", include_bytes!("../assets/logos/openrouter.svg")),
+    ("logos/xai.svg", include_bytes!("../assets/logos/xai.svg")),
+    ("logos/groq.svg", include_bytes!("../assets/logos/groq.svg")),
+    ("logos/deepseek.svg", include_bytes!("../assets/logos/deepseek.svg")),
+    ("logos/mistral.svg", include_bytes!("../assets/logos/mistral.svg")),
+    ("logos/together.svg", include_bytes!("../assets/logos/together.svg")),
+    ("logos/lmstudio.svg", include_bytes!("../assets/logos/lmstudio.svg")),
     ("app-icon/app-icon.svg", include_bytes!("../assets/app-icon/app-icon.svg")),
 ];
 

@@ -105,9 +105,18 @@ pub fn panel_header() -> Div {
 
 /// A dropdown's closed face: the current value and a chevron. Pair with [`menu`] while open.
 pub fn picker(id: impl Into<ElementId>, value: impl Into<SharedString>, open: bool) -> gpui::Stateful<Div> {
+    picker_with_icon(id, None, value, open)
+}
+
+/// `picker` with an icon (a provider's logo) before the value.
+pub fn picker_with_icon(id: impl Into<ElementId>, icon_path: Option<&'static str>, value: impl Into<SharedString>, open: bool) -> gpui::Stateful<Div> {
+    let value = div().min_w_0().text_size(px(13.0)).text_color(theme::text()).text_ellipsis().child(value.into());
     div().id(id).flex().items_center().justify_between().gap(px(8.0)).h(px(36.0)).px(px(12.0)).rounded(px(9.0)).cursor_pointer()
         .bg(theme::field()).border_1().border_color(if open { theme::accent() } else { theme::hairline() })
-        .child(div().min_w_0().text_size(px(13.0)).text_color(theme::text()).text_ellipsis().child(value.into()))
+        .child(match icon_path {
+            Some(path) => div().flex().items_center().gap(px(8.0)).min_w_0().child(icon(path, 14.0, theme::text())).child(value),
+            None => value,
+        })
         .child(chevron(open))
 }
 
@@ -123,9 +132,20 @@ pub fn menu() -> Div {
 }
 
 pub fn menu_item(id: impl Into<ElementId>, label: impl Into<SharedString>, selected: bool) -> gpui::Stateful<Div> {
+    menu_item_with_icon(id, None, label, selected)
+}
+
+/// `menu_item` with an icon (a provider's logo) before the label, in the label's colour.
+pub fn menu_item_with_icon(id: impl Into<ElementId>, icon_path: Option<&'static str>, label: impl Into<SharedString>, selected: bool) -> gpui::Stateful<Div> {
+    let color = if selected { theme::text() } else { theme::body() };
+    let label = div().truncate().child(label.into());
+    let label = match icon_path {
+        Some(path) => div().flex().items_center().gap(px(9.0)).min_w_0().child(icon(path, 14.0, color)).child(label),
+        None => label,
+    };
     let row = div().id(id).flex().items_center().justify_between().gap(px(8.0)).px(px(10.0)).py(px(7.0)).rounded(px(7.0)).cursor_pointer()
         .text_size(px(13.0)).hover(|row| row.bg(rgb(0x26292d)))
-        .child(div().truncate().child(label.into()));
+        .child(label);
     if selected { row.bg(rgb(0x26292d)).text_color(theme::text()).child(div().text_color(theme::accent()).font_weight(FontWeight::BOLD).child("✓")) }
     else { row.text_color(theme::body()) }
 }

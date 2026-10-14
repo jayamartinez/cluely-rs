@@ -39,8 +39,9 @@ const fn local(id: &'static str, label: &'static str, base_url: &'static str) ->
     Preset { id, label, wire: Wire::OpenAiCompatible, base_url, needs_key: false, local: true, key_page: "", suggested_models: &[] }
 }
 
-/// Built-in providers. Model IDs are only listed where verified against official docs (2026-10-05);
-/// otherwise the UI offers "Load models" via [`list_models`].
+/// Built-in providers. Model IDs are only listed where verified against official docs (2026-10-05).
+/// macOS has the model typed and shows the first as an example; Windows suggests them until "Load
+/// models" fetches the list via [`list_models`].
 pub const PRESETS: &[Preset] = &[
     remote("anthropic", "Anthropic", Wire::Anthropic, "https://api.anthropic.com/v1", "https://platform.claude.com/settings/keys",
         &["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-4-5"]),
