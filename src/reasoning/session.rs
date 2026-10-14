@@ -138,7 +138,7 @@ impl ReasoningSession {
     fn prepare(&self, settings: &Settings, thread: &Slot<CodexThread>, claude: &Slot<Spare>, fresh: bool) {
         if settings.provider == Provider::Claude {
             let (claude, system) = (claude.clone(), answer::system(settings));
-            let (model, effort) = (settings.claude_model.id().to_string(), Effort::from_smart_mode(settings.smart_mode));
+            let (model, effort) = (settings.claude_model_arg().to_string(), Effort::from_smart_mode(settings.smart_mode));
             let _ = std::thread::Builder::new().name("cluelyrs-answer-prewarm".into()).spawn(move || {
                 if let Err(error) = ClaudeCli::prepare(&mut lock(&claude), &system, Some(&model), effort) { eprintln!("answer prewarm skipped: {error}"); }
             });

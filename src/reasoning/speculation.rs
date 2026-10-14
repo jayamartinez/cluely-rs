@@ -200,7 +200,7 @@ pub fn context_key(lines: &[Line], utterance: Option<UtteranceId>, action: &str,
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     for line in lines { (line.source == Source::Them, line.at_ms, line.text.trim()).hash(&mut hasher); }
     (utterance, action, exchanges).hash(&mut hasher);
-    (format!("{:?}", settings.provider), &settings.codex_model, settings.claude_model.id(), &settings.api_provider, settings.api_model(),
+    (format!("{:?}", settings.provider), &settings.codex_model, settings.claude_model_arg(), &settings.api_provider, settings.api_model(),
         settings.smart_mode, format!("{:?}", settings.answer_style), settings.screen_on_send).hash(&mut hasher);
     hasher.finish()
 }

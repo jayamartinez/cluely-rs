@@ -7,13 +7,17 @@
 
 mod answer;
 mod hearing;
+mod model_picker;
 mod steps;
 
+use std::cell::Cell;
+
 use gpui::{
-    App, AppContext, Bounds, Context, Div, Entity, FontWeight, MouseButton, ParentElement, Render, Styled, Subscription, TitlebarOptions,
+    App, AppContext, Bounds, Context, Div, Entity, FontWeight, MouseButton, ParentElement, Pixels, Render, Styled, Subscription, TitlebarOptions,
     Window, WindowBounds, WindowHandle, WindowKind, WindowOptions, div, prelude::*, px, rgb, size,
 };
 
+use crate::input::{InputEvent, TextInput};
 use crate::overlay::{self, Overlay};
 use crate::platform::{self, NativeWindow};
 use crate::settings_view::listen;
@@ -65,6 +69,12 @@ pub(crate) struct Setup {
     audio: Option<hearing::AudioCheck>,
     /// What Audio check has heard (microphone, desktop audio), for the Done step.
     heard: [bool; 2],
+    /// The plan model picker's search field, whether it shows the legacy models, where its face was
+    /// last drawn and how tall the window is (it opens upward when there's more room there).
+    model_search: Entity<TextInput>,
+    legacy_open: bool,
+    model_face: model_picker::FaceBounds,
+    viewport: Cell<Pixels>,
 }
 
 impl Overlay {
@@ -81,8 +91,14 @@ impl Overlay {
         self.hide();
         self.refresh_subscriptions(window, cx);
         if self.raise_setup(cx) { return; }
+        let model_search = cx.new(|cx| TextInput::new("Search models", cx));
+        cx.subscribe_in(&model_search, window, |this, _, event, window, cx| match event {
+            InputEvent::Changed => cx.notify(),
+            InputEvent::Submit => this.pick_first_plan_model(window, cx),
+        }).detach();
         self.setup = Some(Setup { window: None, step: Step::Welcome, furthest: Step::Welcome, tried_assist: false, menu: None,
-            launch_at_login: platform::launch_at_login(), answer: answer::AnswerState::default(), replacing_key: false, audio: None, heard: [false; 2] });
+            launch_at_login: platform::launch_at_login(), answer: answer::AnswerState::default(), replacing_key: false, audio: None, heard: [false; 2],
+            model_search, legacy_open: false, model_face: Default::default(), viewport: Cell::new(px(642.0)) });
         self.find_clis(window, cx);
         let overlay = cx.weak_entity();
         // Deferred: the window reads the overlay while it draws, and the overlay is being updated now.
@@ -255,7 +271,11 @@ impl SetupWindow {
 impl Render for SetupWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.apply_capture(cx);
-        let page = self.overlay.update(cx, |overlay, cx| overlay.setup_page(cx));
+        let height = window.viewport_size().height;
+        let page = self.overlay.update(cx, |overlay, cx| {
+            if let Some(setup) = &overlay.setup { setup.viewport.set(height); }
+            overlay.setup_page(cx)
+        });
         div().size_full().flex().flex_col().bg(rgb(0x0f1012)).font_family(theme::FONT).text_color(theme::text())
             .child(crate::sessions_window::title_bar("Set up CluelyRS", window))
             .child(div().flex_1().min_h_0().flex().child(page))

@@ -41,6 +41,9 @@ pub enum SttProvider { #[default] Parakeet, Deepgram }
 pub struct Settings {
     pub provider: Provider,
     pub claude_model: ClaudeModel,
+    /// A Claude model chosen by its id instead of an alias (Fable, or a legacy version from the
+    /// model picker); empty uses `claude_model`.
+    pub claude_model_id: String,
     /// The model id Claude Code last reported for each alias ("opus" → "claude-opus-5-5"), so the
     /// pickers can show real version numbers before this run's first answer.
     pub claude_models: BTreeMap<String, String>,
@@ -120,7 +123,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            provider: Provider::default(), claude_model: ClaudeModel::default(), claude_models: BTreeMap::new(), codex_model: String::new(),
+            provider: Provider::default(), claude_model: ClaudeModel::default(), claude_model_id: String::new(), claude_models: BTreeMap::new(), codex_model: String::new(),
             codex_path: String::new(), claude_path: String::new(),
             api_provider: "anthropic".into(), api_models: BTreeMap::new(), custom_base_url: String::new(), saved_keys: BTreeMap::new(),
             answer_style: AnswerStyle::default(), smart_mode: false, speculative_answers: false, auto_answer: false, transcribe: true, stt_provider: SttProvider::default(),
@@ -162,6 +165,9 @@ impl Settings {
 
     /// Model for the selected API provider; empty until the user picks one.
     pub fn api_model(&self) -> &str { self.api_models.get(&self.api_provider).map(String::as_str).unwrap_or("") }
+
+    /// What `claude --model` gets: the chosen id, or else the alias.
+    pub fn claude_model_arg(&self) -> &str { if self.claude_model_id.is_empty() { self.claude_model.id() } else { &self.claude_model_id } }
 
     /// The sources Live captures.
     pub fn sources(&self) -> Vec<Source> {

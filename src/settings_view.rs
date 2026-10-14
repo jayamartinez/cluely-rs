@@ -199,7 +199,7 @@ fn key_eye(input: &gpui::Entity<crate::input::TextInput>, cx: &App) -> impl Into
 }
 
 /// GPT version of a Codex model id: "gpt-6.1-sol" → (6, 1), "gpt-6-luna" → (6, 0); `None` for other shapes.
-fn gpt_version(id: &str) -> Option<(u32, u32)> {
+pub(crate) fn gpt_version(id: &str) -> Option<(u32, u32)> {
     let version = id.to_ascii_lowercase().strip_prefix("gpt-")?.split('-').next()?.to_string();
     let mut parts = version.split('.');
     let major = parts.next()?.parse().ok()?;
@@ -445,12 +445,16 @@ impl Overlay {
             Provider::Claude => {
                 let models = [(ClaudeModel::Sonnet, "Sonnet"), (ClaudeModel::Opus, "Opus"), (ClaudeModel::Haiku, "Haiku")];
                 // The version each alias resolves to, once Claude Code has reported it.
-                let label = |model: ClaudeModel, alias_label: &str| s.claude_models.get(model.id())
-                    .map(|id| crate::claude_cli::model_label(id)).unwrap_or_else(|| alias_label.to_string());
-                let value = models.iter().find(|(m, _)| *m == s.claude_model).map(|(m, l)| label(*m, l)).unwrap_or_else(|| "Sonnet".into());
+                let label = |model: ClaudeModel, _: &str| crate::claude_cli::alias_label(model.id(), &s.claude_models);
+                // A model chosen by id (setup's model picker) shows by its own name.
+                let value = if !s.claude_model_id.is_empty() { crate::claude_cli::model_label(&s.claude_model_id) }
+                    else { models.iter().find(|(m, _)| *m == s.claude_model).map(|(m, l)| label(*m, l)).unwrap_or_else(|| "Sonnet".into()) };
                 ModelChoice { picker: Picker::ClaudeModel, value, options: models.iter().map(|(m, l)| (m.id().to_string(), label(*m, l))).collect(),
-                    selected: s.claude_model.id().to_string(),
-                    set: |s, v| s.claude_model = match v.as_str() { "opus" => ClaudeModel::Opus, "haiku" => ClaudeModel::Haiku, _ => ClaudeModel::Sonnet } }
+                    selected: s.claude_model_arg().to_string(),
+                    set: |s, v| {
+                        s.claude_model = match v.as_str() { "opus" => ClaudeModel::Opus, "haiku" => ClaudeModel::Haiku, _ => ClaudeModel::Sonnet };
+                        s.claude_model_id.clear();
+                    } }
             }
             Provider::ApiKey => {
                 let suggestions: Vec<String> = match crate::providers::preset(&s.api_provider) {

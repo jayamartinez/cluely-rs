@@ -148,7 +148,7 @@ pub fn target(settings: &Settings, codex: &Arc<CodexClient>, system: String, mes
             let model = Some(settings.codex_model.trim().to_string()).filter(|m| !m.is_empty());
             Ok(Target::Codex(ChatRequest { system, messages, model, effort }, codex.clone()))
         }
-        Provider::Claude => Ok(Target::Claude(ChatRequest { system, messages, model: Some(settings.claude_model.id().to_string()), effort })),
+        Provider::Claude => Ok(Target::Claude(ChatRequest { system, messages, model: Some(settings.claude_model_arg().to_string()), effort })),
         Provider::ApiKey => {
             let preset = providers::preset(&settings.api_provider).ok_or("Choose an API provider in Settings → Model.")?;
             let base_url = if preset.base_url.is_empty() { settings.custom_base_url.trim().to_string() } else { preset.base_url.to_string() };
