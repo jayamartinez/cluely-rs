@@ -243,6 +243,13 @@ pub fn list_models(wire: Wire, base_url: &str, api_key: Option<&str>) -> Result<
     parse_model_list(&text)
 }
 
+/// The HTTP status of `GET url` with one auth header, for checking a key (`key_check`).
+#[cfg(target_os = "macos")]
+pub(crate) fn get_status(url: &str, (name, value): (&str, &str)) -> Result<u16, ProviderError> {
+    let response = agent(MODELS_TIMEOUT).get(url).header(name, value).call().map_err(|error| transport_error(&error))?;
+    Ok(response.status().as_u16())
+}
+
 // ---------------------------------------------------------------------------------------------
 // URL validation and HTTP plumbing
 

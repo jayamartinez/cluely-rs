@@ -1070,18 +1070,25 @@ impl Overlay {
     }
 
     /// Save the typed key for the tab's provider, then mark it saved (with its masked hint) in
-    /// Settings. The credential store is used on a background thread: it can block, and on macOS
-    /// show a Keychain prompt.
+    /// Settings. On macOS the provider checks the key first (`key_check`). The network and the
+    /// credential store are used on a background thread: they can block, and the Keychain can prompt.
     pub fn save_key(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let key = self.key_input.read(cx).text().trim().to_string();
         if key.is_empty() { return; }
         let provider = self.key_target();
-        self.key_notice = Some("Saving…".into());
+        self.key_notice = Some(if cfg!(target_os = "macos") { "Checking the key…" } else { "Saving…" }.into());
         cx.notify();
         let target = provider.clone();
+        #[cfg(target_os = "macos")]
+        let base_url = self.store.value.custom_base_url.clone();
         cx.spawn_in(window, async move |this, cx| {
-            let saved = cx.background_executor()
-                .spawn(async move { crate::secrets::set(&target, &key).map(|()| crate::secrets::masked(&key).unwrap_or_default()) }).await;
+            let saved = cx.background_executor().spawn(async move {
+                // macOS asks the provider first, so a key it turns down never reaches the Keychain.
+                #[cfg(target_os = "macos")]
+                if let crate::key_check::Verdict::Refuse(reason) = crate::key_check::check(&target, &key, &base_url) { return Err(reason); }
+                crate::secrets::set(&target, &key).map(|()| crate::secrets::masked(&key).unwrap_or_default())
+                    .map_err(|error| format!("Couldn't save the key: {error}"))
+            }).await;
             let _ = this.update_in(cx, |this, window, cx| {
                 match saved {
                     Ok(hint) => {
@@ -1091,7 +1098,7 @@ impl Overlay {
                         #[cfg(target_os = "macos")]
                         this.key_saved(&provider, window, cx);
                     }
-                    Err(error) => this.key_notice = Some(format!("Couldn't save the key: {error}").into()),
+                    Err(notice) => this.key_notice = Some(notice.into()),
                 }
                 // Only macOS loads models from here.
                 #[cfg(not(target_os = "macos"))]
