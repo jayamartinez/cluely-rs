@@ -110,7 +110,7 @@ impl Overlay {
             let left = match align { Align::Centre => bounds.center().x - px(TOOLTIP_WIDTH / 2.0), Align::Start => bounds.left() };
             hits.reserve(Bounds::new(point(left, bounds.top() + px(top)), size(px(TOOLTIP_WIDTH), px(POINTER.1 + TOOLTIP_HEIGHT))));
         }, |_, _, _, _| {}).absolute().top_0().left_0().size_full();
-        let pointer = gpui::svg().path("icons/tooltip-pointer-up.svg").w(px(POINTER.0)).h(px(POINTER.1)).flex_none().text_color(theme::keycap_border());
+        let pointer = pointer();
         let hung = match align {
             Align::Centre => div().absolute().top(px(top)).left(px((height - TOOLTIP_WIDTH) / 2.0)).w(px(TOOLTIP_WIDTH)).flex().flex_col().items_center()
                 .child(pointer).child(tip),
@@ -121,6 +121,15 @@ impl Overlay {
         };
         control.child(reserve).child(deferred(hung))
     }
+}
+
+/// A tooltip's pointer: in the border's colour, with (on macOS) the tooltip's fill inside it, so it
+/// reads as part of the box.
+fn pointer() -> Div {
+    let outer = gpui::svg().path("icons/tooltip-pointer-up.svg").w(px(POINTER.0)).h(px(POINTER.1)).flex_none().text_color(theme::keycap_border());
+    let inner = gpui::svg().path("icons/tooltip-pointer-up.svg").w(px(POINTER.0 - 3.0)).h(px(POINTER.1 - 1.5)).text_color(theme::pressed());
+    div().relative().w(px(POINTER.0)).h(px(POINTER.1)).flex_none().child(outer)
+        .when(cfg!(target_os = "macos"), |pointer| pointer.child(div().absolute().left(px(1.5)).top(px(1.5)).child(inner)))
 }
 
 /// Toolbar icon buttons are this square.

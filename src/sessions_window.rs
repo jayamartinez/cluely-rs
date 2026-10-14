@@ -52,8 +52,10 @@ pub fn open(existing: &mut Option<WindowHandle<SessionsWindow>>, root: PathBuf, 
     }
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(1280.0), px(800.0)), cx))),
-        // The frame is drawn by the window itself (title bar with its own controls).
-        titlebar: Some(TitlebarOptions { title: Some("Sessions".into()), appears_transparent: true, traffic_light_position: None }),
+        // The frame is drawn by the window itself: a title bar with its own controls on Windows, and
+        // around the system's traffic lights (centred in it) on macOS.
+        titlebar: Some(TitlebarOptions { title: Some("Sessions".into()), appears_transparent: true,
+            traffic_light_position: cfg!(target_os = "macos").then(|| gpui::point(px(14.0), px(11.0))) }),
         kind: WindowKind::Normal,
         focus,
         show: true,
@@ -283,7 +285,7 @@ impl SessionsWindow {
                 .child(div().text_size(px(12.0)).text_color(theme::muted()).child(meta.join(" · "))));
         }
         if self.listings.is_empty() {
-            list = list.child(div().p(px(12.0)).text_size(px(13.0)).text_color(theme::muted()).child("No saved sessions yet. Press Start in the overlay to record one."));
+            list = list.child(div().p(px(12.0)).text_size(px(13.0)).text_color(theme::muted()).child("No saved sessions yet. Turn on Live in the overlay to record one."));
         }
         div().w(px(300.0)).flex_none().h_full().flex().flex_col().bg(rgb(0x131417)).border_r_1().border_color(theme::divider())
             .child(div().flex().items_center().gap(px(10.0)).px(px(18.0)).pt(px(18.0)).pb(px(14.0))
@@ -296,7 +298,7 @@ impl SessionsWindow {
                 .child(self.search.clone()))
             .child(list)
             .child(div().flex().items_center().justify_between().px(px(18.0)).py(px(14.0)).border_t_1().border_color(theme::divider())
-                .child(div().text_size(px(12.0)).text_color(theme::muted()).child("Saved on this PC")))
+                .child(div().text_size(px(12.0)).text_color(theme::muted()).child(if cfg!(target_os = "macos") { "Saved on this Mac" } else { "Saved on this PC" })))
     }
 
     fn header(&self, session: &Session, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -560,7 +562,18 @@ impl Render for SessionsWindow {
     }
 }
 
+/// Drag area with the app mark, the window's name and its own minimize / maximize / close. macOS
+/// keeps its own traffic lights at the left and centres the name, as its windows do.
+#[cfg(target_os = "macos")]
+pub(crate) fn title_bar(title: &'static str, _window: &Window) -> impl IntoElement {
+    div().id("title-bar").flex_none().h(px(36.0)).flex().items_center().justify_center().gap(px(8.0))
+        .bg(rgb(0x131417)).border_b_1().border_color(theme::divider())
+        .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())
+        .child(div().text_size(px(13.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::body()).child(title))
+}
+
 /// Drag area with the app mark, the window's name and its own minimize / maximize / close.
+#[cfg(not(target_os = "macos"))]
 pub(crate) fn title_bar(title: &'static str, window: &Window) -> impl IntoElement {
     let control = |id: &'static str, icon: &'static str, danger: bool| {
         div().id(id).w(px(46.0)).h(px(36.0)).flex().items_center().justify_center().cursor_pointer()
@@ -583,13 +596,6 @@ pub(crate) fn title_bar(title: &'static str, window: &Window) -> impl IntoElemen
         minimize.window_control_area(gpui::WindowControlArea::Min),
         maximize.window_control_area(gpui::WindowControlArea::Max),
         close.window_control_area(gpui::WindowControlArea::Close),
-    );
-    #[cfg(not(target_os = "windows"))]
-    let (drag, minimize, maximize, close) = (
-        drag.on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move()),
-        minimize.on_mouse_down(MouseButton::Left, |_, window, cx| { cx.stop_propagation(); window.minimize_window(); }),
-        maximize.on_mouse_down(MouseButton::Left, |_, window, cx| { cx.stop_propagation(); window.zoom_window(); }),
-        close.on_mouse_down(MouseButton::Left, |_, window, cx| { cx.stop_propagation(); window.remove_window(); }),
     );
     div().id("title-bar").flex_none().h(px(36.0)).flex().items_center()
         .bg(rgb(0x131417)).border_b_1().border_color(theme::divider())

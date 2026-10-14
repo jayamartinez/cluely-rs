@@ -14,9 +14,11 @@ use crate::settings_view::Tab;
 use crate::toggles::{self, Align, Tip, Toggle};
 use crate::{theme, ui};
 
-/// The text box row and the toolbar.
+/// The text box row and the toolbar (44 px on macOS, as its artboards draw it).
 pub(super) const INPUT_ROW_HEIGHT: f32 = 48.0;
-pub(super) const TOOLBAR_HEIGHT: f32 = 48.0;
+pub(super) const TOOLBAR_HEIGHT: f32 = if MAC { 44.0 } else { 48.0 };
+/// Where the macOS artboards (p-6-0) differ from the Windows ones in small ways.
+pub(super) const MAC: bool = cfg!(target_os = "macos");
 /// The toolbar's left (viewfinder, mode chip) and right (Sessions) groups, so the middle group is
 /// centred on the card.
 const TOOLBAR_SIDE: f32 = 190.0;
@@ -61,7 +63,8 @@ impl Overlay {
     fn input_row(&self, below: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let ready = !self.composer.read(cx).text().is_empty();
         let send = div().id("send").size(px(28.0)).flex_none().rounded(px(theme::radius::BUTTON)).flex().items_center().justify_center().cursor_pointer()
-            .border_1().border_color(if ready { theme::accent() } else { theme::keycap_border() }).bg(if ready { theme::accent() } else { theme::pressed() })
+            .border_1().border_color(if ready { theme::accent() } else if MAC { theme::pressed() } else { theme::keycap_border() })
+            .bg(if ready { theme::accent() } else { theme::pressed() })
             .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| { let input = this.composer.clone(); this.send_composer(input, window, cx); }))
             .child(ui::icon("icons/return.svg", 14.0, if ready { theme::accent_ink() } else { theme::body() }));
         // The card's top row, unless the update notice or the conversation is above it.
@@ -96,7 +99,9 @@ impl Overlay {
         let icon_button = |id: &'static str| div().id(id).flex().flex_none().items_center().justify_center().h(px(toggles::BUTTON))
             .rounded(px(theme::radius::ICON_BUTTON)).cursor_pointer();
         // The viewfinder is the brand mark and opens Settings; hovering says so, since the mark alone doesn't.
-        let logo = icon_button("settings").relative().w(px(toggles::BUTTON)).bg(theme::raised()).border_1().border_color(theme::hairline())
+        // macOS fills the idle tile a step lighter, as the idle artboard does.
+        let logo = icon_button("settings").relative().w(px(toggles::BUTTON)).bg(if MAC && !live { theme::pressed() } else { theme::raised() })
+            .border_1().border_color(theme::hairline())
             .hover(|button| button.bg(theme::pressed()))
             .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| { cx.stop_propagation(); this.open_settings(Tab::default(), window, cx); }))
             .on_hover(cx.listener(|this, hovered: &bool, _, cx| this.hover_tip(Tip::Settings, *hovered, cx)))
@@ -124,7 +129,8 @@ impl Overlay {
         let sessions = div().id("sessions").flex().flex_none().items_center().gap(px(8.0)).h(px(toggles::BUTTON)).pl(px(6.0)).cursor_pointer()
             .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| { cx.stop_propagation(); this.open_sessions_panel(window, cx); }))
             .child(div().text_size(px(12.0)).line_height(px(16.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::body()).child("Sessions"))
-            .child(div().size(px(22.0)).flex().flex_none().items_center().justify_center().rounded(px(theme::radius::ICON_BUTTON))
+            .child(div().size(px(if MAC { 20.0 } else { 22.0 })).flex().flex_none().items_center().justify_center()
+                .rounded(px(if MAC { theme::radius::CHIP } else { theme::radius::ICON_BUTTON }))
                 .bg(theme::raised()).border_1().border_color(theme::hairline())
                 .child(ui::icon("icons/chevron-down.svg", 12.0, theme::body())));
         // The overlay moves with its shortcuts only (Ctrl Alt arrows, ⌃⌥ arrows on macOS), not by dragging.
