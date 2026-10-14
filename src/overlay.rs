@@ -44,6 +44,9 @@ const SETTINGS_HEIGHT: f32 = 820.0;
 const SIGN_IN_POLL: Duration = Duration::from_secs(2);
 #[cfg(target_os = "macos")]
 const SIGN_IN_WAIT: Duration = Duration::from_secs(300);
+/// Every this many sign-in polls (30 s), Codex is checked fully whatever `codex login status` says.
+#[cfg(target_os = "macos")]
+const CODEX_FULL_CHECK: u32 = 15;
 /// How long Settings takes to collapse into the conversation after a message is sent from under it.
 const COLLAPSE: Duration = Duration::from_millis(200);
 /// Held movement eases in so a tap nudges, then cruises. Pixels per ~16 ms frame.
@@ -780,16 +783,23 @@ impl Overlay {
             }).await;
             let started = Instant::now();
             let mut failed = opened.err();
+            let mut poll = 0;
             loop {
                 if failed.is_none() { cx.background_executor().timer(SIGN_IN_POLL).await; }
                 if this.update(cx, |this, _| this.sign_in_attempt != attempt).unwrap_or(true) { return; }
                 let codex = codex.clone();
-                // A running Codex app-server keeps the signed-out account it read at start, so each
-                // check starts a fresh one; nothing else can use it while signed out.
+                poll += 1;
+                // A running Codex app-server keeps the signed-out account it read at start, so a check
+                // starts a fresh one, but only once `codex login status` stops saying signed out.
+                // `None` is a poll that changed nothing.
                 let status = if failed.is_some() { None } else {
-                    Some(cx.background_executor().spawn(async move {
-                        if provider == Provider::Codex { codex.shutdown(); codex.status() } else { crate::claude_cli::ClaudeCli::status() }
-                    }).await)
+                    cx.background_executor().spawn(async move {
+                        match provider {
+                            Provider::Codex if !codex_restart_due(crate::codex::login_status(), poll) => None,
+                            Provider::Codex => { codex.shutdown(); Some(codex.status()) }
+                            _ => Some(crate::claude_cli::ClaudeCli::status()),
+                        }
+                    }).await
                 };
                 let done = this.update(cx, |this, cx| {
                     if this.sign_in_attempt != attempt { return true; }
@@ -1486,6 +1496,11 @@ fn enclosing<'a>(shapes: impl Iterator<Item = &'a platform::Shape>, radius: i32)
 #[cfg(target_os = "macos")]
 fn in_dock(settings: &Settings, setup_open: bool) -> bool { settings.show_in_dock || setup_open }
 
+/// Whether a Codex sign-in check restarts the app-server to read the account: when `codex login
+/// status` says signed in or can't say, and every `CODEX_FULL_CHECK` polls in case it's wrong.
+#[cfg(target_os = "macos")]
+fn codex_restart_due(reported: Option<bool>, poll: u32) -> bool { reported != Some(false) || poll.is_multiple_of(CODEX_FULL_CHECK) }
+
 /// Whether the overlay and Settings are kept out of screen captures right now.
 pub(crate) fn capture_excluded(settings: &Settings) -> bool {
     // CLUELYRS_ALLOW_CAPTURE=1 is a development switch for taking screenshots of the overlay.
@@ -1517,6 +1532,16 @@ mod tests {
     use super::{Status, Turn, composer_placeholder, enclosing, save_turn};
     use crate::archive::Archive;
     use crate::settings::Settings;
+
+    /// Codex's app-server restarts only once its CLI stops saying signed out, or every 30 s.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_codex_sign_in_restarts_the_app_server_only_when_it_may_have_changed() {
+        assert!(!super::codex_restart_due(Some(false), 1), "still signed out");
+        assert!(super::codex_restart_due(Some(true), 1));
+        assert!(super::codex_restart_due(None, 1), "the CLI can't say: check as before");
+        assert!(super::codex_restart_due(Some(false), super::CODEX_FULL_CHECK), "in case the CLI is wrong");
+    }
 
     /// Setup is in the Dock whatever "Show in Dock" says; its switch decides once setup is over.
     #[cfg(target_os = "macos")]
