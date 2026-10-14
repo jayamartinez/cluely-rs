@@ -141,11 +141,12 @@ Not yet: speculative answers.
 - [parakeet.cpp](https://github.com/mudler/parakeet.cpp) (MIT) and [ggml](https://github.com/ggml-org/ggml) (MIT),
   built from the pinned submodule; see [PATCHES.md](PATCHES.md).
 - Setup's icons and logos in `assets/`: [Lucide](https://lucide.dev) icons (ISC License) in `assets/icons/` (`archive`,
-  `arrow-right`, `circle-user`, `cloud`, `download`, `hourglass`, `key-round`, `laptop-minimal`, `link`, `lock`,
-  `message-square`, `mic-off`, `panel-bottom`, `plug`, `radio`, `send`, `server`, `sparkles`, `terminal`, `zap`); the
-  Anthropic, Claude, Deepgram, Google Gemini, Ollama and OpenRouter logos from [Simple Icons](https://simpleicons.org)
-  (CC0) and the OpenAI logo from [Lobe Icons](https://github.com/lobehub/lobe-icons) (MIT) in `assets/logos/`. The
-  logos are their owners' trademarks, shown only to name the services CluelyRS connects to.
+  `arrow-right`, `chevrons-up-down`, `circle-user`, `cloud`, `download`, `hourglass`, `key-round`, `laptop-minimal`,
+  `link`, `lock`, `message-square`, `mic`, `mic-off`, `monitor`, `move`, `panel-bottom`, `plug`, `radio`, `send`,
+  `server`, `sparkles`, `terminal`, `type`, `volume-2`, `zap`); the Anthropic, Claude, Deepgram, Google Gemini, Ollama
+  and OpenRouter logos from [Simple Icons](https://simpleicons.org) (CC0) and the OpenAI logo from [Lobe
+  Icons](https://github.com/lobehub/lobe-icons) (MIT) in `assets/logos/`. The logos are their owners' trademarks, shown
+  only to name the services CluelyRS connects to.
 - [NVIDIA Parakeet Realtime EOU 120M](https://huggingface.co/nvidia/parakeet_realtime_eou_120m-v1), NVIDIA Open Model
   License. Downloaded at runtime, not distributed with CluelyRS.
 

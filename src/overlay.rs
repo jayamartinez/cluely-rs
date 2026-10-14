@@ -115,6 +115,9 @@ pub struct Overlay {
     /// The overlay is hidden, and Live hasn't started, until the first-run setup finishes.
     #[cfg(target_os = "macos")]
     hidden_for_onboarding: bool,
+    /// When Assist was last pressed as setup's Shortcuts practice. While setup is open, Assist asks nothing.
+    #[cfg(target_os = "macos")]
+    pub(crate) assist_practiced: Option<Instant>,
     /// Where Live sessions are saved; `None` when no data folder is available.
     pub(crate) archive: Option<Archive>,
     /// Receives Esc while settings is open.
@@ -313,6 +316,8 @@ impl Overlay {
             onboarding_window: None,
             #[cfg(target_os = "macos")]
             hidden_for_onboarding: onboarding,
+            #[cfg(target_os = "macos")]
+            assist_practiced: None,
             archive, focus: cx.focus_handle(),
             recorder: None, shape: Rc::default(), hits: Hits::default(), composer, key_input, model_input, base_url_input,
             #[cfg(target_os = "macos")]
@@ -415,12 +420,13 @@ impl Overlay {
     #[cfg(target_os = "macos")]
     fn open_onboarding_at(&mut self, step: crate::settings::OnboardingStep, window: &mut Window, cx: &mut Context<Self>) {
         let step = crate::onboarding_window::shown(step);
+        self.assist_practiced = None;
         self.prepare_onboarding(step, window, cx);
         crate::onboarding_window::open(step, cx);
     }
 
     /// A setup step is opening: save it, so a relaunch resumes there, and refresh what it shows
-    /// (accounts, the speech model), as for a Settings tab. Nothing here reads the Keychain.
+    /// (accounts, the speech model, audio devices), as for a Settings tab. Nothing here reads the Keychain.
     #[cfg(target_os = "macos")]
     pub(crate) fn prepare_onboarding(&mut self, step: crate::settings::OnboardingStep, window: &mut Window, cx: &mut Context<Self>) {
         use crate::settings::OnboardingStep;
@@ -429,7 +435,8 @@ impl Overlay {
         self.key_notice = None;
         match step {
             OnboardingStep::Model => self.prepare_tab(Tab::Model, window, cx),
-            OnboardingStep::Transcription => self.prepare_tab(Tab::Listening, window, cx),
+            // Permissions' audio check uses Listening's device pickers.
+            OnboardingStep::Transcription | OnboardingStep::Permissions => self.prepare_tab(Tab::Listening, window, cx),
             _ => self.prepare_tab(Tab::Window, window, cx),
         }
     }
@@ -451,6 +458,20 @@ impl Overlay {
         if std::mem::take(&mut self.hidden_for_onboarding) && self.store.value.start_live_on_launch && self.live_since.is_none() {
             self.set_live(true, window, cx);
         }
+    }
+
+    /// Assist pressed while setup is open: on the Shortcuts step it is the practice, which flashes the
+    /// keys (`onboarding_window::PRACTICE_FLASH`) and then shows it worked. Nothing is sent, and Live
+    /// doesn't start, whichever step is open.
+    #[cfg(target_os = "macos")]
+    fn practice_assist(&mut self, cx: &mut Context<Self>) {
+        if self.store.value.onboarding_step != Some(crate::settings::OnboardingStep::Shortcuts) { return; }
+        self.assist_practiced = Some(Instant::now());
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(crate::onboarding_window::PRACTICE_FLASH).await;
+            let _ = this.update(cx, |_, cx| cx.notify());
+        }).detach();
     }
 
     /// In the Dock while "Show in Dock" is on, and while setup is open whatever it says (`in_dock`).
@@ -549,6 +570,8 @@ impl Overlay {
                 if self.native.is_some_and(platform::is_visible) { self.close_switcher(window, cx); }
                 self.toggle_visible();
             }
+            #[cfg(target_os = "macos")]
+            Action::Assist if self.onboarding_window.is_some() => self.practice_assist(cx),
             Action::Assist => self.send("Assist", String::new(), window, cx),
             Action::Focus => self.type_shortcut(window, cx),
             Action::SwitchMode => self.switch_mode_shortcut(window, cx),

@@ -78,6 +78,12 @@ const ICONS: &[(&str, &[u8])] = &[
     ("icons/panel-bottom.svg", include_bytes!("../assets/icons/panel-bottom.svg")),
     ("icons/radio.svg", include_bytes!("../assets/icons/radio.svg")),
     ("icons/sparkles.svg", include_bytes!("../assets/icons/sparkles.svg")),
+    ("icons/mic.svg", include_bytes!("../assets/icons/mic.svg")),
+    ("icons/monitor.svg", include_bytes!("../assets/icons/monitor.svg")),
+    ("icons/volume-2.svg", include_bytes!("../assets/icons/volume-2.svg")),
+    ("icons/type.svg", include_bytes!("../assets/icons/type.svg")),
+    ("icons/move.svg", include_bytes!("../assets/icons/move.svg")),
+    ("icons/chevrons-up-down.svg", include_bytes!("../assets/icons/chevrons-up-down.svg")),
     // Setup (`onboarding_window`): provider and service logos, the app tile.
     ("logos/anthropic.svg", include_bytes!("../assets/logos/anthropic.svg")),
     ("logos/claude.svg", include_bytes!("../assets/logos/claude.svg")),

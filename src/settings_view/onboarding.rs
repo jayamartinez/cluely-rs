@@ -11,12 +11,14 @@ use gpui::{
 use super::about::spinner;
 use super::cli_location::details;
 use super::model_form::text_box;
-use super::{button, choice, listen, masked, menu_bar_switch, plan_label, recommended, saved_key_label, switch};
+use super::{Picker, button, choice, listen, masked, menu_bar_switch, plan_label, recommended, saved_key_label, switch};
 use crate::archive::Retention;
+use crate::audio::Source;
 use crate::chat::SubscriptionStatus;
 use crate::hotkeys::Action;
-use crate::onboarding_window::{Nav, OnboardingWindow, TestRun, TestState};
+use crate::onboarding_window::{Meter, MeterState, Nav, OnboardingWindow, PRACTICE_FLASH, PageState, Permissions, TestRun, TestState};
 use crate::overlay::Overlay;
+use crate::platform::{Access, PrivacyPane};
 use crate::settings::{OnboardingStep as Step, Provider, Settings, SttProvider};
 use crate::stt::{deepgram, parakeet};
 use crate::transcript_view::model_size_label;
@@ -52,7 +54,18 @@ mod copy {
     pub const GPU_FELL_BACK: &str = "The GPU couldn't be used, so it runs on the CPU";
     pub const DEEPGRAM: Row = ("logos/deepgram.svg", "Deepgram", "Cloud · needs a key");
     pub const DEEPGRAM_NOTE: &str = "Mic + desktop audio stream to Deepgram while Live is on.";
+    pub const PERMISSIONS: (&str, &str) = ("Let CluelyRS hear and see", "Two macOS permissions, asked once.");
+    pub const MIC: Row = ("icons/mic.svg", "Microphone", "Your side of the call");
+    pub const SCREEN: Row = ("icons/monitor.svg", "Screen Recording", "Screenshots + their audio");
+    pub const MIC_PANE: &str = "Privacy & Security › Microphone";
+    pub const SCREEN_PANE: &str = "Privacy & Security › Screen & System Audio Recording";
+    pub const AUDIO_CHECK: (&str, &str) = ("AUDIO CHECK", "Nothing recorded or sent");
+    pub const DESKTOP: (&str, &str) = ("icons/volume-2.svg", "Desktop audio");
     pub const PRIVACY: (&str, &str) = ("Privacy defaults", "On by default. Change anytime.");
+    pub const SHORTCUTS: (&str, &str) = ("Shortcuts that work anywhere", "Press one from any app.");
+    pub const TAKEN: &str = "Free it in the other app, then reopen CluelyRS.";
+    pub const PRACTICE: (&str, &str) = ("Try it: press Assist", "Practice only — nothing is sent");
+    pub const PRACTICED: (&str, &str) = ("That's Assist", "Use it in a call for an answer");
     pub const HIDE: Row = ("icons/eye-off.svg", "Hide from screen sharing", "Shares and recordings leave the overlay out");
     pub const SCREENSHOT: Row = ("icons/image.svg", "Screenshot with each question", "Lets your model read the screen");
     pub const SAVE_SESSIONS: Row = ("icons/tab-sessions.svg", "Save sessions", "Transcripts and answers");
@@ -71,6 +84,9 @@ const SELECTED: u32 = 0x0d1830;
 const TILE_ICON: u32 = 0xe8e4dc;
 const CLAUDE_ORANGE: u32 = 0xd97757;
 const ERROR: u32 = 0xffb4a8;
+/// A shortcut row another app has taken, and its keys' outline.
+const TAKEN_ROW: u32 = 0x1a1413;
+const TAKEN_EDGE: u32 = 0x6b3a33;
 
 /// A click that changes settings, as picking an option does.
 fn pick(cx: &Context<Overlay>, set: impl Fn(&mut Settings) + Copy + 'static) -> impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static {
@@ -176,7 +192,53 @@ fn keycaps(label: &str) -> Div {
             .border_1().border_b_2().border_color(theme::keycap_border()).text_size(px(12.0)).text_color(rgb(TILE_ICON)).child(key.to_string())))
 }
 
+/// The same keys, marked unusable: another app has the shortcut.
+fn taken_keycaps(label: &str) -> Div {
+    div().px(px(7.0)).h(px(22.0)).flex().items_center().rounded(px(5.0)).border_1().border_color(rgb(TAKEN_EDGE))
+        .text_size(px(12.0)).text_color(rgb(ERROR)).line_through().child(label.to_string())
+}
+
 fn status_badge(label: &'static str) -> Div { status(None, label, theme::muted()) }
+
+fn allowed() -> Div { status(Some("icons/check-circle.svg"), "Allowed", theme::ok()) }
+
+/// A permission's state in words, then what to do about it.
+fn asking(state: &'static str, color: Rgba, action: impl IntoElement) -> Div {
+    div().flex().items_center().gap(px(12.0)).flex_none().child(text(12.0, color, state)).child(action)
+}
+
+/// A line of help under a permission: where it is in System Settings.
+fn hint(words: &'static str) -> Div {
+    div().flex().items_center().gap(px(12.0)).px(px(14.0)).py(px(9.0)).text_size(px(12.0)).text_color(theme::muted()).child(words)
+}
+
+/// Segments in an audio check level meter.
+const METER_SEGMENTS: usize = 16;
+
+/// Setup's shortcuts (icon, title, the actions it covers, what to do while another app has it), in
+/// Settings › Keys' words. Move and Scroll are one row each: the same modifiers with each arrow.
+const SHORTCUTS: [(&str, &str, &[Action], &str); 6] = [
+    ("icons/eye.svg", "Show / hide overlay", &[Action::Toggle], "Meanwhile, use the menu bar icon."),
+    ("icons/sparkles.svg", "Assist", &[Action::Assist], "Meanwhile, use the overlay's send button."),
+    ("icons/type.svg", "Type a question", &[Action::Focus], "Meanwhile, click the overlay's text box."),
+    ("icons/sliders.svg", "Switch mode", &[Action::SwitchMode], "Meanwhile, switch from the overlay."),
+    ("icons/move.svg", "Move the overlay", &[Action::MoveLeft, Action::MoveUp, Action::MoveDown, Action::MoveRight], "Meanwhile, drag it."),
+    ("icons/chevrons-up-down.svg", "Scroll the answer", &[Action::ScrollUp, Action::ScrollDown], "Meanwhile, scroll it."),
+];
+
+/// A row's keys for `keycaps`: one action's chord, or the shared modifiers then every arrow on one cap
+/// ("⌃ ⌥ ←↑↓→").
+fn shortcut_keys(actions: &[Action]) -> String {
+    join_keys(&actions.iter().map(|action| crate::hotkeys::label(*action)).collect::<Vec<_>>())
+}
+
+/// Chords that differ only in their last key, as one: "⌃ ⌥ ←" and "⌃ ⌥ →" are "⌃ ⌥ ←→".
+fn join_keys(labels: &[String]) -> String {
+    if labels.len() == 1 { return labels[0].clone(); }
+    let modifiers = labels[0].rsplit_once(' ').map_or("", |(modifiers, _)| modifiers);
+    let arrows: String = labels.iter().filter_map(|label| label.rsplit_once(' ').map(|(_, key)| key)).collect();
+    format!("{modifiers} {arrows}")
+}
 
 /// Setup › All set's privacy facts: (icon, words).
 fn privacy_facts(s: &Settings) -> [(&'static str, &'static str); 3] {
@@ -195,15 +257,15 @@ fn preset_logo(id: &str) -> &'static str {
 }
 
 impl Overlay {
-    pub(crate) fn onboarding_page(&self, step: Step, test: Option<&TestRun>, setup: &WeakEntity<OnboardingWindow>, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn onboarding_page(&self, step: Step, state: &PageState, setup: &WeakEntity<OnboardingWindow>, cx: &mut Context<Self>) -> AnyElement {
         match step {
             Step::Welcome => welcome().into_any_element(),
-            Step::Model => self.model_page(test, setup, cx).into_any_element(),
+            Step::Model => self.model_page(state.test, setup, cx).into_any_element(),
             Step::Transcription => self.transcription_page(cx).into_any_element(),
+            Step::Permissions => self.permissions_page(state, setup, cx).into_any_element(),
             Step::Privacy => self.privacy_page(cx).into_any_element(),
+            Step::Shortcuts => self.shortcuts_page().into_any_element(),
             Step::Done => self.done_page(setup, cx).into_any_element(),
-            // Not in this build's `onboarding_window::STEPS`.
-            Step::Permissions | Step::Shortcuts => div().into_any_element(),
         }
     }
 
@@ -414,6 +476,132 @@ impl Overlay {
         vec![key]
     }
 
+    /// The microphone and Screen Recording permissions, then an audio check of what Live would hear.
+    fn permissions_page(&self, state: &PageState, setup: &WeakEntity<OnboardingWindow>, cx: &mut Context<Self>) -> Div {
+        let permissions = state.permissions;
+        let mut rows = Vec::new();
+        let (control, denied) = match permissions.mic {
+            Access::Allowed => (allowed(), false),
+            Access::NotAsked => (asking("Not asked", theme::muted(), button("allow-mic", "Allow…", true)
+                .on_mouse_down(MouseButton::Left, on_setup(setup, |this, _, cx| this.allow_microphone(cx)))), false),
+            // macOS doesn't ask twice; only System Settings can allow it now.
+            Access::Denied => (asking("Denied", rgb(ERROR), button("open-mic", "Open System Settings", false)
+                .on_mouse_down(MouseButton::Left, on_setup(setup, |this, _, cx| this.open_privacy(PrivacyPane::Microphone, cx)))), true),
+        };
+        rows.push(toggle_row(copy::MIC, control));
+        if denied { rows.push(hint(copy::MIC_PANE)); }
+        let screen = if permissions.screen_allowed { allowed() }
+            else if !permissions.screen_asked { asking("Not asked", theme::muted(), button("allow-screen", "Allow…", true)
+                .on_mouse_down(MouseButton::Left, on_setup(setup, |this, _, cx| this.allow_screen_recording(cx)))) }
+            else { asking("Needs a restart", theme::accent_soft(), button("reopen", "Quit & Reopen", true)
+                .on_mouse_down(MouseButton::Left, on_setup(setup, |this, _, cx| this.quit_and_reopen(cx)))) };
+        rows.push(toggle_row(copy::SCREEN, screen));
+        if permissions.screen_asked && !permissions.screen_allowed {
+            rows.push(hint(copy::SCREEN_PANE).justify_between()
+                .child(div().id("open-screen").flex_none().cursor_pointer().text_color(theme::accent_soft())
+                    .on_mouse_down(MouseButton::Left, on_setup(setup, |this, _, cx| this.open_privacy(PrivacyPane::ScreenRecording, cx))).child("Open System Settings")));
+        }
+        if let Some(error) = &permissions.relaunch_error { rows.push(hint("").child(text(12.0, rgb(ERROR), error.clone()))); }
+        let s = &self.store.value;
+        let (mic, desktop) = (&state.audio[0], &state.audio[1]);
+        div().flex().flex_col().gap(px(20.0))
+            .child(heading(copy::PERMISSIONS))
+            .child(boxed(rows))
+            .child(div().flex().flex_col().gap(px(8.0))
+                .child(div().flex().justify_between().items_baseline().px(px(2.0))
+                    .child(div().flex().items_center().gap(px(6.0)).child(ui::icon("icons/tab-listening.svg", 13.0, theme::muted())).child(ui::section_label(copy::AUDIO_CHECK.0)))
+                    .child(text(12.0, theme::muted(), copy::AUDIO_CHECK.1)))
+                .child(div().flex().gap(px(12.0))
+                    .child(self.meter_card(Source::Me, s.listen_mic, mic, permissions, cx))
+                    .child(self.meter_card(Source::Them, s.listen_desktop, desktop, permissions, cx))))
+    }
+
+    /// One source of the audio check: its switch and device (Settings › Listening's), its level, and
+    /// whether it hears anything.
+    fn meter_card(&self, source: Source, on: bool, meter: &Meter, permissions: &Permissions, cx: &mut Context<Self>) -> Div {
+        let (icon, title, picker, switch_id, set): (_, _, _, _, fn(&mut Settings, bool)) = match source {
+            Source::Me => (copy::MIC.0, copy::MIC.1, Picker::Mic, "listen-mic", |s, v| s.listen_mic = v),
+            Source::Them => (copy::DESKTOP.0, copy::DESKTOP.1, Picker::Desktop, "listen-desktop", |s, v| s.listen_desktop = v),
+        };
+        let running = matches!(meter.state, MeterState::Running(..));
+        let lit = if running { (meter.level * METER_SEGMENTS as f32).ceil() as usize } else { 0 };
+        let segments = (0..METER_SEGMENTS).fold(div().flex().gap(px(3.0)), |bar, index|
+            bar.child(div().flex_1().h(px(7.0)).rounded(px(2.0)).bg(if index < lit { theme::ok() } else { theme::hairline() })));
+        let (status_icon, words, color): (Option<&'static str>, SharedString, Rgba) = match (&meter.state, source) {
+            (MeterState::Running(..), _) if meter.hearing() => (Some("icons/check-circle.svg"), (if source == Source::Me { "Hearing you" } else { "Hearing it" }).into(), theme::ok()),
+            (MeterState::Running(..), Source::Me) => (None, "No sound yet — say something".into(), theme::muted()),
+            (MeterState::Running(..), Source::Them) => (None, "No sound yet — play a video".into(), theme::muted()),
+            (MeterState::Starting, _) => (None, "Starting…".into(), theme::muted()),
+            (MeterState::Failed(why), _) => (Some("icons/alert-circle.svg"), why.clone().into(), rgb(ERROR)),
+            (MeterState::Off, Source::Me) if !on => (None, "Off · Live won't hear you".into(), theme::muted()),
+            (MeterState::Off, Source::Them) if !on => (None, "Off · Live won't hear the call".into(), theme::muted()),
+            (MeterState::Off, _) if self.live_since.is_some() => (None, "Off while Live is on".into(), theme::muted()),
+            (MeterState::Off, Source::Me) => (None, "Starts once the microphone is allowed".into(), theme::muted()),
+            (MeterState::Off, Source::Them) if permissions.screen_asked => (Some("icons/tab-listening.svg"), "Starts after the restart".into(), theme::muted()),
+            (MeterState::Off, Source::Them) => (None, "Starts once Screen Recording is allowed".into(), theme::muted()),
+        };
+        div().flex_1().min_w_0().flex().flex_col().gap(px(12.0)).p(px(14.0)).rounded(px(12.0)).border_1().border_color(theme::hairline())
+            .child(div().flex().items_center().gap(px(8.0))
+                .child(ui::icon(icon, 15.0, theme::body()))
+                .child(text(13.0, theme::text(), title).font_weight(FontWeight::SEMIBOLD).flex_1())
+                .child(switch(switch_id, on, set, cx)))
+            .child(self.device_picker(picker, cx))
+            .child(segments)
+            .child(status(status_icon, words, color).flex_shrink().min_w_0())
+    }
+
+    /// Settings › Keys' shortcuts that work from any app, flagged when another app has one, and a
+    /// practice press of Assist.
+    fn shortcuts_page(&self) -> Div {
+        let hotkeys = &self.hotkeys;
+        let rows = SHORTCUTS.iter().map(|(icon, title, actions, meanwhile)| {
+            let taken = actions.iter().any(|action| hotkeys.unavailable.contains(action));
+            let keys = shortcut_keys(actions);
+            let row = div().flex().items_center().gap(px(12.0))
+                .child(div().size(px(28.0)).flex_none().flex().items_center().justify_center().rounded(px(7.0)).bg(theme::raised()).child(ui::icon(icon, 15.0, theme::body())))
+                .child(text(13.0, theme::text(), *title).font_weight(FontWeight::SEMIBOLD).flex_1())
+                .when(taken, |row| row.child(status(Some("icons/warning.svg"), "Taken", rgb(ERROR))))
+                .child(if taken { taken_keycaps(&keys) } else { keycaps(&keys) });
+            let row = div().flex().flex_col().gap(px(8.0)).px(px(14.0)).py(px(10.0)).child(row);
+            if taken { row.bg(rgb(TAKEN_ROW)).child(text(12.0, theme::muted(), format!("{} {meanwhile}", copy::TAKEN)).pl(px(40.0))) } else { row }
+        }).collect();
+        div().flex().flex_col().gap(px(20.0))
+            .child(heading(copy::SHORTCUTS))
+            .child(boxed(rows))
+            .child(self.practice())
+    }
+
+    /// Press Assist now: waiting, then the keys flash and it says it worked. With Assist taken by
+    /// another app, the way to ask without it instead.
+    fn practice(&self) -> Div {
+        let keys = self.hotkeys.label(Action::Assist);
+        if self.hotkeys.unavailable.contains(&Action::Assist) {
+            return div().flex().items_center().gap(px(10.0)).px(px(14.0)).py(px(12.0)).rounded(px(12.0)).bg(rgb(0x161719)).border_1().border_color(theme::hairline())
+                .child(ui::icon("icons/warning.svg", 15.0, rgb(ERROR)))
+                .child(text(13.0, theme::body(), format!("{keys} is taken by another app. Use the overlay's send button.")));
+        }
+        let practiced = self.assist_practiced;
+        let flashing = practiced.is_some_and(|at| at.elapsed() < PRACTICE_FLASH);
+        let ((title, detail), card, edge, cap) = match practiced {
+            Some(_) => (copy::PRACTICED, rgb(0x0f1a14), rgb(0x23503a), if flashing { theme::accent() } else { theme::ok() }),
+            None => (copy::PRACTICE, rgb(SELECTED), theme::bubble_border(), theme::keycap_border()),
+        };
+        let caps = keys.split(' ').fold(div().flex().gap(px(8.0)), |caps, key| caps.child(
+            div().size(px(40.0)).flex().items_center().justify_center().rounded(px(9.0)).bg(theme::raised()).border_1().border_b_2().border_color(cap)
+                .text_size(px(17.0)).text_color(if practiced.is_some() { cap } else { rgb(TILE_ICON) }).child(key.to_string())));
+        let trailing = match practiced {
+            Some(_) => ui::icon("icons/check-circle.svg", 18.0, theme::ok()).into_any_element(),
+            None => div().flex().items_center().gap(px(6.0)).child(div().size(px(6.0)).rounded_full().bg(theme::accent()))
+                .child(text(12.0, theme::accent_soft(), "Waiting…")).into_any_element(),
+        };
+        div().flex().items_center().gap(px(16.0)).px(px(16.0)).py(px(14.0)).rounded(px(12.0)).bg(card).border_1().border_color(edge)
+            .when(practiced.is_none(), |card| card.border_dashed())
+            .child(caps)
+            .child(div().flex().flex_col().gap(px(2.0)).flex_1().min_w_0()
+                .child(text(14.0, theme::text(), title).font_weight(FontWeight::SEMIBOLD)).child(text(12.0, theme::muted(), detail)))
+            .child(trailing)
+    }
+
     /// Settings › Window's capture and screenshot switches and Settings › Sessions' saving.
     fn privacy_page(&self, cx: &mut Context<Self>) -> Div {
         let s = &self.store.value;
@@ -513,5 +701,12 @@ mod tests {
         assert_eq!(words(&changed), ["Visible when sharing", "No screenshots", "Not saved"]);
         assert_eq!(preset_logo("gemini"), "logos/googlegemini.svg");
         assert_eq!(preset_logo("xai"), "icons/key-round.svg", "providers without a chip");
+    }
+
+    #[test]
+    fn move_and_scroll_share_their_modifiers_on_one_row() {
+        // Labels are the macOS ones; this module is macOS-only.
+        let rows: Vec<String> = SHORTCUTS.iter().map(|(_, _, actions, _)| shortcut_keys(actions)).collect();
+        assert_eq!(rows, ["⌘ \\", "⌘ ↵", "⌘ ⇧ Space", "⌘ ⇧ '", "⌃ ⌥ ←↑↓→", "⌃ ⌥ ⇧ ↑↓"]);
     }
 }

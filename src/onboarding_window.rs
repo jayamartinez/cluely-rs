@@ -4,6 +4,8 @@
 //! applies as it does in Settings: skipping a step keeps what is set, and closing the window or Skip
 //! setup counts as finishing. The overlay stays hidden, and Live waits, until a first run finishes.
 
+mod audio_check;
+
 use std::time::{Duration, Instant};
 
 use gpui::{
@@ -11,21 +13,24 @@ use gpui::{
     ScrollHandle, Styled, Subscription, TitlebarOptions, Window, WindowBounds, WindowKind, WindowOptions, div, point, prelude::*, px, rgb, size,
 };
 
+pub(crate) use self::audio_check::{AudioCheck, Meter, MeterState, Permissions};
 use crate::overlay::Overlay;
-use crate::platform::{self, NativeWindow};
+use crate::platform::{self, NativeWindow, PrivacyPane};
 use crate::providers::{Message, Part, Role};
 use crate::settings::{ONBOARDING_VERSION, OnboardingStep as Step, Provider, Settings};
 use crate::settings_view::button;
 use crate::settings_window::{CloseSettings, sync_capture};
 use crate::theme;
 
-/// The steps this build shows, in order. Permissions and Shortcuts join when their pages exist.
-pub(crate) const STEPS: [Step; 5] = [Step::Welcome, Step::Model, Step::Transcription, Step::Privacy, Step::Done];
+/// The steps this build shows, in order.
+pub(crate) const STEPS: [Step; 7] = [Step::Welcome, Step::Model, Step::Transcription, Step::Permissions, Step::Privacy, Step::Shortcuts, Step::Done];
 
 const WIDTH: f32 = 760.0;
 const HEIGHT: f32 = 700.0;
 /// Room the window always leaves on the screen.
 const SCREEN_MARGIN: f32 = 80.0;
+/// How long the keys light up after Assist is pressed as practice (Shortcuts).
+pub(crate) const PRACTICE_FLASH: Duration = Duration::from_millis(700);
 /// The test request: one short question, no screenshot.
 const TEST_SYSTEM: &str = "You are checking that a connection works.";
 const TEST_QUESTION: &str = "Reply with OK.";
@@ -68,6 +73,13 @@ pub(crate) struct TestRun {
 #[derive(Clone)]
 pub(crate) enum TestState { Sending, Answered(Duration), Failed(String) }
 
+/// What the setup window itself holds for its pages (the rest is the overlay's).
+pub(crate) struct PageState<'a> {
+    pub test: Option<&'a TestRun>,
+    pub permissions: &'a Permissions,
+    pub audio: &'a AudioCheck,
+}
+
 pub struct OnboardingWindow {
     overlay: Entity<Overlay>,
     step: Step,
@@ -76,7 +88,10 @@ pub struct OnboardingWindow {
     capture_hidden: Option<bool>,
     scroll: ScrollHandle,
     test: Option<TestRun>,
+    permissions: Permissions,
+    audio: AudioCheck,
     _overlay_changed: Subscription,
+    _activation: Subscription,
 }
 
 /// Show setup on `step`, opening it if needed; it becomes key only once CluelyRS is active, as
@@ -118,8 +133,14 @@ impl OnboardingWindow {
             if let Some(overlay) = closing.upgrade() { finish(&overlay, cx); }
             true
         });
-        let _overlay_changed = cx.observe(&overlay, |_, _, cx| cx.notify());
-        Self { overlay, step, focus, native: platform::native_window(window), capture_hidden: None, scroll: ScrollHandle::new(), test: None, _overlay_changed }
+        // A settings change can change what the audio check captures (its switches and devices).
+        let _overlay_changed = cx.observe(&overlay, |this, _, cx| this.sync_audio_check(cx));
+        // Coming back from System Settings (or a permission prompt) is when permissions change.
+        let _activation = cx.observe_window_activation(window, |this, window, cx| if window.is_window_active() { this.refresh_permissions(cx) });
+        let mut setup = Self { overlay, step, focus, native: platform::native_window(window), capture_hidden: None, scroll: ScrollHandle::new(), test: None,
+            permissions: Permissions::read(), audio: AudioCheck::default(), _overlay_changed, _activation };
+        setup.sync_audio_check(cx);
+        setup
     }
 
     pub(crate) fn navigate(&mut self, nav: Nav, window: &mut Window, cx: &mut Context<Self>) {
@@ -138,7 +159,48 @@ impl OnboardingWindow {
     fn show_step(&mut self, step: Step, cx: &mut Context<Self>) {
         self.step = step;
         self.scroll.set_offset(point(px(0.0), px(0.0)));
+        // The audio check runs only on the Permissions step.
+        if step == Step::Permissions { self.refresh_permissions(cx) } else { self.sync_audio_check(cx) }
+    }
+
+    /// Read both permissions again (they change in System Settings), then match the audio check to them.
+    fn refresh_permissions(&mut self, cx: &mut Context<Self>) {
+        let read = Permissions::read();
+        self.permissions.mic = read.mic;
+        self.permissions.screen_allowed = read.screen_allowed;
+        self.sync_audio_check(cx);
+    }
+
+    /// Allow… for the microphone: macOS's prompt, then the answer.
+    pub(crate) fn allow_microphone(&mut self, cx: &mut Context<Self>) {
+        let (answered, answer) = futures::channel::oneshot::channel();
+        platform::request_microphone(move |_| { let _ = answered.send(()); });
+        cx.spawn(async move |this, cx| {
+            let _ = answer.await;
+            let _ = this.update(cx, |this, cx| this.refresh_permissions(cx));
+        }).detach();
+    }
+
+    /// Allow… for Screen Recording. macOS prompts only the first time it's ever asked, and what is
+    /// allowed applies after a relaunch, so from here the row offers System Settings and Quit & Reopen.
+    pub(crate) fn allow_screen_recording(&mut self, cx: &mut Context<Self>) {
+        platform::request_screen_recording();
+        self.permissions.screen_asked = true;
+        self.refresh_permissions(cx);
+    }
+
+    pub(crate) fn open_privacy(&mut self, pane: PrivacyPane, cx: &mut Context<Self>) {
+        if let Err(error) = platform::open_privacy_pane(pane) { eprintln!("System Settings could not open: {error}"); }
         cx.notify();
+    }
+
+    /// Quit, and start again on this step once this process is gone, with Screen Recording applied.
+    /// Setup isn't finished: it was saved on this step, so the relaunch resumes here.
+    pub(crate) fn quit_and_reopen(&mut self, cx: &mut Context<Self>) {
+        match platform::relaunch_after_exit() {
+            Ok(()) => cx.quit(),
+            Err(error) => { self.permissions.relaunch_error = Some(format!("CluelyRS couldn't reopen itself ({error}). Quit and open it again.")); cx.notify(); }
+        }
     }
 
     /// Ask the selected provider a one-word question off the UI thread and time the answer. A
@@ -232,8 +294,9 @@ fn finish(overlay: &Entity<Overlay>, cx: &mut App) {
 impl Render for OnboardingWindow {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         sync_capture(self.native, &mut self.capture_hidden, &self.overlay.read(cx).store.value);
-        let (step, test, setup) = (self.step, self.test.clone(), cx.weak_entity());
-        let page = self.overlay.update(cx, |overlay, cx| overlay.in_window(cx, |overlay, cx| overlay.onboarding_page(step, test.as_ref(), &setup, cx)));
+        let (step, setup) = (self.step, cx.weak_entity());
+        let state = PageState { test: self.test.as_ref(), permissions: &self.permissions, audio: &self.audio };
+        let page = self.overlay.update(cx, |overlay, cx| overlay.in_window(cx, |overlay, cx| overlay.onboarding_page(step, &state, &setup, cx)));
         div().size_full().flex().flex_col().bg(rgb(0x0f1012)).font_family(theme::FONT).text_color(theme::text())
             // ⌘W closes it, as it does Settings.
             .key_context("SettingsWindow").track_focus(&self.focus)
@@ -253,8 +316,11 @@ mod tests {
     fn steps_go_forward_and_back_and_finish_after_the_last() {
         assert_eq!(next_step(Step::Welcome, Nav::Next), Some(Step::Model));
         assert_eq!(next_step(Step::Model, Nav::Next), Some(Step::Transcription));
-        assert_eq!(next_step(Step::Transcription, Nav::Next), Some(Step::Privacy), "Permissions isn't shown yet");
-        assert_eq!(next_step(Step::Privacy, Nav::Back), Some(Step::Transcription));
+        assert_eq!(next_step(Step::Transcription, Nav::Next), Some(Step::Permissions));
+        assert_eq!(next_step(Step::Permissions, Nav::Next), Some(Step::Privacy));
+        assert_eq!(next_step(Step::Privacy, Nav::Next), Some(Step::Shortcuts));
+        assert_eq!(next_step(Step::Shortcuts, Nav::Next), Some(Step::Done));
+        assert_eq!(next_step(Step::Privacy, Nav::Back), Some(Step::Permissions));
         assert_eq!(next_step(Step::Welcome, Nav::Back), Some(Step::Welcome));
         assert_eq!(next_step(Step::Done, Nav::Next), None, "Open CluelyRS finishes");
         assert_eq!(next_step(Step::Model, Nav::Finish), None, "Skip setup finishes");
@@ -262,10 +328,9 @@ mod tests {
     }
 
     #[test]
-    fn a_step_this_build_does_not_show_starts_over() {
-        assert_eq!(shown(Step::Transcription), Step::Transcription);
-        assert_eq!(shown(Step::Shortcuts), Step::Welcome);
-        assert_eq!(next_step(Step::Permissions, Nav::Next), Some(Step::Model));
+    fn every_step_is_shown_in_order() {
+        assert_eq!(STEPS.map(shown), STEPS);
+        assert_eq!(position(Step::Done), STEPS.len() - 1);
     }
 
     #[test]

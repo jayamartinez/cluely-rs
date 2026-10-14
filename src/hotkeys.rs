@@ -154,12 +154,15 @@ impl Hotkeys {
         }
     }
 
-    pub fn label(&self, action: Action) -> String {
-        DEFAULTS.iter().find(|(item, _)| *item == action).map(|(_, text)| pretty(text)).unwrap_or_default()
-    }
+    pub fn label(&self, action: Action) -> String { label(action) }
 
     #[allow(dead_code)]
     pub fn action(&self, id: u32) -> Option<Action> { self.by_id.get(&id).copied() }
+}
+
+/// An action's shortcut as people read it, e.g. "⌘ ↵" on macOS.
+pub fn label(action: Action) -> String {
+    DEFAULTS.iter().find(|(item, _)| *item == action).map(|(_, text)| pretty(text)).unwrap_or_default()
 }
 
 #[cfg(not(target_os = "macos"))]

@@ -544,35 +544,16 @@ impl Overlay {
                 .child(div().text_size(px(13.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child("Transcribe conversations"))
                 .child(div().text_size(px(12.0)).text_color(theme::muted()).child(if s.stt_provider == SttProvider::Deepgram { "Sent to Deepgram, while Live is on" } else { "On this PC, while Live is on" })))
             .child(switch("transcribe", s.transcribe, |s, v| s.transcribe = v, cx));
-        let devices = self.devices.clone().unwrap_or_default();
-        let default_label = |default: Option<&String>| match default {
-            // macOS captures all system audio rather than a device, so that one option is named plainly.
-            #[cfg(target_os = "macos")]
-            Some(name) if name == crate::audio::capture::SYSTEM_AUDIO => name.clone(),
-            Some(name) => format!("Default · {name}"),
-            None => "Default".to_string(),
-        };
-        let device_options = |names: &[String], default: Option<&String>| {
-            let mut options = vec![(String::new(), default_label(default))];
-            options.extend(names.iter().map(|name| (name.clone(), name.clone())));
-            options
-        };
-        let value = |chosen: &str, default: Option<&String>| if chosen.is_empty() {
-            match default { Some(_) => default_label(default), None => if self.devices_loading { "Loading devices…".into() } else { "Default".into() } }
-        } else { chosen.to_string() };
-        let device_column = |label: &'static str, name: &'static str, on: bool, set_on: fn(&mut Settings, bool), picker: Picker, chosen: &str,
-            names: &[String], default: Option<&String>, set: fn(&mut Settings, String), cx: &mut Context<Self>| {
+        let device_column = |label: &'static str, name: &'static str, on: bool, set_on: fn(&mut Settings, bool), picker: Picker, cx: &mut Context<Self>| {
             div().flex().flex_col().gap(px(6.0)).flex_1().min_w_0()
                 .child(div().flex().items_center().justify_between().h(px(20.0))
                     .child(div().text_size(px(12.0)).text_color(theme::muted()).child(label))
                     .child(switch(name, on, set_on, cx)))
-                .child(self.dropdown(picker, value(chosen, default), device_options(names, default), chosen, set, cx))
+                .child(self.device_picker(picker, cx))
         };
         let columns = div().flex().gap(px(12.0))
-            .child(device_column("Microphone", "listen-mic", s.listen_mic, |s, v| s.listen_mic = v, Picker::Mic, &s.mic_device,
-                &devices.microphones, devices.default_microphone.as_ref(), |s, v| s.mic_device = v, cx))
-            .child(device_column("Desktop audio", "listen-desktop", s.listen_desktop, |s, v| s.listen_desktop = v, Picker::Desktop, &s.desktop_device,
-                &devices.playback, devices.default_playback.as_ref(), |s, v| s.desktop_device = v, cx));
+            .child(device_column("Microphone", "listen-mic", s.listen_mic, |s, v| s.listen_mic = v, Picker::Mic, cx))
+            .child(device_column("Desktop audio", "listen-desktop", s.listen_desktop, |s, v| s.listen_desktop = v, Picker::Desktop, cx));
         let providers = [(SttProvider::Parakeet, "Parakeet Realtime · on this PC"), (SttProvider::Deepgram, "Deepgram · cloud")];
         let current = providers.iter().find(|(p, _)| *p == s.stt_provider).map(|(_, l)| *l).unwrap_or("Parakeet Realtime · on this PC");
         let with = field("Transcribe with", self.dropdown(Picker::SttProvider, current,
@@ -583,6 +564,30 @@ impl Overlay {
             SttProvider::Deepgram => self.deepgram_key_row(cx),
         };
         div().flex().flex_col().gap(px(16.0)).child(transcribe).child(with).child(provider_row).child(columns)
+    }
+
+    /// The microphone (`Picker::Mic`) or desktop audio (`Picker::Desktop`) picker: the system
+    /// default first, then each device (Settings › Listening, setup's audio check).
+    fn device_picker(&self, picker: Picker, cx: &mut Context<Self>) -> Div {
+        let s = &self.store.value;
+        let devices = self.devices.clone().unwrap_or_default();
+        let desktop = picker == Picker::Desktop;
+        let (chosen, names, default) = if desktop { (&s.desktop_device, &devices.playback, devices.default_playback.as_ref()) }
+            else { (&s.mic_device, &devices.microphones, devices.default_microphone.as_ref()) };
+        let set: fn(&mut Settings, String) = if desktop { |s, v| s.desktop_device = v } else { |s, v| s.mic_device = v };
+        let default_label = match default {
+            // macOS captures all system audio rather than a device, so that one option is named plainly.
+            #[cfg(target_os = "macos")]
+            Some(name) if name == crate::audio::capture::SYSTEM_AUDIO => name.clone(),
+            Some(name) => format!("Default · {name}"),
+            None => "Default".to_string(),
+        };
+        let value = if !chosen.is_empty() { chosen.to_string() }
+            else if default.is_some() { default_label.clone() }
+            else if self.devices_loading { "Loading devices…".into() } else { "Default".into() };
+        let mut options = vec![(String::new(), default_label)];
+        options.extend(names.iter().map(|name| (name.clone(), name.clone())));
+        self.dropdown(picker, value, options, chosen, set, cx)
     }
 
     /// The Deepgram API key: paste and save, or the saved key's hint with Remove.
