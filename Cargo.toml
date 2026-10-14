@@ -67,6 +67,10 @@ libc = "0.2"
 cc = "1"
 cmake = "0.1"
 
+[target.'cfg(windows)'.build-dependencies]
+# The app icon as the exe's icon resource (taskbar, Alt+Tab, Explorer).
+winresource = "0.1"
+
 # Dependencies are optimized even in debug builds: image resizing/JPEG encoding, resampling and
 # the HTTP/TLS stack run on every request, and unoptimized they cost over a second per Assist.
 # Only this crate's own code stays unoptimized, so rebuilds while developing remain quick.

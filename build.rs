@@ -19,6 +19,9 @@ fn main() {
         );
     }
 
+    #[cfg(windows)]
+    app_icon();
+
     // ScreenCaptureKit (macOS desktop audio) is weak-linked so CluelyRS still launches on macOS
     // before 12.3, which doesn't have it; desktop audio checks the OS version before touching it.
     if env::var("CARGO_CFG_TARGET_OS").is_ok_and(|os| os == "macos") {
@@ -102,6 +105,17 @@ fn main() {
         .flag_if_supported("/std:c++17")
         .flag_if_supported("-std=c++17")
         .compile("cluelyrs_parakeet_shim");
+}
+
+/// Windows: the app icon as icon resource 1, which GPUI gives its windows (the taskbar and Alt+Tab
+/// show it) and Explorer shows for the exe. Without a resource compiler the build goes on with the
+/// generic icon.
+#[cfg(windows)]
+fn app_icon() {
+    println!("cargo:rerun-if-changed=assets/app-icon/app-icon.ico");
+    let mut resource = winresource::WindowsResource::new();
+    resource.set_icon_with_id("assets/app-icon/app-icon.ico", "1");
+    if let Err(error) = resource.compile() { println!("cargo:warning=app icon not embedded: {error}"); }
 }
 
 fn find_file(dir: &Path, name: &str) -> Option<PathBuf> {
