@@ -197,7 +197,16 @@ pub(crate) fn latest_gpt_models(models: &[(String, String)]) -> Vec<(String, Str
 }
 
 /// "plus" → "ChatGPT Plus", "max_5x" → "Max 5x": the plan as the CLI reports it, made readable.
+/// ChatGPT's ids don't all read as its plans' names ("prolite" is Pro Lite, and Team is now
+/// Business), so the known ones are named; any other id is title-cased.
 fn plan_label(provider: Provider, plan: &str) -> String {
+    let id = plan.to_ascii_lowercase().replace(['_', '-', ' '], "");
+    let chatgpt = provider == Provider::Codex || id.starts_with("chatgpt");
+    let known = match id.strip_prefix("chatgpt").unwrap_or(&id) {
+        "free" => Some("Free"), "go" => Some("Go"), "plus" => Some("Plus"), "pro" => Some("Pro"), "prolite" => Some("Pro Lite"),
+        "team" | "business" => Some("Business"), "enterprise" => Some("Enterprise"), "edu" => Some("Edu"), _ => None,
+    };
+    if chatgpt && let Some(name) = known { return format!("ChatGPT {name}"); }
     let words: Vec<String> = plan.split(['_', '-', ' ']).filter(|w| !w.is_empty()).map(|word| {
         let mut chars = word.chars();
         match chars.next() { Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(), None => String::new() }
@@ -746,6 +755,13 @@ mod tests {
         assert_eq!(plan_label(Provider::Codex, "plus"), "ChatGPT Plus");
         assert_eq!(plan_label(Provider::Codex, "chatgpt_pro"), "ChatGPT Pro");
         assert_eq!(plan_label(Provider::Claude, "max_5x"), "Max 5x");
+        // ChatGPT's plans by name, however the id is written.
+        for (id, label) in [("free", "ChatGPT Free"), ("go", "ChatGPT Go"), ("pro", "ChatGPT Pro"), ("prolite", "ChatGPT Pro Lite"), ("pro_lite", "ChatGPT Pro Lite"),
+            ("chatgptprolite", "ChatGPT Pro Lite"), ("team", "ChatGPT Business"), ("business", "ChatGPT Business"), ("Enterprise", "ChatGPT Enterprise"), ("edu", "ChatGPT Edu")] {
+            assert_eq!(plan_label(Provider::Codex, id), label, "{id}");
+        }
+        assert_eq!(plan_label(Provider::Codex, "some_new_plan"), "ChatGPT Some New Plan", "an unknown id is title-cased");
+        assert_eq!(plan_label(Provider::Claude, "pro"), "Pro", "Claude's Pro isn't ChatGPT's");
         assert_eq!(masked("martinezjay404@gmail.com"), format!("m{}", "•".repeat(15)));
         assert_eq!(masked("ab"), "a••••••");
         assert_eq!(masked(""), "••••••");
