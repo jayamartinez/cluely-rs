@@ -11,6 +11,7 @@ use gpui::{
 use super::about::spinner;
 use super::cli_location::details;
 use super::model_form::text_box;
+use super::reveal::tooltip;
 use super::{Picker, button, choice, listen, masked, menu_bar_switch, plan_label, recommended, saved_key_label, switch};
 use crate::archive::Retention;
 use crate::audio::Source;
@@ -45,6 +46,8 @@ mod copy {
         ("custom", "Custom", "icons/server.svg")];
     pub const LOCAL: &str = "Runs on this computer · no key needed";
     pub const SIGNING_IN: (&str, &str) = ("Finish in Terminal", "Waiting for Terminal…");
+    pub const CHATGPT_PLAN: &str = "Uses your ChatGPT plan, not an API key";
+    pub const CLAUDE_PLAN: &str = "Uses your Claude plan, not an API key";
     pub const TEST_IDLE: &str = "One short question, no screenshot";
     pub const TRANSCRIPTION: (&str, &str) = ("Transcribe the conversation", "So answers know what was asked.");
     pub const OFF: Row = ("icons/mic-off.svg", "Off", "Screen and typed questions only");
@@ -77,6 +80,8 @@ mod copy {
     pub const LIVE_ON_LAUNCH: Row = ("icons/radio.svg", "Start Live on launch", "");
     pub const UPDATES: Row = ("icons/update.svg", "Check for updates", "Asks GitHub only, every 6 h");
     pub const RERUN: &str = "Rerun setup from the menu bar or Settings › About";
+    pub const MIC_SHORT: (&str, &str) = ("icons/mic.svg", "Mic");
+    pub const SCREEN_SHORT: (&str, &str) = ("icons/monitor.svg", "Screen");
 }
 
 /// Colours of the artboards that the theme doesn't name.
@@ -251,6 +256,12 @@ fn privacy_facts(s: &Settings) -> [(&'static str, &'static str); 3] {
     ]
 }
 
+/// Setup › All set's word for a permission that isn't allowed yet (`None`: allowed). Screen
+/// Recording that was allowed in System Settings applies after a restart.
+fn permission_note(allowed: bool, asked: bool) -> Option<&'static str> {
+    match (allowed, asked) { (true, _) => None, (false, true) => Some("after a restart"), (false, false) => Some("not allowed") }
+}
+
 /// An API provider's logo, or a key for one without a chip.
 fn preset_logo(id: &str) -> &'static str {
     copy::PRESETS.iter().find(|(preset, ..)| *preset == id).map_or("icons/key-round.svg", |(.., logo)| logo)
@@ -265,7 +276,7 @@ impl Overlay {
             Step::Permissions => self.permissions_page(state, setup, cx).into_any_element(),
             Step::Privacy => self.privacy_page(cx).into_any_element(),
             Step::Shortcuts => self.shortcuts_page().into_any_element(),
-            Step::Done => self.done_page(setup, cx).into_any_element(),
+            Step::Done => self.done_page(state.permissions, setup, cx).into_any_element(),
         }
     }
 
@@ -334,7 +345,9 @@ impl Overlay {
             Some(st) if st.signed_in => {
                 let account = st.account.clone().unwrap_or("Connected".into());
                 let shown = if self.reveal_accounts { account } else { masked(&account) };
-                let plan = st.plan.as_deref().map(|plan| text(13.0, theme::text(), plan_label(provider, plan)));
+                let hint = if provider == Provider::Codex { copy::CHATGPT_PLAN } else { copy::CLAUDE_PLAN };
+                let plan = st.plan.as_deref().map(|plan| div().flex().items_center().gap(px(6.0)).child(text(13.0, theme::text(), plan_label(provider, plan)))
+                    .child(div().id("plan-hint").flex_none().child(ui::icon("icons/info.svg", 13.0, theme::muted())).tooltip(move |_, cx| tooltip(hint, cx))));
                 let chip = div().id("account").px(px(8.0)).py(px(2.0)).rounded(px(6.0)).bg(theme::raised()).cursor_pointer()
                     .font_family(theme::MONO).text_size(px(12.0)).text_color(theme::ok()).child(shown)
                     .on_mouse_down(MouseButton::Left, listen(cx, |this, _, _, cx| { this.reveal_accounts = !this.reveal_accounts; cx.notify(); }));
@@ -619,7 +632,7 @@ impl Overlay {
     }
 
     /// What was chosen, each with a Change link to its step, and a few more switches.
-    fn done_page(&self, setup: &WeakEntity<OnboardingWindow>, cx: &mut Context<Self>) -> Div {
+    fn done_page(&self, permissions: &Permissions, setup: &WeakEntity<OnboardingWindow>, cx: &mut Context<Self>) -> Div {
         let s = &self.store.value;
         let summary = |icon: &'static str, label: &'static str, value: Div, step: Step| div().flex().items_center().gap(px(12.0)).px(px(14.0)).py(px(10.0))
             .child(div().w(px(120.0)).flex_none().flex().items_center().gap(px(8.0)).child(ui::icon(icon, 15.0, theme::muted())).child(text(13.0, theme::muted(), label)))
@@ -641,6 +654,13 @@ impl Overlay {
             (true, SttProvider::Deepgram) => (copy::DEEPGRAM.0, copy::DEEPGRAM.1, (!s.saved_keys.contains_key(deepgram::PROVIDER_ID)).then(|| "· no key saved".to_string())),
         };
         let transcription = div().child(ui::icon(icon, 14.0, theme::body())).child(text(13.0, theme::text(), name)).children(state.map(|state| text(12.0, theme::muted(), state)));
+        let granted = [(copy::MIC_SHORT, permissions.mic == Access::Allowed, false), (copy::SCREEN_SHORT, permissions.screen_allowed, permissions.screen_asked)]
+            .into_iter().fold(div(), |row, ((icon, words), allowed, asked)| row.child(div().flex().items_center().gap(px(6.0)).mr(px(6.0))
+                .child(ui::icon(icon, 14.0, theme::body())).child(text(13.0, theme::text(), words))
+                .child(match permission_note(allowed, asked) {
+                    None => ui::icon("icons/check.svg", 13.0, theme::ok()).into_any_element(),
+                    Some(note) => text(12.0, theme::muted(), note).into_any_element(),
+                })));
         let privacy = privacy_facts(s).into_iter().fold(div(), |facts, (icon, words)| facts.child(
             div().flex().items_center().gap(px(6.0)).mr(px(6.0)).child(ui::icon(icon, 14.0, theme::body())).child(text(13.0, theme::text(), words))));
         let more = vec![
@@ -659,6 +679,7 @@ impl Overlay {
             .child(boxed(vec![
                 summary("icons/sparkles.svg", "Answers", answers, Step::Model),
                 summary("icons/tab-listening.svg", "Transcription", transcription, Step::Transcription),
+                summary("icons/shield.svg", "Permissions", granted, Step::Permissions),
                 summary("icons/lock.svg", "Privacy", privacy, Step::Privacy),
             ]))
             .child(section("OPTIONAL", "Settings › Window, About", more))
@@ -701,6 +722,13 @@ mod tests {
         assert_eq!(words(&changed), ["Visible when sharing", "No screenshots", "Not saved"]);
         assert_eq!(preset_logo("gemini"), "logos/googlegemini.svg");
         assert_eq!(preset_logo("xai"), "icons/key-round.svg", "providers without a chip");
+    }
+
+    #[test]
+    fn the_summary_says_which_permissions_are_still_missing() {
+        assert_eq!(permission_note(true, false), None);
+        assert_eq!(permission_note(false, false), Some("not allowed"));
+        assert_eq!(permission_note(false, true), Some("after a restart"), "Screen Recording, asked this run");
     }
 
     #[test]

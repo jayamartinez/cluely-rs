@@ -143,7 +143,7 @@ Not yet: speculative answers.
 - Setup's icons and logos in `assets/`: [Lucide](https://lucide.dev) icons (ISC License) in `assets/icons/` (`archive`,
   `arrow-right`, `chevrons-up-down`, `circle-user`, `cloud`, `download`, `hourglass`, `key-round`, `laptop-minimal`,
   `link`, `lock`, `message-square`, `mic`, `mic-off`, `monitor`, `move`, `panel-bottom`, `plug`, `radio`, `send`,
-  `server`, `sparkles`, `terminal`, `type`, `volume-2`, `zap`); the Anthropic, Claude, Deepgram, Google Gemini, Ollama
+  `server`, `shield`, `sparkles`, `terminal`, `type`, `volume-2`, `zap`); the Anthropic, Claude, Deepgram, Google Gemini, Ollama
   and OpenRouter logos from [Simple Icons](https://simpleicons.org) (CC0) and the OpenAI logo from [Lobe
   Icons](https://github.com/lobehub/lobe-icons) (MIT) in `assets/logos/`. The logos are their owners' trademarks, shown
   only to name the services CluelyRS connects to.
