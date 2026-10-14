@@ -404,10 +404,18 @@ impl Overlay {
                     .into_any_element()
             }
             Some(st) if !st.installed => text("CLI not found".into(), theme::muted()),
-            Some(_) => div().id(("sign-in", index)).flex_none().px(px(10.0)).py(px(5.0)).rounded(px(8.0)).bg(theme::accent()).cursor_pointer()
-                .text_size(px(12.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::accent_ink())
-                .on_mouse_down(MouseButton::Left, listen(cx, move |this, _, window, cx| { cx.stop_propagation(); this.sign_in(provider, window, cx) }))
-                .child(if self.signing_in { "Waiting for browser…" } else { "Sign in" }).into_any_element(),
+            Some(_) => {
+                let waiting = self.signing_in == Some(provider);
+                // macOS signs in in Terminal; clicking the waiting button there stops waiting.
+                let (hint, label) = if cfg!(target_os = "macos") { ("Finish in Terminal", "Waiting for Terminal…") } else { ("", "Waiting for browser…") };
+                div().flex().items_center().gap(px(10.0))
+                    .when(waiting && !hint.is_empty(), |badge| badge.child(div().text_size(px(12.0)).text_color(theme::muted()).child(hint)))
+                    .child(div().id(("sign-in", index)).flex_none().px(px(10.0)).py(px(5.0)).rounded(px(8.0)).bg(theme::accent()).cursor_pointer()
+                        .text_size(px(12.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::accent_ink()).when(waiting, |button| button.opacity(0.7))
+                        .on_mouse_down(MouseButton::Left, listen(cx, move |this, _, window, cx| { cx.stop_propagation(); this.sign_in(provider, window, cx) }))
+                        .child(if waiting { label } else { "Sign in" }))
+                    .into_any_element()
+            }
         }
     }
 

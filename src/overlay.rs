@@ -39,6 +39,11 @@ pub const IDLE_HEIGHT: f32 = 270.0;
 const LIVE_HEIGHT: f32 = 680.0;
 /// The card, the Settings panel under it (Windows) and room for an open picker list below them.
 const SETTINGS_HEIGHT: f32 = 820.0;
+/// macOS sign-in in Terminal: how often the account is checked, and for how long.
+#[cfg(target_os = "macos")]
+const SIGN_IN_POLL: Duration = Duration::from_secs(2);
+#[cfg(target_os = "macos")]
+const SIGN_IN_WAIT: Duration = Duration::from_secs(300);
 /// How long Settings takes to collapse into the conversation after a message is sent from under it.
 const COLLAPSE: Duration = Duration::from_millis(200);
 /// Held movement eases in so a tap nudges, then cruises. Pixels per ~16 ms frame.
@@ -145,7 +150,11 @@ pub struct Overlay {
     /// Last known sign-in state for the ChatGPT and Claude subscriptions (None while checking).
     pub(crate) codex_status: Option<crate::chat::SubscriptionStatus>,
     pub(crate) claude_status: Option<crate::chat::SubscriptionStatus>,
-    pub(crate) signing_in: bool,
+    /// The subscription being signed in to, while its sign-in runs (macOS: while it waits for Terminal).
+    pub(crate) signing_in: Option<Provider>,
+    /// Bumped by every macOS sign-in and by cancelling one, so a replaced wait stops polling.
+    #[cfg(target_os = "macos")]
+    sign_in_attempt: u64,
     /// Why the file picked for a subscription's CLI can't be used (Settings › Model).
     pub(crate) cli_error: Option<(Provider, SharedString)>,
     /// The Live session being saved to History, when saving is on.
@@ -292,7 +301,9 @@ impl Overlay {
             key_reveal: Default::default(), opacity_drag: false,
             key_notice: None, loaded_models: Vec::new(), models_loading: false, reasoning: None, planner: Planner::new(false, Budget::default()), prepared_shot: PreparedShot::default(), answer_action: "Assist", speculation_attempt: 0,
             metrics: None, next_turn: 0, catching_mouse: true, return_focus: None,
-            codex: crate::codex::CodexClient::new(), codex_status: None, claude_status: None, signing_in: false,
+            codex: crate::codex::CodexClient::new(), codex_status: None, claude_status: None, signing_in: None,
+            #[cfg(target_os = "macos")]
+            sign_in_attempt: 0,
             cli_error: None,
             motion: None, live_since: None, turns: Vec::new(), session: 0, dividers: Vec::new(), scroll: ScrollHandle::new(),
             listening: None, listening_status: None, listening_epoch: 0, transcript: Vec::new(), provisional: Default::default(), levels: Default::default(),
@@ -631,9 +642,10 @@ impl Overlay {
     }
 
     /// Run the official CLI's browser sign-in, then refresh status.
+    #[cfg(not(target_os = "macos"))]
     pub fn sign_in(&mut self, provider: Provider, window: &mut Window, cx: &mut Context<Self>) {
-        if self.signing_in { return; }
-        self.signing_in = true;
+        if self.signing_in.is_some() { return; }
+        self.signing_in = Some(provider);
         let codex = self.codex.clone();
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
@@ -641,10 +653,60 @@ impl Overlay {
                 match provider { Provider::Codex => codex.login(), Provider::Claude => crate::claude_cli::ClaudeCli::login(), Provider::ApiKey => Ok(()) }
             }).await;
             let _ = this.update_in(cx, |this, window, cx| {
-                this.signing_in = false;
+                this.signing_in = None;
                 if let Err(error) = result { this.key_notice = Some(error.into()); }
                 this.refresh_subscriptions(window, cx);
             });
+        }).detach();
+    }
+
+    /// macOS: open the CLI's own sign-in in a Terminal window (it opens the browser itself), where
+    /// the user can see and answer it, then check every few seconds until the account is signed in,
+    /// for up to `SIGN_IN_WAIT`. Clicking Sign in again while it waits stops waiting.
+    #[cfg(target_os = "macos")]
+    pub fn sign_in(&mut self, provider: Provider, window: &mut Window, cx: &mut Context<Self>) {
+        self.sign_in_attempt += 1;
+        self.key_notice = None;
+        cx.notify();
+        if self.signing_in.take() == Some(provider) { return; }
+        let (attempt, codex) = (self.sign_in_attempt, self.codex.clone());
+        self.signing_in = Some(provider);
+        cx.spawn_in(window, async move |this, cx| {
+            // Resolving the CLI reads the disk, and writing the script too: off the UI thread.
+            let opened = cx.background_executor().spawn(async move {
+                let (exe, args) = match provider {
+                    Provider::Codex => (crate::codex::executable()?, &["login"][..]),
+                    _ => (crate::claude_cli::ClaudeCli::executable()?, &["auth", "login", "--claudeai"][..]),
+                };
+                platform::run_in_terminal(&exe, args).map_err(|error| format!("Terminal couldn't open: {error}"))
+            }).await;
+            let started = Instant::now();
+            let mut failed = opened.err();
+            loop {
+                if failed.is_none() { cx.background_executor().timer(SIGN_IN_POLL).await; }
+                if this.update(cx, |this, _| this.sign_in_attempt != attempt).unwrap_or(true) { return; }
+                let codex = codex.clone();
+                // A running Codex app-server keeps the signed-out account it read at start, so each
+                // check starts a fresh one; nothing else can use it while signed out.
+                let status = if failed.is_some() { None } else {
+                    Some(cx.background_executor().spawn(async move {
+                        if provider == Provider::Codex { codex.shutdown(); codex.status() } else { crate::claude_cli::ClaudeCli::status() }
+                    }).await)
+                };
+                let done = this.update(cx, |this, cx| {
+                    if this.sign_in_attempt != attempt { return true; }
+                    let signed_in = status.as_ref().is_some_and(|status| status.signed_in);
+                    let timed_out = started.elapsed() >= SIGN_IN_WAIT;
+                    if let Some(status) = status { if provider == Provider::Codex { this.codex_status = Some(status) } else { this.claude_status = Some(status) } }
+                    if signed_in || timed_out || failed.is_some() {
+                        this.signing_in = None;
+                        this.key_notice = failed.take().or((timed_out && !signed_in).then(|| "Sign-in didn't finish. Try again.".to_string())).map(Into::into);
+                    }
+                    cx.notify();
+                    this.signing_in.is_none()
+                }).unwrap_or(true);
+                if done { return; }
+            }
         }).detach();
     }
 
