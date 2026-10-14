@@ -34,6 +34,8 @@ pub struct SubscriptionStatus {
     pub plan: Option<String>,
     /// (id, display name) pairs offered in Settings.
     pub models: Vec<(String, String)>,
+    /// What each model is for ("Workhorse model"), by id, when the provider says.
+    pub details: std::collections::BTreeMap<String, String>,
     /// The model "Default" means, when the provider reports it.
     pub default_model: Option<String>,
     /// User-safe explanation when something is wrong.

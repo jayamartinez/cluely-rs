@@ -337,7 +337,10 @@ impl Overlay {
         let Some(setup) = &self.setup else { return div() };
         let choice = self.model_choice();
         let provider = self.store.value.provider;
-        let picker = if choice.options.is_empty() && provider == Provider::ApiKey {
+        let picker = if provider != Provider::ApiKey {
+            // The plans share the searchable picker (latest, then legacy models).
+            self.plan_model_picker(setup, enabled, cx)
+        } else if choice.options.is_empty() {
             self.text_field("setup-model-id", self.model_input.clone())
         } else {
             let set = choice.set;

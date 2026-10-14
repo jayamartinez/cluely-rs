@@ -1466,6 +1466,8 @@ pub struct CodexClient {
 struct Catalog {
     default_model: Option<String>,
     efforts: HashMap<String, Vec<String>>,
+    /// Each model's description ("Workhorse model"), for the model picker.
+    details: std::collections::BTreeMap<String, String>,
 }
 
 /// The model and reasoning effort a turn runs with.
@@ -1524,7 +1526,9 @@ impl CodexClient {
                 status.account = email;
                 status.plan = plan;
                 status.models = self.models(&connection).unwrap_or_default();
-                status.default_model = self.catalog.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref().and_then(|catalog| catalog.default_model.clone());
+                let catalog = self.catalog.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone().unwrap_or_default();
+                status.default_model = catalog.default_model;
+                status.details = catalog.details;
             }
             Ok((Account::Other, _)) => status.error = Some(err(Kind::AuthUnsupported).message),
             Ok((Account::None, _)) => {}
@@ -1624,6 +1628,9 @@ impl CodexClient {
                     .filter(|level| EFFORT_ORDER.contains(level)).map(str::to_string).collect();
                 catalog.efforts.insert(id.to_string(), efforts);
                 if model.get("isDefault") == Some(&Value::Bool(true)) { catalog.default_model = Some(id.to_string()); }
+                if let Some(detail) = model.get("description").and_then(Value::as_str).map(str::trim).filter(|detail| !detail.is_empty()) {
+                    catalog.details.insert(id.to_string(), detail.chars().take(80).collect());
+                }
                 let name = model.get("displayName").and_then(Value::as_str).map(str::trim).filter(|name| !name.is_empty()).unwrap_or(id);
                 models.push((id.to_string(), name.chars().take(80).collect()));
                 if models.len() >= MAX_MODELS {
@@ -2644,7 +2651,7 @@ pub(crate) mod tests {
         let status = client(&launcher).status();
         assert_eq!(status, SubscriptionStatus {
             installed: true, custom_location: false, signed_in: true, account: Some("me@example.com".into()), plan: Some("plus".into()),
-            models: vec![("gpt-5".into(), "GPT-5".into())], default_model: Some("gpt-5".into()), error: None,
+            models: vec![("gpt-5".into(), "GPT-5".into())], default_model: Some("gpt-5".into()), error: None, ..SubscriptionStatus::default()
         });
         assert_eq!(methods(&launcher), ["initialize", "initialized", "account/read", "model/list"]);
         let init = lock(&launcher.received)[0].clone();
