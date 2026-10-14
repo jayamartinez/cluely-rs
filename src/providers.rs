@@ -448,15 +448,33 @@ fn anthropic_body(req: &Request) -> Value {
         body["system"] = json!([{"type": "text", "text": req.system, "cache_control": {"type": "ephemeral"}}]);
     }
     if req.effort == Effort::Smart {
-        // Extended thinking: the budget must fit inside max_tokens, so the answer keeps its room.
-        body["thinking"] = json!({"type": "enabled", "budget_tokens": ANTHROPIC_THINKING_BUDGET});
+        // Current models (Claude 4.6 and later) think adaptively, deeper at high effort, and reject
+        // a fixed budget; older ones only take a budget. Either way the answer keeps its room in
+        // max_tokens on top of the thinking.
+        if takes_thinking_budget(&req.model) {
+            body["thinking"] = json!({"type": "enabled", "budget_tokens": ANTHROPIC_THINKING_BUDGET});
+        } else {
+            body["thinking"] = json!({"type": "adaptive"});
+            body["output_config"] = json!({"effort": "high"});
+        }
         body["max_tokens"] = json!(req.max_tokens + ANTHROPIC_THINKING_BUDGET);
     }
     body
 }
 
-/// Thinking tokens Smart mode allows Anthropic models before they answer.
+/// Thinking tokens Smart mode allows Anthropic models before they answer (a budget on models that
+/// take one; room for adaptive thinking on the rest).
 const ANTHROPIC_THINKING_BUDGET: u32 = 4096;
+
+/// Whether an Anthropic model predates adaptive thinking (Claude 3.x, and the 4.x models before
+/// 4.6), so Smart mode gives it a thinking budget instead.
+fn takes_thinking_budget(model: &str) -> bool {
+    let model = model.trim().to_ascii_lowercase();
+    model.starts_with("claude-3")
+        || ["opus-4-0", "opus-4-1", "opus-4-5", "sonnet-4-0", "sonnet-4-5", "haiku-4-5", "opus-4-2025", "sonnet-4-2025"]
+            .iter().any(|old| model.contains(old))
+        || model == "claude-opus-4" || model == "claude-sonnet-4"
+}
 
 /// OpenAI models that take `reasoning_effort` (others reject the field).
 fn is_openai_reasoning_model(model: &str) -> bool {
@@ -896,12 +914,21 @@ data: [DONE]\n\n";
 
     #[test]
     fn smart_mode_turns_on_reasoning_only_where_the_wire_and_model_take_it() {
-        // Anthropic: no thinking when fast; a thinking budget on top of the answer's room when smart.
+        // Anthropic: no thinking when fast. Smart: adaptive thinking at high effort on current
+        // models (which reject a fixed budget), a budget on older ones, with room on top of the answer.
         let fast = anthropic_body(&request(Wire::Anthropic, "https://api.anthropic.com/v1"));
-        assert!(fast.get("thinking").is_none());
-        let smart = anthropic_body(&Request { effort: Effort::Smart, ..request(Wire::Anthropic, "https://api.anthropic.com/v1") });
-        assert_eq!(smart["thinking"], json!({"type": "enabled", "budget_tokens": ANTHROPIC_THINKING_BUDGET}));
-        assert_eq!(smart["max_tokens"], 1024 + ANTHROPIC_THINKING_BUDGET);
+        assert!(fast.get("thinking").is_none() && fast.get("output_config").is_none());
+        let smart_on = |model: &str| anthropic_body(&Request { effort: Effort::Smart, model: model.into(), ..request(Wire::Anthropic, "https://api.anthropic.com/v1") });
+        for current in ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-opus-4-6", "claude-fable-5-1"] {
+            let smart = smart_on(current);
+            assert_eq!((&smart["thinking"], &smart["output_config"]), (&json!({"type": "adaptive"}), &json!({"effort": "high"})), "{current}");
+            assert_eq!(smart["max_tokens"], 1024 + ANTHROPIC_THINKING_BUDGET);
+        }
+        for older in ["claude-haiku-4-5", "claude-sonnet-4-5", "claude-3-7-sonnet-latest", "claude-opus-4-1"] {
+            let smart = smart_on(older);
+            assert_eq!(smart["thinking"], json!({"type": "enabled", "budget_tokens": ANTHROPIC_THINKING_BUDGET}), "{older}");
+            assert!(smart.get("output_config").is_none(), "{older}");
+        }
         // OpenAI: reasoning models get the least effort when fast and high when smart.
         let openai = "https://api.openai.com/v1";
         let reasoning = |model: &str, effort| openai_body(&Request { model: model.into(), effort, ..request(Wire::OpenAiCompatible, openai) }, openai);
