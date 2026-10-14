@@ -24,8 +24,6 @@ use crate::chat::{ChatRequest, Effort, SubscriptionStatus};
 use crate::cli_path::{self, Cli};
 use crate::providers::{Message, Part, Role};
 
-const MODELS: [(&str, &str); 3] = [("sonnet", "Sonnet"), ("opus", "Opus"), ("haiku", "Haiku")];
-
 const MAX_MESSAGES: usize = 200;
 const MAX_TEXT: usize = 1_000_000;
 const MAX_IMAGE_BYTES: usize = 15 * 1024 * 1024;
@@ -37,6 +35,12 @@ const MAX_ANSWER_CHARS: usize = 200_000;
 /// Windows caps the whole command line at 32,767 UTF-16 units; leave headroom.
 const COMMAND_LINE_LIMIT: usize = if cfg!(windows) { 30_000 } else { 120_000 };
 const STATUS_OUTPUT_LIMIT: usize = 64 * 1024;
+/// Largest model list file read from Claude Code's cache.
+#[cfg(target_os = "macos")]
+const CATALOG_LIMIT: u64 = 256 * 1024;
+/// The model families `--model` takes as aliases for their newest version.
+#[cfg(any(target_os = "macos", test))]
+const FAMILIES: [&str; 4] = ["opus", "sonnet", "haiku", "fable"];
 
 const STREAM_TIMEOUT: Duration = Duration::from_secs(300);
 const STATUS_TIMEOUT: Duration = Duration::from_secs(10);
@@ -98,7 +102,12 @@ impl ClaudeCli {
         status.custom_location = cli_path::chosen(Cli::Claude).is_some_and(|chosen| chosen == exe);
         let args = ["auth", "status", "--json"].map(String::from);
         match collect(&exe, &args, STATUS_TIMEOUT) {
-            Ok(output) => SubscriptionStatus { custom_location: status.custom_location, ..parse_status(&output) },
+            Ok(output) => SubscriptionStatus {
+                custom_location: status.custom_location,
+                #[cfg(target_os = "macos")]
+                catalog: cached_catalog(),
+                ..parse_status(&output)
+            },
             Err(message) => {
                 status.error = Some(message);
                 status
@@ -213,9 +222,11 @@ pub fn resolved_models() -> Vec<(String, String)> {
     RESOLVED.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
 }
 
-/// A model id from the CLI's `init` line, accepted only if it looks like one (it is shown in the UI).
-fn plausible_model_id(id: &str) -> bool {
-    !id.is_empty() && id.len() <= 100 && id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'[' | b']'))
+/// A model id (from the CLI's `init` line, its model list, or settings), accepted only if it looks
+/// like one: it is shown in the UI and passed to `--model`, so it can't start like a flag.
+pub(crate) fn plausible_model_id(id: &str) -> bool {
+    id.len() <= 100 && id.bytes().next().is_some_and(|b| b.is_ascii_alphanumeric())
+        && id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'[' | b']'))
 }
 
 /// A readable name for a Claude model id: "claude-opus-5-5" → "Opus 5.5", "claude-haiku-4-5-20251001" →
@@ -232,8 +243,45 @@ pub fn model_label(id: &str) -> String {
     format!("{name} {}", numbers.join("."))
 }
 
+/// The models Claude Code's own model picker offers, from the list it caches in its config folder
+/// (`cache/model-catalog`, the Claude Code surface, refreshed as it runs). It has no command that
+/// lists them. Empty when no list is cached or none can be read.
+#[cfg(target_os = "macos")]
+fn cached_catalog() -> Vec<crate::chat::ModelEntry> {
+    let config = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from).or_else(|| dirs::home_dir().map(|home| home.join(".claude")));
+    let Some(files) = config.and_then(|dir| std::fs::read_dir(dir.join("cache").join("model-catalog")).ok()) else { return Vec::new() };
+    files.flatten()
+        .filter(|file| file.file_name().to_string_lossy().ends_with("-cc.json"))
+        .filter(|file| file.metadata().is_ok_and(|meta| meta.is_file() && meta.len() <= CATALOG_LIMIT))
+        .filter_map(|file| serde_json::from_slice::<Value>(&std::fs::read(file.path()).ok()?).ok())
+        .filter(|cached| cached["catalog"]["surface"] == "cc")
+        .max_by_key(|cached| cached["fetchedAt"].as_u64().unwrap_or(0))
+        .map(|cached| catalog_entries(&cached["catalog"]["config"]["models"]))
+        .unwrap_or_default()
+}
+
+/// The picker's list from a cached model list: its "main" models first, offered by their family's
+/// alias so a newer version takes over by itself, then the rest (older versions) by full id as
+/// legacy models. Anything not shaped like a model id is skipped.
+#[cfg(any(target_os = "macos", test))]
+fn catalog_entries(models: &Value) -> Vec<crate::chat::ModelEntry> {
+    let mut entries: Vec<crate::chat::ModelEntry> = Vec::new();
+    for model in models.as_array().into_iter().flatten().take(40) {
+        let Some(full) = model.get("id").and_then(Value::as_str).filter(|id| plausible_model_id(id)) else { continue };
+        let text = |key| model.get(key).and_then(Value::as_str).map(str::trim).filter(|text| !text.is_empty());
+        let legacy = text("section") != Some("main");
+        let alias = text("short_name").map(str::to_ascii_lowercase).filter(|alias| !legacy && FAMILIES.contains(&alias.as_str()));
+        let id = alias.filter(|alias| !entries.iter().any(|entry| entry.id == *alias)).unwrap_or_else(|| full.to_string());
+        if entries.iter().any(|entry| entry.id == id) { continue; }
+        let name = text("name").filter(|name| name.chars().count() <= 40).map_or_else(|| model_label(full), str::to_string);
+        entries.push(crate::chat::ModelEntry { id, name, note: text("description").map(crate::chat::short_note).unwrap_or_default(), legacy });
+    }
+    entries.sort_by_key(|entry| entry.legacy);
+    entries
+}
+
 fn models() -> Vec<(String, String)> {
-    MODELS.iter().map(|(id, name)| (id.to_string(), name.to_string())).collect()
+    crate::settings::ClaudeModel::ALIASES.iter().map(|(id, name)| (id.to_string(), name.to_string())).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -1220,6 +1268,43 @@ mod tests {
         assert_eq!(deltas, ["abc"]);
     }
 
+    /// Live check: the model list Claude Code cached on this Mac, as the picker offers it.
+    /// Run with `cargo test claude_cli::tests::live_catalog -- --ignored --nocapture`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "reads Claude Code's cache on this computer"]
+    fn live_catalog() {
+        let catalog = cached_catalog();
+        for entry in &catalog { println!("{:<28} {:<12} legacy={} {}", entry.id, entry.name, entry.legacy, entry.note); }
+        assert!(!catalog.is_empty());
+    }
+
+    /// Shaped like Claude Code's cached model list: the main models by alias, older ones by id.
+    #[test]
+    fn catalog_offers_main_models_by_alias_and_the_rest_as_legacy() {
+        let models = json!([
+            { "id": "claude-opus-5-5", "name": "Opus 5.5", "short_name": "Opus", "description": "For complex work and everyday tasks", "section": "main" },
+            { "id": "claude-fable-5-1", "name": "Fable 5.1", "short_name": "Fable", "description": "For your toughest challenges", "section": "main" },
+            { "id": "claude-haiku-5-5", "name": "Haiku 5.5", "short_name": "Haiku", "section": "main" },
+            { "id": "claude-haiku-4-5-20251001", "name": "Haiku 4.5", "short_name": "Haiku", "section": "overflow" },
+            { "id": "claude-opus-4-6", "name": "Opus 4.6", "short_name": "Opus", "section": "overflow" },
+            { "id": "--model", "name": "Flag", "section": "overflow" },
+            { "id": "claude-sonnet-4-6", "section": "overflow" },
+        ]);
+        let entries = catalog_entries(&models);
+        let summary: Vec<(&str, &str, &str, bool)> = entries.iter().map(|e| (e.id.as_str(), e.name.as_str(), e.note.as_str(), e.legacy)).collect();
+        assert_eq!(summary, [
+            ("opus", "Opus 5.5", "Complex work and everyday tasks", false),
+            ("fable", "Fable 5.1", "Your toughest challenges", false),
+            ("haiku", "Haiku 5.5", "", false),
+            ("claude-haiku-4-5-20251001", "Haiku 4.5", "", true),
+            ("claude-opus-4-6", "Opus 4.6", "", true),
+            ("claude-sonnet-4-6", "Sonnet 4.6", "", true),
+        ]);
+        assert!(catalog_entries(&json!({ "not": "a list" })).is_empty());
+        assert!(!plausible_model_id("-p") && !plausible_model_id("") && plausible_model_id("claude-opus-4-6"));
+    }
+
     #[test]
     fn status_distinguishes_subscription_console_and_logged_out() {
         let subscription = parse_status(
@@ -1233,6 +1318,7 @@ mod tests {
             subscription.models,
             [("sonnet", "Sonnet"), ("opus", "Opus"), ("haiku", "Haiku")].map(|(a, b)| (a.to_string(), b.to_string()))
         );
+        assert_eq!(crate::chat::short_note("  For quick answers. "), "Quick answers");
 
         let no_email = parse_status(r#"{"loggedIn":true,"authMethod":"claude.ai"}"#);
         assert!(no_email.signed_in);

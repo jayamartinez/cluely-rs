@@ -36,6 +36,30 @@ pub struct SubscriptionStatus {
     pub models: Vec<(String, String)>,
     /// The model "Default" means, when the provider reports it.
     pub default_model: Option<String>,
+    /// Every model the macOS picker offers, newest first, older ones marked `legacy`; empty when
+    /// the provider reported no list (the picker then offers `models`).
+    pub catalog: Vec<ModelEntry>,
     /// User-safe explanation when something is wrong.
     pub error: Option<String>,
+}
+
+/// A model in the macOS picker: the latest ones are listed, older ones wait under "Legacy models".
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ModelEntry {
+    /// What is saved and passed to the CLI (for Claude's latest models, the alias that follows them).
+    pub id: String,
+    pub name: String,
+    /// What it's for, in a few words ("Fastest for quick answers"); may be empty.
+    pub note: String,
+    pub legacy: bool,
+}
+
+/// A provider's model description as a picker note: "For your toughest challenges." → "Your
+/// toughest challenges", at most 60 characters.
+pub(crate) fn short_note(text: &str) -> String {
+    let text = text.trim().trim_end_matches('.');
+    let text = text.strip_prefix("For ").unwrap_or(text);
+    let mut chars = text.chars();
+    let capitalized = chars.next().map(|first| first.to_uppercase().chain(chars).collect::<String>()).unwrap_or_default();
+    capitalized.chars().take(60).collect()
 }

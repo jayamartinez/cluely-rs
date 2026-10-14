@@ -17,13 +17,33 @@ use crate::audio::Source;
 #[serde(rename_all = "camelCase")]
 pub enum Provider { #[default] Codex, Claude, ApiKey }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum ClaudeModel { #[default] Sonnet, Opus, Haiku }
+/// The Claude Code model, as `claude --model` takes it: an alias that follows the newest version
+/// ("sonnet", "opus", "haiku", "fable") or a full model id picked under Legacy models
+/// ("claude-opus-4-6"). Saved as that text; anything that isn't shaped like a model id is rejected.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct ClaudeModel(String);
 
 impl ClaudeModel {
-    /// Alias accepted by `claude --model`.
-    pub fn id(self) -> &'static str { match self { Self::Sonnet => "sonnet", Self::Opus => "opus", Self::Haiku => "haiku" } }
+    /// The aliases offered before Claude Code's model list is known (and on Windows).
+    pub const ALIASES: [(&str, &str); 3] = [("sonnet", "Sonnet"), ("opus", "Opus"), ("haiku", "Haiku")];
+
+    pub fn new(id: &str) -> Option<Self> { crate::claude_cli::plausible_model_id(id).then(|| Self(id.to_string())) }
+
+    pub fn id(&self) -> &str { &self.0 }
+}
+
+impl Default for ClaudeModel {
+    fn default() -> Self { Self("sonnet".into()) }
+}
+
+impl TryFrom<String> for ClaudeModel {
+    type Error = &'static str;
+    fn try_from(id: String) -> Result<Self, Self::Error> { Self::new(&id).ok_or("not a Claude model id") }
+}
+
+impl From<ClaudeModel> for String {
+    fn from(model: ClaudeModel) -> Self { model.0 }
 }
 
 
@@ -350,8 +370,22 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// Saved aliases from before Legacy models still load; a full id saves as itself.
+    #[test]
+    fn claude_model_takes_aliases_and_full_ids() {
+        let older: Settings = serde_json::from_str(r#"{"claudeModel":"opus"}"#).unwrap();
+        assert_eq!(older.claude_model.id(), "opus");
+        assert_eq!(Settings::default().claude_model.id(), "sonnet");
+        let legacy = Settings { claude_model: ClaudeModel::new("claude-opus-4-6").unwrap(), ..Settings::default() };
+        let json = serde_json::to_string(&legacy).unwrap();
+        assert!(json.contains(r#""claudeModel":"claude-opus-4-6""#), "{json}");
+        assert_eq!(serde_json::from_str::<Settings>(&json).unwrap(), legacy);
+        assert!(ClaudeModel::new("--dangerously-skip").is_none());
+    }
+
     #[test]
     fn invalid_values_are_rejected_instead_of_silently_coerced() {
         assert!(serde_json::from_str::<Settings>(r#"{"provider":"gemini"}"#).is_err());
+        assert!(serde_json::from_str::<Settings>(r#"{"claudeModel":"--help"}"#).is_err());
     }
 }
