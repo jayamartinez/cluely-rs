@@ -132,15 +132,22 @@ fn answer_early(s: &Settings, cx: &mut Context<Overlay>) -> Div {
             switch("auto-answer", s.auto_answer, |s, v| s.auto_answer = v, cx)).px(px(ROW_INSET)))
 }
 
-/// Settings → Window → Dock (macOS).
-fn dock_section(s: &Settings, cx: &mut Context<Overlay>) -> Div {
+/// Settings → Window → Menu bar and Dock (macOS). `toggle` is the Show / hide overlay shortcut.
+#[cfg(target_os = "macos")]
+fn menu_bar_and_dock_section(s: &Settings, toggle: &str, cx: &mut Context<Overlay>) -> Div {
+    let on = s.show_menu_bar_icon;
+    // Turning the icon off may ask first (`Overlay::set_menu_bar_icon`).
+    let menu_bar_switch = div().id("show-menu-bar-icon").flex_none().cursor_pointer()
+        .on_mouse_down(MouseButton::Left, listen(cx, move |this, _, window, cx| { cx.stop_propagation(); this.set_menu_bar_icon(!on, window, cx) }))
+        .child(ui::switch(on));
     div().flex().flex_col().gap(px(12.0)).pt(px(16.0)).border_t_1().border_color(gpui::rgb(0x23262a))
-        .child(ui::section_label("DOCK"))
-        .child(switch_row("Show in Dock", "Off by default, like the Windows overlay staying out of the taskbar",
+        .child(ui::section_label("MENU BAR AND DOCK"))
+        .child(switch_row("Show menu bar icon", "Live, modes, Settings and Quit from the menu bar. On by default.", menu_bar_switch))
+        .child(switch_row("Show in Dock", "Also puts CluelyRS in ⌘Tab. Off by default.",
             switch("show-in-dock", s.show_in_dock, |s, v| s.show_in_dock = v, cx)))
         .child(div().flex().gap(px(8.0)).text_size(px(12.0)).line_height(px(16.0)).text_color(theme::muted())
             .child(div().pt(px(1.0)).child(ui::icon("icons/info.svg", 13.0, theme::muted())))
-            .child(div().flex_1().min_w_0().child("When hidden, CluelyRS isn't in the Dock or ⌘Tab; quit from Settings › About, or with ⌘Q while Settings is open.")))
+            .child(div().flex_1().min_w_0().child(format!("With the icon hidden, press {toggle} to show the overlay and open Settings from its gear."))))
 }
 
 fn button(id: &'static str, label: impl Into<SharedString>, primary: bool) -> gpui::Stateful<Div> {
@@ -680,12 +687,14 @@ impl Overlay {
 
     fn window_tab(&self, cx: &mut Context<Self>) -> Div {
         let s = &self.store.value;
-        div().flex().flex_col()
+        let tab = div().flex().flex_col()
             .child(ui::setting_row("Hide from screen capture", switch("hide-capture", s.hide_from_capture, |s, v| s.hide_from_capture = v, cx)))
             .child(ui::setting_row("Attach a screenshot to every message", switch("screen-on-send", s.screen_on_send, |s, v| s.screen_on_send = v, cx)))
             .child(ui::setting_row("Start Live when the app opens", switch("live-on-launch", s.start_live_on_launch, |s, v| s.start_live_on_launch = v, cx)).border_b_0())
-            .child(self.appearance_section(cx))
-            .when(cfg!(target_os = "macos"), |tab| tab.child(dock_section(s, cx)))
+            .child(self.appearance_section(cx));
+        #[cfg(target_os = "macos")]
+        let tab = tab.child(menu_bar_and_dock_section(s, &self.hotkeys.label(Action::Toggle), cx));
+        tab
     }
 }
 

@@ -1,0 +1,18 @@
+<!-- CluelyRS app icon (Paper "Menu bar · macOS · Hide icon alert", App icon tile), drawn in the tile's own
+     58 pt units and placed on Apple's 1024 icon grid: an 824 px tile with a 100 px margin. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#24272C"/>
+      <stop offset="1" stop-color="#0F1012"/>
+    </linearGradient>
+  </defs>
+  <g transform="translate(100 100) scale(14.2069)">
+    <rect width="58" height="58" rx="14" fill="url(#tile)"/>
+    <rect x="0.25" y="0.25" width="57.5" height="57.5" rx="13.75" fill="none" stroke="#FFFFFF" stroke-opacity="0.12" stroke-width="0.5"/>
+    <g transform="translate(11 11) scale(1.2)">
+      <circle cx="15" cy="15" r="15" fill="#4C8DFF"/>
+      <path d="M8 13V8h5M17 8h5v5M22 17v5h-5M13 22H8v-5" fill="none" stroke="#061230" stroke-width="1.8"/>
+    </g>
+  </g>
+</svg>

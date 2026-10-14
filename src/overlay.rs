@@ -206,6 +206,9 @@ pub struct Overlay {
     /// Windows: first-run setup, while its window is open; the overlay stays hidden meanwhile.
     #[cfg(windows)]
     pub(crate) setup: Option<crate::onboarding::Setup>,
+    /// macOS: the menu bar icon and its menu (`menu_bar`).
+    #[cfg(target_os = "macos")]
+    menu_bar: Option<menu_bar::MenuBar>,
 }
 
 impl Overlay {
@@ -309,11 +312,13 @@ impl Overlay {
             open_picker: None, reveal_accounts: false, devices: None, devices_loading: false, archive_bytes: None, picker_face: Rc::default(), toggle_hover: None,
             collapse: None, settings_height: Rc::default(), modes_ui, modes, updates: Default::default(), modes_window: None, switcher: None,
             #[cfg(windows)]
-            setup: None };
+            setup: None,
+            #[cfg(target_os = "macos")]
+            menu_bar: None };
         overlay.refresh_model_status();
         overlay.mark_existing_keys(window, cx);
         #[cfg(target_os = "macos")]
-        overlay.update_dock();
+        { overlay.update_dock(); overlay.start_menu_bar(window, cx); }
         if start_live { overlay.set_live(true, window, cx); }
         #[cfg(windows)]
         if setup { overlay.open_setup(window, cx); }
@@ -334,7 +339,12 @@ impl Overlay {
             apply_capture_setting(native, &self.store.value);
         }
         #[cfg(target_os = "macos")]
-        if previous.show_in_dock != self.store.value.show_in_dock { self.update_dock(); }
+        if previous.show_in_dock != self.store.value.show_in_dock {
+            // Leaving the Dock would send Settings behind other apps (`settings_window::keep_in_front`).
+            let in_front = self.settings_window.filter(|&handle| !self.store.value.show_in_dock && crate::settings_window::is_in_front(handle, cx));
+            self.update_dock();
+            if let Some(handle) = in_front { crate::settings_window::keep_in_front(handle, cx); }
+        }
         // Grows and shrinks around the card's centre, keeping its top edge (the height doesn't change).
         if let Some(native) = self.native && previous.card_width != self.store.value.card_width {
             platform::set_width_centred(native, self.store.value.card_width.window());
@@ -1210,6 +1220,8 @@ mod card;
 mod chat;
 mod update_notice;
 mod switcher;
+#[cfg(target_os = "macos")]
+mod menu_bar;
 pub(crate) use card::CARD_WIDTH;
 /// How many audio levels the Live waveform keeps (one per bar from the middle out).
 pub(crate) const LEVEL_HISTORY: usize = 3;

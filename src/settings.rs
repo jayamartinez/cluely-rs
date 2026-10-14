@@ -88,6 +88,9 @@ pub struct Settings {
     /// macOS: show CluelyRS in the Dock and ⌘Tab. Off keeps it out, as the Windows overlay stays
     /// out of the taskbar.
     pub show_in_dock: bool,
+    /// macOS: show the menu bar icon and its menu (Live, modes, Settings, Quit). On by default,
+    /// so settings saved before it existed keep the icon.
+    pub show_menu_bar_icon: bool,
     /// Settings › Window › Appearance (`appearance`): the card's background opacity in percent, the
     /// size of its reading text and its width.
     pub background_opacity: u8,
@@ -124,7 +127,7 @@ impl Default for Settings {
             use_gpu: true, listen_mic: true, listen_desktop: true,
             background_opacity: appearance::DEFAULT_OPACITY, text_size: TextSize::default(), card_width: CardWidth::default(),
             mic_device: String::new(), desktop_device: String::new(),
-            hide_from_capture: true, screen_on_send: true, start_live_on_launch: false, show_in_dock: false,
+            hide_from_capture: true, screen_on_send: true, start_live_on_launch: false, show_in_dock: false, show_menu_bar_icon: true,
             save_sessions: true, save_screenshots: true, keep_sessions: Retention::default(),
             check_for_updates: true, last_update_check: None, dismissed_update: String::new(), setup_done: false, mode: None,
         }
@@ -280,6 +283,11 @@ mod tests {
         assert!(!partial.speculative_answers && !partial.auto_answer, "speculative answers are opt-in");
         assert!(partial.transcribe);
         assert!(partial.use_gpu, "the GPU is on unless turned off");
+        assert!(partial.show_menu_bar_icon && !partial.show_in_dock, "the menu bar icon shows, the Dock icon doesn't");
+        let hidden = Settings { show_menu_bar_icon: false, ..Settings::default() };
+        let json = serde_json::to_string(&hidden).unwrap();
+        assert!(json.contains(r#""showMenuBarIcon":false"#), "{json}");
+        assert_eq!(serde_json::from_str::<Settings>(&json).unwrap(), hidden);
         assert!(partial.codex_path.is_empty() && partial.claude_path.is_empty(), "the CLIs are found automatically");
         let located: Settings = serde_json::from_str(r#"{"codexPath":"/opt/tools/codex","claudePath":""}"#).unwrap();
         assert_eq!((located.codex_path.as_str(), located.claude_path.as_str()), ("/opt/tools/codex", ""));

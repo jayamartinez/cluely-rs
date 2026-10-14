@@ -8,7 +8,7 @@ use std::rc::Rc;
 
 use gpui::{
     AnyElement, App, AppContext, Bounds, Context, Entity, FocusHandle, FontWeight, InteractiveElement, IntoElement, KeyBinding, MouseButton,
-    ParentElement, Render, Styled, Subscription, TitlebarOptions, Window, WindowBounds, WindowKind, WindowOptions, div, point, prelude::*, px,
+    ParentElement, Render, Styled, Subscription, TitlebarOptions, Window, WindowBounds, WindowHandle, WindowKind, WindowOptions, div, point, prelude::*, px,
     rgb, size,
 };
 
@@ -93,6 +93,22 @@ fn open_page(page: Page, cx: &mut Context<Overlay>) {
             Err(error) => eprintln!("settings window could not open: {error}"),
         }
     }));
+}
+
+/// Whether Settings is in front, taking the keyboard, as when its "Show in Dock" switch is clicked.
+/// Asks AppKit for the key window: while Settings handles that click, GPUI has lent its window
+/// out, so reading the window through `handle` fails.
+pub fn is_in_front(handle: WindowHandle<SettingsWindow>, cx: &App) -> bool {
+    cx.active_window() == Some(handle.into())
+}
+
+/// CluelyRS just left the Dock while Settings was in front (`is_in_front`), which makes macOS
+/// deactivate it and leaves Settings behind other apps (`platform::reactivate_after_leaving_dock`).
+/// Bring CluelyRS and Settings back. Not otherwise: the overlay never activates CluelyRS itself.
+pub fn keep_in_front(handle: WindowHandle<SettingsWindow>, cx: &mut App) {
+    platform::reactivate_after_leaving_dock(cx, move |active, cx| {
+        let _ = handle.update(cx, |this, window, _| if active { window.activate_window(); } else if let Some(native) = this.native { platform::order_front(native); });
+    });
 }
 
 /// The window is about to close. Leave the Dock first (unless "Show in Dock" is on), so CluelyRS
