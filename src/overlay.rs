@@ -44,6 +44,9 @@ const SETTINGS_HEIGHT: f32 = 820.0;
 const SIGN_IN_POLL: Duration = Duration::from_secs(2);
 #[cfg(target_os = "macos")]
 const SIGN_IN_WAIT: Duration = Duration::from_secs(300);
+/// Every this many sign-in polls (30 s), Codex is checked fully whatever `codex login status` says.
+#[cfg(target_os = "macos")]
+const CODEX_FULL_CHECK: u32 = 15;
 /// How long Settings takes to collapse into the conversation after a message is sent from under it.
 const COLLAPSE: Duration = Duration::from_millis(200);
 /// Held movement eases in so a tap nudges, then cruises. Pixels per ~16 ms frame.
@@ -133,6 +136,8 @@ pub struct Overlay {
     /// Feedback under the API key field ("Saved", errors).
     pub(crate) key_notice: Option<SharedString>,
     pub(crate) loaded_models: Vec<String>,
+    /// Windows' Load models is fetching the list (macOS has the model typed instead).
+    #[cfg(not(target_os = "macos"))]
     pub(crate) models_loading: bool,
     /// The macOS Settings window's provider → key → model form.
     #[cfg(target_os = "macos")]
@@ -281,7 +286,12 @@ impl Overlay {
         let start_live = store.value.start_live_on_launch && !onboarding;
         let composer = cx.new(|cx| TextInput::new(composer_placeholder(&store.value), cx));
         let key_input = cx.new(|cx| TextInput::new("Paste your API key", cx).masked(true));
-        let model_input = cx.new(|cx| TextInput::new("Model id, e.g. from the list below", cx));
+        // macOS has the model typed, with an example id for the provider; Windows lists models below.
+        #[cfg(target_os = "macos")]
+        let model_placeholder = crate::settings_view::model_placeholder(&store.value.api_provider);
+        #[cfg(not(target_os = "macos"))]
+        let model_placeholder = "Model id, e.g. from the list below";
+        let model_input = cx.new(|cx| TextInput::new(model_placeholder, cx));
         let base_url_input = cx.new(|cx| TextInput::new("https://your-endpoint.example/v1", cx));
         model_input.update(cx, |input, cx| input.set_text(store.value.api_model().to_string(), cx));
         base_url_input.update(cx, |input, cx| input.set_text(store.value.custom_base_url.clone(), cx));
@@ -306,7 +316,7 @@ impl Overlay {
         }).detach();
         let modes_ui = crate::modes_view::ModesUi::new(&modes, window, cx);
         #[cfg(target_os = "macos")]
-        let model_ui = crate::settings_view::ModelUi::new(&key_input, &base_url_input, window, cx);
+        let model_ui = crate::settings_view::ModelUi::new(&key_input, window, cx);
         let mut overlay = Self { native, own_window: window.window_handle(), hotkeys, store, settings_tab: None, sessions_window: None,
             #[cfg(target_os = "macos")]
             settings_window: None,
@@ -323,7 +333,10 @@ impl Overlay {
             #[cfg(target_os = "macos")]
             model_ui,
             key_reveal: Default::default(), opacity_drag: false,
-            key_notice: None, loaded_models: Vec::new(), models_loading: false, reasoning: None, planner: Planner::new(false, Budget::default()), prepared_shot: PreparedShot::default(), answer_action: "Assist", speculation_attempt: 0,
+            key_notice: None, loaded_models: Vec::new(),
+            #[cfg(not(target_os = "macos"))]
+            models_loading: false,
+            reasoning: None, planner: Planner::new(false, Budget::default()), prepared_shot: PreparedShot::default(), answer_action: "Assist", speculation_attempt: 0,
             metrics: None, next_turn: 0, catching_mouse: true, return_focus: None,
             codex: crate::codex::CodexClient::new(), codex_status: None, claude_status: None, signing_in: None,
             #[cfg(target_os = "macos")]
@@ -383,6 +396,11 @@ impl Overlay {
             // Each provider keeps its own model; show the one saved for the new provider.
             let model = self.store.value.api_model().to_string();
             self.model_input.update(cx, |input, cx| input.set_text(model, cx));
+            #[cfg(target_os = "macos")]
+            {
+                let placeholder = crate::settings_view::model_placeholder(&self.store.value.api_provider);
+                self.model_input.update(cx, |input, cx| input.set_placeholder(placeholder, cx));
+            }
             self.loaded_models.clear();
             self.key_notice = None;
         }
@@ -390,11 +408,6 @@ impl Overlay {
         if previous.transcribe != now.transcribe || previous.stt_provider != now.stt_provider || previous.listen_mic != now.listen_mic || previous.listen_desktop != now.listen_desktop
             || previous.mic_device != now.mic_device || previous.desktop_device != now.desktop_device || previous.use_gpu != now.use_gpu {
             self.restart_listening_if_live(window, cx);
-        }
-        // Choosing another provider loads its list (a user action, so it may read the saved key).
-        #[cfg(target_os = "macos")]
-        if previous.api_provider != self.store.value.api_provider || previous.provider != self.store.value.provider {
-            self.ensure_models(false, true, window, cx);
         }
         cx.notify();
     }
@@ -490,8 +503,6 @@ impl Overlay {
         self.key_input.update(cx, |input, cx| input.set_revealed(false, cx));
         self.key_reveal.hide();
         if tab == Tab::Model { self.refresh_subscriptions(window, cx); }
-        #[cfg(target_os = "macos")]
-        if tab == Tab::Model { self.ensure_models(true, false, window, cx); }
         if tab == Tab::Listening { self.refresh_model_status(); self.load_devices(window, cx); }
         if tab == Tab::History { self.refresh_archive_size(window, cx); }
         if tab == Tab::Modes { self.prepare_modes_tab(cx); }
@@ -780,16 +791,23 @@ impl Overlay {
             }).await;
             let started = Instant::now();
             let mut failed = opened.err();
+            let mut poll = 0;
             loop {
                 if failed.is_none() { cx.background_executor().timer(SIGN_IN_POLL).await; }
                 if this.update(cx, |this, _| this.sign_in_attempt != attempt).unwrap_or(true) { return; }
                 let codex = codex.clone();
-                // A running Codex app-server keeps the signed-out account it read at start, so each
-                // check starts a fresh one; nothing else can use it while signed out.
+                poll += 1;
+                // A running Codex app-server keeps the signed-out account it read at start, so a check
+                // starts a fresh one, but only once `codex login status` stops saying signed out.
+                // `None` is a poll that changed nothing.
                 let status = if failed.is_some() { None } else {
-                    Some(cx.background_executor().spawn(async move {
-                        if provider == Provider::Codex { codex.shutdown(); codex.status() } else { crate::claude_cli::ClaudeCli::status() }
-                    }).await)
+                    cx.background_executor().spawn(async move {
+                        match provider {
+                            Provider::Codex if !codex_restart_due(crate::codex::login_status(), poll) => None,
+                            Provider::Codex => { codex.shutdown(); Some(codex.status()) }
+                            _ => Some(crate::claude_cli::ClaudeCli::status()),
+                        }
+                    }).await
                 };
                 let done = this.update(cx, |this, cx| {
                     if this.sign_in_attempt != attempt { return true; }
@@ -1070,32 +1088,36 @@ impl Overlay {
     }
 
     /// Save the typed key for the tab's provider, then mark it saved (with its masked hint) in
-    /// Settings. The credential store is used on a background thread: it can block, and on macOS
-    /// show a Keychain prompt.
+    /// Settings. On macOS the provider checks the key first (`key_check`). The network and the
+    /// credential store are used on a background thread: they can block, and the Keychain can prompt.
     pub fn save_key(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let key = self.key_input.read(cx).text().trim().to_string();
         if key.is_empty() { return; }
         let provider = self.key_target();
-        self.key_notice = Some("Saving…".into());
+        self.key_notice = Some(if cfg!(target_os = "macos") { "Checking the key…" } else { "Saving…" }.into());
         cx.notify();
         let target = provider.clone();
+        #[cfg(target_os = "macos")]
+        let base_url = self.store.value.custom_base_url.clone();
         cx.spawn_in(window, async move |this, cx| {
-            let saved = cx.background_executor()
-                .spawn(async move { crate::secrets::set(&target, &key).map(|()| crate::secrets::masked(&key).unwrap_or_default()) }).await;
-            let _ = this.update_in(cx, |this, window, cx| {
+            let saved = cx.background_executor().spawn(async move {
+                // macOS asks the provider first, so a key it turns down never reaches the Keychain.
+                #[cfg(target_os = "macos")]
+                if let crate::key_check::Verdict::Refuse(reason) = crate::key_check::check(&target, &key, &base_url) { return Err(reason); }
+                crate::secrets::set(&target, &key).map(|()| crate::secrets::masked(&key).unwrap_or_default())
+                    .map_err(|error| format!("Couldn't save the key: {error}"))
+            }).await;
+            let _ = this.update_in(cx, |this, _, cx| {
                 match saved {
                     Ok(hint) => {
                         this.key_input.update(cx, |input, cx| input.clear(cx));
                         this.set_key_marker(&provider, Some(hint));
                         this.key_notice = Some(format!("Saved to {}.", crate::secrets::STORE_NAME).into());
                         #[cfg(target_os = "macos")]
-                        this.key_saved(&provider, window, cx);
+                        this.key_saved(&provider);
                     }
-                    Err(error) => this.key_notice = Some(format!("Couldn't save the key: {error}").into()),
+                    Err(notice) => this.key_notice = Some(notice.into()),
                 }
-                // Only macOS loads models from here.
-                #[cfg(not(target_os = "macos"))]
-                let _ = window;
                 cx.notify();
             });
         }).detach();
@@ -1148,7 +1170,8 @@ impl Overlay {
         if changed { self.store.save(); }
     }
 
-    /// Fetch the provider's model list off the UI thread.
+    /// Fetch the provider's model list off the UI thread (Windows' Load models; macOS has the model typed).
+    #[cfg(not(target_os = "macos"))]
     pub fn load_models(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(preset) = crate::providers::preset(&self.store.value.api_provider) else { return };
         let base = if preset.base_url.is_empty() { self.store.value.custom_base_url.trim().to_string() } else { preset.base_url.to_string() };
@@ -1163,27 +1186,18 @@ impl Overlay {
                 let found = key.as_deref().and_then(crate::secrets::masked);
                 (crate::providers::list_models(wire, &base, key.as_deref()), found)
             }).await;
-            let _ = this.update_in(cx, |this, window, cx| {
+            let _ = this.update_in(cx, |this, _, cx| {
                 this.models_loading = false;
                 // A key saved before markers existed is marked once it has been read. A key that
                 // can't be read leaves the marker alone: a denied Keychain prompt reads as no key.
                 if found.is_some() { this.set_key_marker(preset.id, found); }
                 // The provider changed while this list loaded: it belongs to the previous one.
-                if this.store.value.api_provider != preset.id {
-                    #[cfg(target_os = "macos")]
-                    this.models_stale(window, cx);
-                } else {
-                    #[cfg(target_os = "macos")]
-                    this.models_loaded(preset, result);
-                    #[cfg(not(target_os = "macos"))]
+                if this.store.value.api_provider == preset.id {
                     match result {
                         Ok(models) => this.loaded_models = models,
                         Err(error) => this.key_notice = Some(format!("Couldn't load models: {error}").into()),
                     }
                 }
-                // Only macOS starts another load from here.
-                #[cfg(not(target_os = "macos"))]
-                let _ = window;
                 cx.notify();
             });
         }).detach();
@@ -1480,6 +1494,11 @@ fn enclosing<'a>(shapes: impl Iterator<Item = &'a platform::Shape>, radius: i32)
 #[cfg(target_os = "macos")]
 fn in_dock(settings: &Settings, setup_open: bool) -> bool { settings.show_in_dock || setup_open }
 
+/// Whether a Codex sign-in check restarts the app-server to read the account: when `codex login
+/// status` says signed in or can't say, and every `CODEX_FULL_CHECK` polls in case it's wrong.
+#[cfg(target_os = "macos")]
+fn codex_restart_due(reported: Option<bool>, poll: u32) -> bool { reported != Some(false) || poll.is_multiple_of(CODEX_FULL_CHECK) }
+
 /// Whether the overlay and Settings are kept out of screen captures right now.
 pub(crate) fn capture_excluded(settings: &Settings) -> bool {
     // CLUELYRS_ALLOW_CAPTURE=1 is a development switch for taking screenshots of the overlay.
@@ -1511,6 +1530,16 @@ mod tests {
     use super::{Status, Turn, composer_placeholder, enclosing, save_turn};
     use crate::archive::Archive;
     use crate::settings::Settings;
+
+    /// Codex's app-server restarts only once its CLI stops saying signed out, or every 30 s.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_codex_sign_in_restarts_the_app_server_only_when_it_may_have_changed() {
+        assert!(!super::codex_restart_due(Some(false), 1), "still signed out");
+        assert!(super::codex_restart_due(Some(true), 1));
+        assert!(super::codex_restart_due(None, 1), "the CLI can't say: check as before");
+        assert!(super::codex_restart_due(Some(false), super::CODEX_FULL_CHECK), "in case the CLI is wrong");
+    }
 
     /// Setup is in the Dock whatever "Show in Dock" says; its switch decides once setup is over.
     #[cfg(target_os = "macos")]

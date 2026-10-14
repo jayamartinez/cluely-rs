@@ -889,6 +889,35 @@ pub fn executable() -> Result<PathBuf, String> {
     SystemLauncher.resolve().map_err(|error| error.message)
 }
 
+/// What `codex login status` says: signed in (`Some(true)`) or out, or `None` when it can't be asked
+/// (no CLI, one without the command, no answer within `LOGIN_STATUS_WAIT`). It only reads local
+/// files, unlike the app-server, which keeps the account it read when it started.
+#[cfg(target_os = "macos")]
+pub fn login_status() -> Option<bool> {
+    const LOGIN_STATUS_WAIT: Duration = Duration::from_secs(5);
+    let mut child = Command::new(executable().ok()?).args(["login", "status"])
+        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().ok()?;
+    let deadline = Instant::now() + LOGIN_STATUS_WAIT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return login_reported(status.code()),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+}
+
+/// `codex login status` exits 0 signed in and 1 signed out; anything else (2 is the usage error of
+/// a CLI without the command) says nothing.
+#[cfg(target_os = "macos")]
+fn login_reported(code: Option<i32>) -> Option<bool> {
+    match code { Some(0) => Some(true), Some(1) => Some(false), _ => None }
+}
+
 /// Whether a file the user picked can be used as the Codex CLI, by the rules of the search.
 pub fn check_location(path: &Path) -> Result<(), String> {
     located(path).map(drop).ok_or_else(|| "That isn't the Codex CLI.".to_string())
@@ -1999,6 +2028,15 @@ pub(crate) mod tests {
     use std::collections::VecDeque;
     use std::sync::Condvar;
     use std::sync::atomic::AtomicUsize;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn login_status_reads_only_its_two_exit_codes() {
+        assert_eq!(login_reported(Some(0)), Some(true));
+        assert_eq!(login_reported(Some(1)), Some(false));
+        assert_eq!(login_reported(Some(2)), None, "a CLI without `login status`");
+        assert_eq!(login_reported(None), None, "killed by a signal");
+    }
 
     // --- In-memory transport -----------------------------------------------------------------
 

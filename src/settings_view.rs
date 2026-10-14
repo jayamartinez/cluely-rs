@@ -25,7 +25,7 @@ mod reveal;
 #[cfg(target_os = "macos")]
 mod model_form;
 #[cfg(target_os = "macos")]
-pub(crate) use model_form::ModelUi;
+pub(crate) use model_form::{ModelUi, model_placeholder};
 pub(crate) use reveal::KeyReveal;
 mod appearance;
 
@@ -311,8 +311,16 @@ impl Overlay {
     /// A dropdown bound to a string-valued choice. `options` are (id, label); `set` gets the id.
     fn dropdown(&self, picker: Picker, value: impl Into<SharedString>, options: Vec<(String, String)>, selected: &str,
         set: fn(&mut Settings, String), cx: &mut Context<Self>) -> Div {
+        self.dropdown_with_icons(picker, None, value, options, selected, set, cx)
+    }
+
+    /// `dropdown` with an icon before each option and the current value: `icon` maps an option's id to
+    /// its icon (macOS Settings › Model's provider logos).
+    #[allow(clippy::too_many_arguments)]
+    fn dropdown_with_icons(&self, picker: Picker, icon: Option<fn(&str) -> &'static str>, value: impl Into<SharedString>, options: Vec<(String, String)>,
+        selected: &str, set: fn(&mut Settings, String), cx: &mut Context<Self>) -> Div {
         let open = self.open_picker == Some(picker);
-        let mut face = ui::picker(("picker", picker as usize), value, open).relative()
+        let mut face = ui::picker_with_icon(("picker", picker as usize), icon.map(|icon| icon(selected)), value, open).relative()
             .on_mouse_down(MouseButton::Left, listen(cx, move |this, _, _, cx| { cx.stop_propagation(); this.toggle_picker(picker, cx) }));
         let mut wrapper = div().relative().w_full();
         if open {
@@ -335,7 +343,7 @@ impl Overlay {
                 }));
             for (index, (id, label)) in options.into_iter().enumerate() {
                 let chosen = id.clone();
-                list = list.child(ui::menu_item(("item", index), label, id == selected)
+                list = list.child(ui::menu_item_with_icon(("item", index), icon.map(|icon| icon(&id)), label, id == selected)
                     .on_mouse_down(MouseButton::Left, listen(cx, move |this, _, window, cx| {
                         cx.stop_propagation();
                         this.close_picker(cx);
