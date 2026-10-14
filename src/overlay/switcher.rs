@@ -240,7 +240,8 @@ impl Overlay {
         let keys = self.hotkeys.label(crate::hotkeys::Action::SwitchMode);
         div().id("mode-switcher").relative().w(px(LIST_WIDTH)).flex().flex_col().p(px(4.0)).rounded(px(theme::radius::POPOVER)).bg(list_fill())
             .border_1().border_color(theme::keycap_border())
-            .when(MAC, |list| list.shadow(crate::ui_v3::drop_shadow(16.0, 40.0, 0.5)))
+            .when(MAC, |list| list.shadow(vec![gpui::BoxShadow { color: gpui::hsla(0.0, 0.0, 0.0, 0.5), offset: point(px(0.0), px(16.0)),
+                blur_radius: px(40.0), spread_radius: px(0.0) }]))
             .track_focus(&switcher.focus)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| this.switcher_key(event, window, cx)))
             .on_mouse_down_out(cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {

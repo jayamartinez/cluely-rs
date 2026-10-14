@@ -1,5 +1,5 @@
-//! Building blocks of the Paper "Redesign v3" pages: the macOS Settings window and first-run setup
-//! on both platforms. Corners follow each platform's scale (`RADII`); colours are the theme's.
+//! Building blocks of the Paper "Redesign v3" macOS pages: the Settings window and first-run setup.
+//! Corners follow the macOS radius scale (`RADII`); colours are the theme's.
 
 use gpui::{
     BoxShadow, Div, ElementId, FontWeight, ImageSource, IntoElement, ParentElement, Resource, Rgba, SharedString, Stateful, Styled,
@@ -8,15 +8,11 @@ use gpui::{
 
 use crate::{theme, ui};
 
-/// Corner radii, from the binding scales: macOS (cards 12, 40–48 px tiles 10, controls 9, small tiles
-/// and icon buttons 8, keycaps 6) and Windows setup (panels and tiles 6, buttons, fields and keycaps
-/// 4). The windows' own corners are the system's.
+/// Corner radii, from the macOS scale: cards 12, 40–48 px tiles 10, controls 9, small tiles and icon
+/// buttons 8, keycaps 6. The windows' own corners are the system's.
 pub(crate) struct Radii { pub card: f32, pub tile: f32, pub control: f32, pub small: f32, pub keycap: f32 }
 
-#[cfg(not(windows))]
 pub(crate) const RADII: Radii = Radii { card: 12.0, tile: 10.0, control: 9.0, small: 8.0, keycap: 6.0 };
-#[cfg(windows)]
-pub(crate) const RADII: Radii = Radii { card: 6.0, tile: 6.0, control: 4.0, small: 4.0, keycap: 4.0 };
 
 /// Segments in a level meter.
 pub(crate) const METER_SEGMENTS: usize = 14;
@@ -59,7 +55,6 @@ pub(crate) fn check_badge(check: f32) -> Div {
 }
 
 /// An on/off switch (macOS Settings): 36 × 20, the knob light on the accent when on.
-#[cfg(target_os = "macos")]
 pub(crate) fn switch(on: bool) -> Div {
     let track = div().w(px(36.0)).h(px(20.0)).flex_none().flex().items_center().p(px(2.0)).rounded_full()
         .bg(if on { theme::accent() } else { theme::hairline() });
@@ -68,12 +63,10 @@ pub(crate) fn switch(on: bool) -> Div {
 }
 
 /// A segmented control's frame (macOS Settings); `segment` fills it.
-#[cfg(target_os = "macos")]
 pub(crate) fn segmented() -> Div {
     div().flex().flex_none().gap(px(2.0)).p(px(3.0)).rounded(px(RADII.tile)).bg(theme::window_bg()).border_1().border_color(theme::divider())
 }
 
-#[cfg(target_os = "macos")]
 pub(crate) fn segment(id: impl Into<ElementId>, label: impl Into<SharedString>, selected: bool) -> Stateful<Div> {
     let base = div().id(id).flex().items_center().justify_center().gap(px(7.0)).px(px(11.0)).py(px(4.0)).rounded(px(RADII.small)).cursor_pointer()
         .text_size(px(12.0)).line_height(px(16.0)).child(label.into());
@@ -82,7 +75,6 @@ pub(crate) fn segment(id: impl Into<ElementId>, label: impl Into<SharedString>, 
 }
 
 /// A dropdown's closed face (macOS Settings): an optional logo, the value and a chevron.
-#[cfg(target_os = "macos")]
 pub(crate) fn dropdown_face(id: impl Into<ElementId>, logo: Option<&'static str>, value: impl Into<SharedString>, open: bool) -> Stateful<Div> {
     div().id(id).flex().items_center().justify_between().gap(px(10.0)).py(px(7.0)).pl(px(12.0)).pr(px(10.0)).rounded(px(RADII.control)).cursor_pointer()
         .bg(theme::field()).border_1().border_color(if open { theme::accent() } else { theme::hairline() })
@@ -166,7 +158,6 @@ pub(crate) fn back_arrow() -> impl IntoElement {
 
 /// An overlay scrollbar's thumb over the right edge of what `scroll` tracks, `right` px in, while
 /// it's taller than its box. Place it in a `relative()` parent beside the scrolling element.
-#[cfg(target_os = "macos")]
 pub(crate) fn scroll_thumb(scroll: &gpui::ScrollHandle, right: f32) -> Option<Div> {
     let viewport = f32::from(scroll.bounds().size.height);
     let overflow = f32::from(scroll.max_offset().height);
@@ -177,7 +168,7 @@ pub(crate) fn scroll_thumb(scroll: &gpui::ScrollHandle, right: f32) -> Option<Di
     Some(div().absolute().right(px(right)).top(px(6.0 + (track - thumb) * scrolled)).w(px(6.0)).h(px(thumb)).rounded(px(3.0)).bg(theme::scroll_thumb()))
 }
 
-// Setup's pages, on both platforms.
+// Setup's pages.
 
 /// The width of setup's lists and choices.
 pub(crate) const SETUP_COLUMN: f32 = 520.0;
@@ -203,7 +194,6 @@ pub(crate) fn account_line(icon: impl IntoElement, text: impl Into<SharedString>
 }
 
 /// A field on macOS setup's forms: 40 px on the API key form, 30 px in a speech card.
-#[cfg(target_os = "macos")]
 pub(crate) fn form_field(height: f32) -> Div {
     div().h(px(height)).flex().items_center().gap(px(9.0)).px(px(12.0)).rounded(px(RADII.control)).bg(theme::field()).border_1().border_color(theme::hairline())
 }

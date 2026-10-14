@@ -613,9 +613,9 @@ impl Overlay {
         // During setup the overlay is only there to look at: Assist shows it (nothing starts or is
         // sent), Show / hide and the move keys work as usual, and the rest wait until setup ends.
         #[cfg(windows)]
-        if let Some(setup) = &mut self.setup {
+        if self.setup.is_some() {
             match action {
-                Action::Assist => { setup.tried_assist = true; self.show(); cx.notify(); }
+                Action::Assist => { self.show(); cx.notify(); }
                 Action::Toggle => self.toggle_visible(),
                 Action::MoveUp | Action::MoveDown | Action::MoveLeft | Action::MoveRight => self.start_motion(Motion::Move, window, cx),
                 _ => {}
@@ -1112,7 +1112,7 @@ impl Overlay {
     /// on the Model tab.
     pub(crate) fn key_target(&self) -> String {
         #[cfg(windows)]
-        if self.setup.as_ref().is_some_and(|setup| setup.step == crate::onboarding::Step::Transcription) {
+        if self.setup.as_ref().is_some_and(|setup| setup.step == crate::onboarding::Step::Listening) {
             return crate::stt::deepgram::PROVIDER_ID.to_string();
         }
         #[cfg(target_os = "macos")]
@@ -1351,9 +1351,9 @@ impl Overlay {
 
 
 impl Overlay {
-    /// The conversation shown between the card's text box and its toolbar: what was heard, the
-    /// answer thread (each turn's bubble, "Viewed screen" when it had a screenshot, the answer with
-    /// its key phrase) and the quick actions.
+    /// The conversation shown above the card's text box: what was heard, the answer thread (each
+    /// turn's bubble, "Viewed screen" when it had a screenshot, the answer as written) and the quick
+    /// actions.
     fn live_parts(&self, cx: &mut Context<Self>) -> (gpui::Div, gpui::Stateful<gpui::Div>, gpui::Div) {
         let heard = self.transcript_block();
         let mut thread = div().id("thread").flex().flex_col().gap(px(12.0)).flex_1().overflow_y_scroll().track_scroll(&self.scroll);
@@ -1375,7 +1375,7 @@ impl Overlay {
             let body: AnyElement = match &turn.status {
                 Status::Failed(reason) => div().text_size(px(13.0)).line_height(px(20.0)).text_color(gpui::rgb(0xffb4a8)).child(reason.clone()).into_any_element(),
                 Status::Streaming if turn.text.is_empty() => div().text_size(px(13.0)).text_color(theme::muted()).child("Thinking…").into_any_element(),
-                _ => div().id(("answer", turn.id as usize)).min_w_0().child(chat::answer(&turn.text, &turn.action, size))
+                _ => div().id(("answer", turn.id as usize)).min_w_0().child(chat::answer(&turn.text, size))
                     .when(turn.status == Status::Stopped, |answer| answer.child(chat::stopped_mark())).into_any_element(),
             };
             // "Viewed screen" sits with the answer, above it.
