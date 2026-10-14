@@ -319,6 +319,10 @@ impl Overlay {
 
         let login = div().id("setup-login").flex_none().cursor_pointer().child(ui::switch(setup.launch_at_login))
             .on_mouse_down(MouseButton::Left, listen(cx, |this, _, _, cx| this.toggle_launch_at_login(cx)));
+        // Turning the icon off asks first, as Settings › Window does (`Overlay::set_menu_bar_icon`).
+        let tray_icon = s.show_menu_bar_icon;
+        let tray = div().id("setup-tray").flex_none().cursor_pointer().child(ui::switch(tray_icon))
+            .on_mouse_down(MouseButton::Left, listen(cx, move |this, _, window, cx| { cx.stop_propagation(); this.set_menu_bar_icon(!tray_icon, window, cx) }));
         let percent = s.background_opacity.min(100);
         let opacity = div().flex().items_center().gap(px(10.0)).h(px(36.0))
             .child(ui::icon("icons/setup-contrast.svg", 16.0, theme::body()))
@@ -331,6 +335,7 @@ impl Overlay {
             .child(title("STARTUP", 0.0))
             .child(row("icons/setup-power.svg", "Open at sign-in", login.into_any_element()))
             .child(row("icons/setup-wave.svg", "Start Live on open", switch("setup-live", s.start_live_on_launch, |s, v| s.start_live_on_launch = v, cx).into_any_element()))
+            .child(row("icons/setup-tray.svg", "Tray icon", tray.into_any_element()))
             .child(row("icons/setup-refresh.svg", "Check for updates", switch("setup-updates", s.check_for_updates, |s, v| s.check_for_updates = v, cx).into_any_element()))
             .child(title("LOOK", 14.0))
             .child(opacity)
