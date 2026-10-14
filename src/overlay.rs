@@ -933,7 +933,8 @@ impl Overlay {
             let _ = this.update(cx, |this, cx| {
                 this.key_notice = Some(match removed {
                     Ok(()) => { this.set_key_marker(&provider, None); "Key removed.".into() }
-                    Err(_) => "No saved key to remove.".into(),
+                    // Nothing stored counts as removed, so this is a refusal or a store error.
+                    Err(error) => error.to_string().into(),
                 });
                 cx.notify();
             });
