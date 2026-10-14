@@ -23,6 +23,8 @@ pub mod modes;
 pub mod modes_view;
 pub mod modes_window;
 pub mod notes;
+#[cfg(target_os = "macos")]
+pub mod onboarding_window;
 pub mod overlay;
 pub mod platform;
 pub mod providers;

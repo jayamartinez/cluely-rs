@@ -106,6 +106,15 @@ pub struct Overlay {
     /// macOS shows settings in their own window, while it's open.
     #[cfg(target_os = "macos")]
     pub(crate) settings_window: Option<gpui::WindowHandle<crate::settings_window::SettingsWindow>>,
+    /// The tab the macOS Settings window last drew, so the shared key field knows its provider.
+    #[cfg(target_os = "macos")]
+    pub(crate) settings_window_tab: Option<Tab>,
+    /// macOS first-run setup, while it's open (`onboarding_window`).
+    #[cfg(target_os = "macos")]
+    pub(crate) onboarding_window: Option<gpui::WindowHandle<crate::onboarding_window::OnboardingWindow>>,
+    /// The overlay is hidden, and Live hasn't started, until the first-run setup finishes.
+    #[cfg(target_os = "macos")]
+    hidden_for_onboarding: bool,
     /// Where Live sessions are saved; `None` when no data folder is available.
     pub(crate) archive: Option<Archive>,
     /// Receives Esc while settings is open.
@@ -221,6 +230,9 @@ impl Overlay {
     pub fn new(hotkeys: Hotkeys, presses: UnboundedReceiver<Action>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let native = platform::native_window(window);
         let mut store = Store::load();
+        // A first run (or one that quit during setup) opens setup with the overlay hidden; main.rs
+        // opens the window unshown.
+        let onboarding = store.onboarding_pending();
         let modes = crate::modes::ModeStore::load();
         store.value.mode = modes.active_material();
         if let Some(native) = native {
@@ -230,7 +242,7 @@ impl Overlay {
             let _ = platform::set_topmost(native);
         }
         let mut hotkeys = hotkeys;
-        hotkeys.set_overlay_visible(true);
+        hotkeys.set_overlay_visible(!onboarding);
         if !hotkeys.unavailable.is_empty() { eprintln!("shortcuts in use by another app: {:?}", hotkeys.unavailable); }
 
         cx.spawn_in(window, async move |this, cx| {
@@ -262,7 +274,8 @@ impl Overlay {
             archive.recover();
             if store.value.save_sessions { archive.prune(store.value.keep_sessions, archive::unix_now()); }
         }
-        let start_live = store.value.start_live_on_launch;
+        // Live on launch waits for setup to finish (`finish_onboarding`).
+        let start_live = store.value.start_live_on_launch && !onboarding;
         let composer = cx.new(|cx| TextInput::new(composer_placeholder(&store.value), cx));
         let key_input = cx.new(|cx| TextInput::new("Paste your API key", cx).masked(true));
         let model_input = cx.new(|cx| TextInput::new("Model id, e.g. from the list below", cx));
@@ -294,6 +307,12 @@ impl Overlay {
         let mut overlay = Self { native, own_window: window.window_handle(), hotkeys, store, settings_tab: None, sessions_window: None,
             #[cfg(target_os = "macos")]
             settings_window: None,
+            #[cfg(target_os = "macos")]
+            settings_window_tab: None,
+            #[cfg(target_os = "macos")]
+            onboarding_window: None,
+            #[cfg(target_os = "macos")]
+            hidden_for_onboarding: onboarding,
             archive, focus: cx.focus_handle(),
             recorder: None, shape: Rc::default(), hits: Hits::default(), composer, key_input, model_input, base_url_input,
             #[cfg(target_os = "macos")]
@@ -317,6 +336,12 @@ impl Overlay {
         #[cfg(target_os = "macos")]
         { overlay.update_dock(); overlay.start_menu_bar(window, cx); }
         if start_live { overlay.set_live(true, window, cx); }
+        // Deferred: the setup window reads the overlay, which doesn't exist until this returns.
+        #[cfg(target_os = "macos")]
+        if onboarding {
+            let step = overlay.store.value.onboarding_step.unwrap_or(crate::settings::OnboardingStep::Welcome);
+            cx.defer_in(window, move |this, window, cx| this.open_onboarding_at(step, window, cx));
+        }
         overlay.start_update_checks(window, cx);
         overlay
     }
@@ -336,7 +361,8 @@ impl Overlay {
         #[cfg(target_os = "macos")]
         if previous.show_in_dock != self.store.value.show_in_dock {
             // Leaving the Dock would send Settings behind other apps (`settings_window::keep_in_front`).
-            let in_front = self.settings_window.filter(|&handle| !self.store.value.show_in_dock && crate::settings_window::is_in_front(handle, cx));
+            // While setup is open CluelyRS stays in the Dock, and the switch only records the choice.
+            let in_front = self.settings_window.filter(|&handle| !self.in_dock() && crate::settings_window::is_in_front(handle, cx));
             self.update_dock();
             if let Some(handle) = in_front { crate::settings_window::keep_in_front(handle, cx); }
         }
@@ -379,13 +405,62 @@ impl Overlay {
         }
     }
 
-    /// In the Dock only while "Show in Dock" is on. CluelyRS stays out of it while Settings is open
-    /// too: tools that quit apps whose last window closes (and so would quit CluelyRS when Settings
-    /// closes) leave apps outside the Dock alone. Settings handles ⌘W and ⌘Q itself.
+    /// Setup from the start, with the current settings (Settings › About's Run setup again…, the menu
+    /// bar's Run Setup Again…).
+    #[cfg(target_os = "macos")]
+    pub fn open_onboarding(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_onboarding_at(crate::settings::OnboardingStep::Welcome, window, cx);
+    }
+
+    #[cfg(target_os = "macos")]
+    fn open_onboarding_at(&mut self, step: crate::settings::OnboardingStep, window: &mut Window, cx: &mut Context<Self>) {
+        let step = crate::onboarding_window::shown(step);
+        self.prepare_onboarding(step, window, cx);
+        crate::onboarding_window::open(step, cx);
+    }
+
+    /// A setup step is opening: save it, so a relaunch resumes there, and refresh what it shows
+    /// (accounts, the speech model), as for a Settings tab. Nothing here reads the Keychain.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn prepare_onboarding(&mut self, step: crate::settings::OnboardingStep, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::settings::OnboardingStep;
+        self.update_settings(|s| crate::onboarding_window::record(s, Some(step)), window, cx);
+        // The key field is shared by the Model and Transcription steps.
+        self.key_notice = None;
+        match step {
+            OnboardingStep::Model => self.prepare_tab(Tab::Model, window, cx),
+            OnboardingStep::Transcription => self.prepare_tab(Tab::Listening, window, cx),
+            _ => self.prepare_tab(Tab::Window, window, cx),
+        }
+    }
+
+    /// Setup finished, was skipped or closed: it isn't shown again, and the overlay appears (with Live,
+    /// on a first run, when Start Live when the app opens is on). Runs before the setup window
+    /// closes, so CluelyRS has left the Dock (unless "Show in Dock" is on) by the time it does: tools
+    /// that quit apps whose last window closes leave apps outside the Dock alone (`update_dock`).
+    #[cfg(target_os = "macos")]
+    pub(crate) fn finish_onboarding(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.onboarding_window = None;
+        self.update_settings(|s| crate::onboarding_window::record(s, None), window, cx);
+        self.key_reveal.hide();
+        self.update_dock();
+        // Leaving the Dock deactivates CluelyRS; Settings, if it's open, comes back in front. The
+        // overlay doesn't need it: it shows without activating anything.
+        if let Some(handle) = self.settings_window.filter(|_| !self.in_dock()) { crate::settings_window::keep_in_front(handle, cx); }
+        self.show();
+        if std::mem::take(&mut self.hidden_for_onboarding) && self.store.value.start_live_on_launch && self.live_since.is_none() {
+            self.set_live(true, window, cx);
+        }
+    }
+
+    /// In the Dock while "Show in Dock" is on, and while setup is open whatever it says (`in_dock`).
     #[cfg(target_os = "macos")]
     pub(crate) fn update_dock(&self) {
-        platform::set_in_dock(self.store.value.show_in_dock);
+        platform::set_in_dock(self.in_dock());
     }
+
+    #[cfg(target_os = "macos")]
+    fn in_dock(&self) -> bool { in_dock(&self.store.value, self.onboarding_window.is_some()) }
 
     /// Refresh what a settings tab shows (accounts, devices, history size) as it opens.
     pub(crate) fn prepare_tab(&mut self, tab: Tab, window: &mut Window, cx: &mut Context<Self>) {
@@ -944,10 +1019,18 @@ impl Overlay {
         cx.notify();
     }
 
-    /// Which provider the key field belongs to: the transcription provider on the Listening
-    /// tab, the API-key answer provider on the Model tab.
+    /// Which provider the key field belongs to: the transcription provider on the Listening tab
+    /// (macOS: in the Settings window, or setup's Transcription step), the API-key answer provider
+    /// on the Model tab.
     pub(crate) fn key_target(&self) -> String {
-        if self.settings_tab == Some(Tab::Listening) { crate::stt::deepgram::PROVIDER_ID.to_string() } else { self.store.value.api_provider.clone() }
+        #[cfg(target_os = "macos")]
+        let listening = match self.onboarding_window {
+            Some(_) => self.store.value.onboarding_step == Some(crate::settings::OnboardingStep::Transcription),
+            None => self.settings_window_tab == Some(Tab::Listening),
+        };
+        #[cfg(not(target_os = "macos"))]
+        let listening = self.settings_tab == Some(Tab::Listening);
+        if listening { crate::stt::deepgram::PROVIDER_ID.to_string() } else { self.store.value.api_provider.clone() }
     }
 
     /// Keep the Claude versions the CLI has reported (e.g. "opus" → claude-opus-5-5), so the pickers
@@ -1364,6 +1447,15 @@ fn enclosing<'a>(shapes: impl Iterator<Item = &'a platform::Shape>, radius: i32)
     })
 }
 
+/// Whether CluelyRS belongs in the Dock (and ⌘Tab). While setup is open it always does: setup is an
+/// ordinary window people look for there, and leaving the Dock while it's in front would make macOS
+/// deactivate CluelyRS and send setup behind other apps, so setup's own "Show in Dock" switch takes
+/// effect when it finishes. Otherwise only "Show in Dock" puts it there. Settings doesn't: tools that
+/// quit apps whose last window closes (and so would quit CluelyRS when Settings closes) leave apps
+/// outside the Dock alone. Settings and setup handle ⌘W and ⌘Q themselves.
+#[cfg(target_os = "macos")]
+fn in_dock(settings: &Settings, setup_open: bool) -> bool { settings.show_in_dock || setup_open }
+
 /// Whether the overlay and Settings are kept out of screen captures right now.
 pub(crate) fn capture_excluded(settings: &Settings) -> bool {
     // CLUELYRS_ALLOW_CAPTURE=1 is a development switch for taking screenshots of the overlay.
@@ -1395,6 +1487,16 @@ mod tests {
     use super::{Status, Turn, composer_placeholder, enclosing, save_turn};
     use crate::archive::Archive;
     use crate::settings::Settings;
+
+    /// Setup is in the Dock whatever "Show in Dock" says; its switch decides once setup is over.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn setup_stays_in_the_dock_and_the_setting_applies_after_it() {
+        let (off, on) = (Settings { show_in_dock: false, ..Settings::default() }, Settings { show_in_dock: true, ..Settings::default() });
+        assert!(super::in_dock(&off, true) && super::in_dock(&on, true), "while setup is open");
+        assert!(!super::in_dock(&off, false), "turned off in setup: CluelyRS leaves the Dock as setup closes");
+        assert!(super::in_dock(&on, false));
+    }
 
     /// Live stopping while an answer is written: History gets the partial answer marked as
     /// stopped (the question and screenshot too); a stopped Assist that wrote nothing is left out.

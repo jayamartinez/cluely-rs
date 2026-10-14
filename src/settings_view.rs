@@ -18,6 +18,8 @@ use crate::ui;
 
 mod about;
 mod cli_location;
+#[cfg(target_os = "macos")]
+mod onboarding;
 mod reveal;
 #[cfg(target_os = "macos")]
 mod model_form;
@@ -132,17 +134,22 @@ fn answer_early(s: &Settings, cx: &mut Context<Overlay>) -> Div {
             switch("auto-answer", s.auto_answer, |s, v| s.auto_answer = v, cx)).px(px(ROW_INSET)))
 }
 
+/// Show menu bar icon (Settings › Window, setup's last step). Turning the icon off may ask first
+/// (`Overlay::set_menu_bar_icon`).
+#[cfg(target_os = "macos")]
+fn menu_bar_switch(s: &Settings, cx: &mut Context<Overlay>) -> impl IntoElement {
+    let on = s.show_menu_bar_icon;
+    div().id("show-menu-bar-icon").flex_none().cursor_pointer()
+        .on_mouse_down(MouseButton::Left, listen(cx, move |this, _, window, cx| { cx.stop_propagation(); this.set_menu_bar_icon(!on, window, cx) }))
+        .child(ui::switch(on))
+}
+
 /// Settings → Window → Menu bar and Dock (macOS). `toggle` is the Show / hide overlay shortcut.
 #[cfg(target_os = "macos")]
 fn menu_bar_and_dock_section(s: &Settings, toggle: &str, cx: &mut Context<Overlay>) -> Div {
-    let on = s.show_menu_bar_icon;
-    // Turning the icon off may ask first (`Overlay::set_menu_bar_icon`).
-    let menu_bar_switch = div().id("show-menu-bar-icon").flex_none().cursor_pointer()
-        .on_mouse_down(MouseButton::Left, listen(cx, move |this, _, window, cx| { cx.stop_propagation(); this.set_menu_bar_icon(!on, window, cx) }))
-        .child(ui::switch(on));
     div().flex().flex_col().gap(px(12.0)).pt(px(16.0)).border_t_1().border_color(gpui::rgb(0x23262a))
         .child(ui::section_label("MENU BAR AND DOCK"))
-        .child(switch_row("Show menu bar icon", "Live, modes, Settings and Quit from the menu bar. On by default.", menu_bar_switch))
+        .child(switch_row("Show menu bar icon", "Live, modes, Settings and Quit from the menu bar. On by default.", menu_bar_switch(s, cx)))
         .child(switch_row("Show in Dock", "Also puts CluelyRS in ⌘Tab. Off by default.",
             switch("show-in-dock", s.show_in_dock, |s, v| s.show_in_dock = v, cx)))
         .child(div().flex().gap(px(8.0)).text_size(px(12.0)).line_height(px(16.0)).text_color(theme::muted())
@@ -150,7 +157,14 @@ fn menu_bar_and_dock_section(s: &Settings, toggle: &str, cx: &mut Context<Overla
             .child(div().flex_1().min_w_0().child(format!("With the icon hidden, press {toggle} to show the overlay and open Settings from its gear."))))
 }
 
-fn button(id: &'static str, label: impl Into<SharedString>, primary: bool) -> gpui::Stateful<Div> {
+/// The "Recommended" pill beside an option's title.
+#[cfg(target_os = "macos")]
+fn recommended() -> Div {
+    div().px(px(7.0)).py(px(1.0)).rounded_full().bg(theme::bubble()).border_1().border_color(theme::bubble_border())
+        .text_size(px(11.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::accent_soft()).child("Recommended")
+}
+
+pub(crate) fn button(id: &'static str, label: impl Into<SharedString>, primary: bool) -> gpui::Stateful<Div> {
     let base = div().id(id).flex_none().px(px(12.0)).py(px(6.0)).rounded(px(9.0)).cursor_pointer().text_size(px(12.0)).font_weight(FontWeight::SEMIBOLD).child(label.into());
     if primary { base.bg(theme::accent()).text_color(theme::accent_ink()) } else { base.border_1().border_color(theme::hairline()).text_color(theme::body()) }
 }
@@ -271,10 +285,18 @@ impl Overlay {
     /// throwaway `Hits`: the overlay's own hit-testing must only see the overlay's controls.
     #[cfg(target_os = "macos")]
     pub(crate) fn settings_window_body(&mut self, tab: Tab, cx: &mut Context<Self>) -> AnyElement {
+        self.settings_window_tab = Some(tab);
+        self.in_window(cx, |this, cx| this.settings_body(tab, cx))
+    }
+
+    /// Lay out content for another window (Settings, setup) with a throwaway `Hits`: the overlay's
+    /// own hit-testing must only see the overlay's controls.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn in_window<R>(&mut self, cx: &mut Context<Self>, build: impl FnOnce(&Self, &mut Context<Self>) -> R) -> R {
         let hits = std::mem::take(&mut self.hits);
-        let body = self.settings_body(tab, cx);
+        let built = build(self, cx);
         self.hits = hits;
-        body
+        built
     }
 
     pub(crate) fn toggle_picker(&mut self, picker: Picker, cx: &mut Context<Self>) {
@@ -636,8 +658,7 @@ impl Overlay {
             .child(div().flex().flex_col().gap(px(1.0)).flex_1().min_w_0()
                 .child(div().flex().items_center().gap(px(8.0))
                     .child(div().text_size(px(13.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child("Use GPU (Metal)"))
-                    .child(div().px(px(7.0)).py(px(1.0)).rounded_full().bg(theme::bubble()).border_1().border_color(theme::bubble_border())
-                        .text_size(px(11.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::accent_soft()).child("Recommended")))
+                    .child(recommended()))
                 .child(note.text_size(px(12.0))))
             .child(switch("use-gpu", on, |s, v| s.use_gpu = v, cx))
     }

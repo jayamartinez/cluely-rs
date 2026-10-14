@@ -37,8 +37,9 @@ fn main() {
             Err(error) => { eprintln!("global shortcuts unavailable: {error}"); cx.quit(); return; }
         };
         let display = cx.primary_display();
+        let store = cluely_rs::settings::Store::load();
         // As wide as Settings › Window › Card width makes it, centred.
-        let width = px(cluely_rs::settings::Store::load().value.card_width.window());
+        let width = px(store.value.card_width.window());
         let origin = display.as_ref().map(|display| {
             let bounds = display.bounds();
             point(bounds.origin.x + (bounds.size.width - width) / 2.0, bounds.origin.y + px(24.0))
@@ -49,7 +50,8 @@ fn main() {
             window_background: WindowBackgroundAppearance::Transparent,
             kind: WindowKind::PopUp,
             focus: false,
-            show: true,
+            // Hidden during the macOS first-run setup; it appears when setup finishes.
+            show: !store.onboarding_pending(),
             is_movable: true,
             is_resizable: false,
             is_minimizable: false,

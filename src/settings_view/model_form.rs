@@ -169,15 +169,17 @@ impl Overlay {
     pub(crate) fn model_form(&self, answer_with: Div, cx: &mut Context<Self>) -> Div {
         let s = &self.store.value;
         let form = div().flex().flex_col().gap(px(16.0)).child(answer_with);
-        let form = if s.provider == Provider::ApiKey {
-            form.child(self.connection_group(cx))
-        } else {
-            let choice = self.model_choice();
-            form.child(plain_row("Model", self.model_popover_picker(choice.picker, choice.value, choice.options, &choice.selected, None, false, choice.set, cx)))
-        };
+        let form = if s.provider == Provider::ApiKey { form.child(self.connection_group(cx)) }
+            else { form.child(plain_row("Model", self.subscription_model_picker(cx))) };
         form.child(plain_row("Answer style", self.answer_style_picker(cx)))
             .child(ui::setting_row("Smart mode · slower, deeper reasoning", switch("smart-mode", s.smart_mode, |s, v| s.smart_mode = v, cx)).border_b_0().px(px(ROW_INSET)))
             .child(answer_early(s, cx))
+    }
+
+    /// The selected subscription's model picker (Settings › Model and setup).
+    pub(super) fn subscription_model_picker(&self, cx: &mut Context<Self>) -> Div {
+        let choice = self.model_choice();
+        self.model_popover_picker(choice.picker, choice.value, choice.options, &choice.selected, None, false, choice.set, cx)
     }
 
     /// Provider, then its key (or endpoint), then the model, as one grouped box.
@@ -205,7 +207,7 @@ impl Overlay {
     }
 
     /// The saved key (masked) with Replace and Remove, or the key field with its eye and Save.
-    fn key_control(&self, preset: &'static Preset, cx: &mut Context<Self>) -> Div {
+    pub(super) fn key_control(&self, preset: &'static Preset, cx: &mut Context<Self>) -> Div {
         let column = div().flex().flex_col().gap(px(6.0));
         let saved = self.store.value.saved_keys.get(preset.id).cloned();
         if let Some(hint) = saved.as_ref().filter(|_| !self.model_ui.key_editing) {
@@ -264,7 +266,7 @@ impl Overlay {
     }
 
     /// The Model picker in its current state: waiting for a key or URL, loading, failed, or ready.
-    fn model_control(&self, preset: &'static Preset, cx: &mut Context<Self>) -> Div {
+    pub(super) fn model_control(&self, preset: &'static Preset, cx: &mut Context<Self>) -> Div {
         let s = &self.store.value;
         let column = div().flex().flex_col().gap(px(6.0));
         if preset.needs_key && !s.saved_keys.contains_key(preset.id) {
@@ -423,7 +425,7 @@ fn local_line(preset: &'static Preset) -> Div {
         .child(div().font_family(theme::MONO).text_size(px(11.0)).text_color(theme::muted()).child(host(preset.base_url).to_string()))
 }
 
-fn text_box(input: &Entity<TextInput>, id: &'static str) -> gpui::Stateful<Div> {
+pub(super) fn text_box(input: &Entity<TextInput>, id: &'static str) -> gpui::Stateful<Div> {
     let focus = input.clone();
     div().id(id).flex_1().min_w_0().px(px(10.0)).py(px(7.0)).rounded(px(9.0))
         .bg(theme::field()).border_1().border_color(theme::hairline()).cursor_text()

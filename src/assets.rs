@@ -1,4 +1,4 @@
-//! Icons compiled into the binary, so the overlay never reads files at runtime.
+//! Icons (and setup's logos and app tile) compiled into the binary, so the overlay never reads files at runtime.
 
 use std::borrow::Cow;
 
@@ -57,6 +57,36 @@ const ICONS: &[(&str, &[u8])] = &[
     ("icons/update.svg", include_bytes!("../assets/icons/update.svg")),
     ("icons/check-circle.svg", include_bytes!("../assets/icons/check-circle.svg")),
     ("icons/alert-circle.svg", include_bytes!("../assets/icons/alert-circle.svg")),
+    ("icons/laptop-minimal.svg", include_bytes!("../assets/icons/laptop-minimal.svg")),
+    ("icons/arrow-right.svg", include_bytes!("../assets/icons/arrow-right.svg")),
+    ("icons/key-round.svg", include_bytes!("../assets/icons/key-round.svg")),
+    ("icons/message-square.svg", include_bytes!("../assets/icons/message-square.svg")),
+    ("icons/cloud.svg", include_bytes!("../assets/icons/cloud.svg")),
+    ("icons/sliders.svg", include_bytes!("../assets/icons/sliders.svg")),
+    ("icons/terminal.svg", include_bytes!("../assets/icons/terminal.svg")),
+    ("icons/circle-user.svg", include_bytes!("../assets/icons/circle-user.svg")),
+    ("icons/send.svg", include_bytes!("../assets/icons/send.svg")),
+    ("icons/plug.svg", include_bytes!("../assets/icons/plug.svg")),
+    ("icons/link.svg", include_bytes!("../assets/icons/link.svg")),
+    ("icons/server.svg", include_bytes!("../assets/icons/server.svg")),
+    ("icons/lock.svg", include_bytes!("../assets/icons/lock.svg")),
+    ("icons/mic-off.svg", include_bytes!("../assets/icons/mic-off.svg")),
+    ("icons/download.svg", include_bytes!("../assets/icons/download.svg")),
+    ("icons/zap.svg", include_bytes!("../assets/icons/zap.svg")),
+    ("icons/archive.svg", include_bytes!("../assets/icons/archive.svg")),
+    ("icons/hourglass.svg", include_bytes!("../assets/icons/hourglass.svg")),
+    ("icons/panel-bottom.svg", include_bytes!("../assets/icons/panel-bottom.svg")),
+    ("icons/radio.svg", include_bytes!("../assets/icons/radio.svg")),
+    ("icons/sparkles.svg", include_bytes!("../assets/icons/sparkles.svg")),
+    // Setup (`onboarding_window`): provider and service logos, the app tile.
+    ("logos/anthropic.svg", include_bytes!("../assets/logos/anthropic.svg")),
+    ("logos/claude.svg", include_bytes!("../assets/logos/claude.svg")),
+    ("logos/deepgram.svg", include_bytes!("../assets/logos/deepgram.svg")),
+    ("logos/googlegemini.svg", include_bytes!("../assets/logos/googlegemini.svg")),
+    ("logos/ollama.svg", include_bytes!("../assets/logos/ollama.svg")),
+    ("logos/openai.svg", include_bytes!("../assets/logos/openai.svg")),
+    ("logos/openrouter.svg", include_bytes!("../assets/logos/openrouter.svg")),
+    ("app-icon/app-icon.svg", include_bytes!("../assets/app-icon/app-icon.svg")),
 ];
 
 pub struct Assets;
