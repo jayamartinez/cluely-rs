@@ -7,6 +7,7 @@ use gpui::{AnyElement, App, Context, Div, Focusable, FontWeight, IntoElement, Mo
 
 use crate::archive::Retention;
 use crate::chat::SubscriptionStatus;
+use crate::codex::gpt_version;
 use crate::hotkeys::{Action, DEFAULTS};
 use crate::overlay::Overlay;
 use crate::settings::{AnswerStyle, ClaudeModel, Provider, Settings, SttProvider};
@@ -192,15 +193,6 @@ fn key_eye(input: &gpui::Entity<crate::input::TextInput>, cx: &App) -> impl Into
         .child(ui::icon(if revealed { "icons/eye-off.svg" } else { "icons/eye.svg" }, 14.0, if revealed { theme::body() } else { theme::muted() }))
 }
 
-/// GPT version of a Codex model id: "gpt-6.1-sol" → (6, 1), "gpt-6-luna" → (6, 0); `None` for other shapes.
-fn gpt_version(id: &str) -> Option<(u32, u32)> {
-    let version = id.to_ascii_lowercase().strip_prefix("gpt-")?.split('-').next()?.to_string();
-    let mut parts = version.split('.');
-    let major = parts.next()?.parse().ok()?;
-    let minor = match parts.next() { Some(minor) => minor.parse().ok()?, None => 0 };
-    Some((major, minor))
-}
-
 /// The models worth offering: only the newest GPT generation (every 6.x once GPT-6 exists, so a
 /// future 6.2 appears on its own), without Astra variants. If no id carries a GPT version the list
 /// is returned as is, rather than leaving the picker empty.
@@ -208,6 +200,14 @@ pub(crate) fn latest_gpt_models(models: &[(String, String)]) -> Vec<(String, Str
     let Some(newest) = models.iter().filter_map(|(id, _)| gpt_version(id)).map(|(major, _)| major).max() else { return models.to_vec() };
     models.iter().filter(|(id, name)| gpt_version(id).is_some_and(|(major, _)| major == newest)
         && !id.to_ascii_lowercase().contains("astra") && !name.to_ascii_lowercase().contains("astra")).cloned().collect()
+}
+
+/// A Claude model's name: the version its alias last resolved to ("Opus 5.5"), else what Claude
+/// Code's model list calls it, else the alias ("Opus") or the id made readable.
+fn claude_label(s: &Settings, catalog: &[crate::chat::ModelEntry], id: &str) -> String {
+    if let Some(resolved) = s.claude_models.get(id) { return crate::claude_cli::model_label(resolved); }
+    if let Some(entry) = catalog.iter().find(|entry| entry.id == id) { return entry.name.clone(); }
+    ClaudeModel::ALIASES.iter().find(|(alias, _)| *alias == id).map_or_else(|| crate::claude_cli::model_label(id), |(_, label)| label.to_string())
 }
 
 /// "plus" → "ChatGPT Plus", "max_5x" → "Max 5x": the plan as the CLI reports it, made readable.
@@ -462,14 +462,12 @@ impl Overlay {
                 ModelChoice { picker: Picker::CodexModel, value, options, selected: s.codex_model.clone(), set: |s, v| s.codex_model = v }
             }
             Provider::Claude => {
-                let models = [(ClaudeModel::Sonnet, "Sonnet"), (ClaudeModel::Opus, "Opus"), (ClaudeModel::Haiku, "Haiku")];
-                // The version each alias resolves to, once Claude Code has reported it.
-                let label = |model: ClaudeModel, alias_label: &str| s.claude_models.get(model.id())
-                    .map(|id| crate::claude_cli::model_label(id)).unwrap_or_else(|| alias_label.to_string());
-                let value = models.iter().find(|(m, _)| *m == s.claude_model).map(|(m, l)| label(*m, l)).unwrap_or_else(|| "Sonnet".into());
-                ModelChoice { picker: Picker::ClaudeModel, value, options: models.iter().map(|(m, l)| (m.id().to_string(), label(*m, l))).collect(),
+                let catalog = self.claude_status.as_ref().map_or(&[][..], |status| status.catalog.as_slice());
+                let label = |id: &str| claude_label(s, catalog, id);
+                ModelChoice { picker: Picker::ClaudeModel, value: label(s.claude_model.id()),
+                    options: ClaudeModel::ALIASES.iter().map(|(id, _)| (id.to_string(), label(id))).collect(),
                     selected: s.claude_model.id().to_string(),
-                    set: |s, v| s.claude_model = match v.as_str() { "opus" => ClaudeModel::Opus, "haiku" => ClaudeModel::Haiku, _ => ClaudeModel::Sonnet } }
+                    set: |s, v| if let Some(model) = ClaudeModel::new(&v) { s.claude_model = model } }
             }
             Provider::ApiKey => {
                 let suggestions: Vec<String> = match crate::providers::preset(&s.api_provider) {

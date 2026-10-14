@@ -49,10 +49,8 @@ fn main() {
     if let Some(model) = args.iter().position(|a| a == "--model").and_then(|i| args.get(i + 1)) {
         use cluely_rs::settings::{ClaudeModel, Provider};
         match settings.provider {
-            Provider::Claude => settings.claude_model = match model.as_str() {
-                "opus" => ClaudeModel::Opus, "haiku" => ClaudeModel::Haiku, "sonnet" => ClaudeModel::Sonnet,
-                other => panic!("unknown Claude model {other} (opus, sonnet or haiku)"),
-            },
+            Provider::Claude => settings.claude_model = ClaudeModel::new(model)
+                .unwrap_or_else(|| panic!("unknown Claude model {model} (an alias such as opus, or a model id)")),
             Provider::Codex => settings.codex_model = if model == "default" { String::new() } else { model.clone() },
             Provider::ApiKey => { settings.api_models.insert(settings.api_provider.clone(), model.clone()); }
         }
