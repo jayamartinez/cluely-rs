@@ -68,6 +68,14 @@ impl Overlay {
         self.check_for_updates(window, cx);
     }
 
+    /// The tray menu's "Check for updates…": show the overlay with Settings › About, and check.
+    #[cfg(windows)]
+    pub fn check_for_updates_from_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.show();
+        self.open_settings(crate::settings_view::Tab::About, window, cx);
+        self.check_for_updates(window, cx);
+    }
+
     pub(super) fn update_notice_shown(&self) -> bool {
         self.live_since.is_none() && self.settings_tab.is_none() && self.updates.notice(&self.store.value.dismissed_update).is_some()
     }

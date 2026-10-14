@@ -121,8 +121,8 @@ pub struct Settings {
     /// macOS: show CluelyRS in the Dock and ⌘Tab. Off keeps it out, as the Windows overlay stays
     /// out of the taskbar.
     pub show_in_dock: bool,
-    /// macOS: show the menu bar icon and its menu (Live, modes, Settings, Quit). On by default,
-    /// so settings saved before it existed keep the icon.
+    /// Show the menu bar icon (macOS) or tray icon (Windows) and its menu (Live, modes, Settings,
+    /// Quit). On by default, so settings saved before it existed keep the icon.
     pub show_menu_bar_icon: bool,
     /// Settings › Window › Appearance (`appearance`): the card's background opacity in percent, the
     /// size of its reading text and its width.

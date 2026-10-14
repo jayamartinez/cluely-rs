@@ -17,47 +17,12 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{NSData, NSObject, NSOperatingSystemVersion, NSProcessInfo, NSSize, NSString, ns_string};
 
+use super::menu::{MenuEntry, MenuKey};
+
 /// The icon's size in points; the PNGs are drawn for 1× and 2× screens.
 const ICON_POINTS: f64 = 18.0;
 const IDLE: [&[u8]; 2] = [include_bytes!("../../assets/menu-bar/status-idle.png"), include_bytes!("../../assets/menu-bar/status-idle@2x.png")];
 const LIVE: [&[u8]; 2] = [include_bytes!("../../assets/menu-bar/status-live.png"), include_bytes!("../../assets/menu-bar/status-live@2x.png")];
-
-/// A line of the menu. `C` is what choosing an item means to the caller.
-#[derive(Clone, Debug, PartialEq)]
-pub enum MenuEntry<C> {
-    Item { title: String, command: C, enabled: bool, checked: bool, key: Option<MenuKey> },
-    /// Greyed-out text that can't be chosen, such as a status line.
-    Label(String),
-    /// A group's title inside a list.
-    Header(String),
-    Submenu { title: String, entries: Vec<MenuEntry<C>> },
-    Separator,
-}
-
-impl<C> MenuEntry<C> {
-    /// An item that can be chosen, unchecked and without a shortcut.
-    pub fn item(title: impl Into<String>, command: C) -> Self { Self::Item { title: title.into(), command, enabled: true, checked: false, key: None } }
-
-    pub fn key(mut self, shortcut: MenuKey) -> Self {
-        if let Self::Item { key, .. } = &mut self { *key = Some(shortcut); }
-        self
-    }
-
-    pub fn checked(mut self, on: bool) -> Self {
-        if let Self::Item { checked, .. } = &mut self { *checked = on; }
-        self
-    }
-
-    pub fn enabled(mut self, on: bool) -> Self {
-        if let Self::Item { enabled, .. } = &mut self { *enabled = on; }
-        self
-    }
-}
-
-/// A shortcut shown beside an item. The menu bar's menu only answers to it while it is open; the
-/// app's own shortcuts work the same as always.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct MenuKey { pub key: &'static str, pub command: bool, pub shift: bool, pub option: bool, pub control: bool }
 
 /// Fills the menu as it opens and runs a chosen item's tag.
 struct Handlers {

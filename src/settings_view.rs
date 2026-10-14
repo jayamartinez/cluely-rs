@@ -160,6 +160,25 @@ fn menu_bar_and_dock_section(s: &Settings, toggle: &str, cx: &mut Context<Overla
             .child(div().flex_1().min_w_0().child(format!("With the icon hidden, press {toggle} to show the overlay and open Settings from its gear."))))
 }
 
+/// Settings → Window → Tray (Windows), from the Paper "Tray v2 · Windows · 3 Settings › Window ·
+/// Show tray icon". `toggle` is the Show / hide overlay shortcut.
+#[cfg(windows)]
+fn tray_section(s: &Settings, toggle: &str, cx: &mut Context<Overlay>) -> Div {
+    let on = s.show_menu_bar_icon;
+    // Turning the icon off asks first (`Overlay::set_menu_bar_icon`).
+    let tray_switch = div().id("show-tray-icon").flex_none().cursor_pointer()
+        .on_mouse_down(MouseButton::Left, listen(cx, move |this, _, window, cx| { cx.stop_propagation(); this.set_menu_bar_icon(!on, window, cx) }))
+        .child(ui::switch(on));
+    div().flex().flex_col().gap(px(12.0)).pt(px(16.0)).border_t_1().border_color(gpui::rgb(0x23262a))
+        .child(ui::section_label("TRAY"))
+        .child(switch_row("Show tray icon", "Live, modes, Settings and Quit by the clock", tray_switch))
+        .child(div().flex().items_center().gap(px(8.0)).text_size(px(12.0)).line_height(px(16.0)).text_color(theme::muted())
+            .child(ui::icon("icons/info.svg", 14.0, theme::muted()))
+            .child("Hidden?")
+            .children(toggle.split(' ').map(|key| ui::keycap(key.to_string())))
+            .child("then the gear, or open CluelyRS again"))
+}
+
 /// The "Recommended" pill beside an option's title.
 #[cfg(target_os = "macos")]
 fn recommended() -> Div {
@@ -762,6 +781,8 @@ impl Overlay {
             .child(self.appearance_section(cx));
         #[cfg(target_os = "macos")]
         let tab = tab.child(menu_bar_and_dock_section(s, &self.hotkeys.label(Action::Toggle), cx));
+        #[cfg(windows)]
+        let tab = tab.child(tray_section(s, &self.hotkeys.label(Action::Toggle), cx));
         tab
     }
 }

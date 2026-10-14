@@ -232,13 +232,16 @@ pub struct Overlay {
     /// Windows: first-run setup, while its window is open; the overlay stays hidden meanwhile.
     #[cfg(windows)]
     pub(crate) setup: Option<crate::onboarding::Setup>,
+    /// The menu bar icon (macOS) or tray icon (Windows) and its menu (`menu_bar`).
+    #[cfg(any(target_os = "macos", windows))]
+    menu_bar: Option<menu_bar::MenuBar>,
+    /// Windows: the tray menu or a question it asked, while one is open (`tray_menu`).
+    #[cfg(windows)]
+    popups: tray_menu::Popups,
     /// Windows: created hidden for first-run setup, so not yet where `main` asked (a hidden window
     /// starts where Windows puts new windows). The first `show` puts it top centre.
     #[cfg(windows)]
     unplaced: bool,
-    /// macOS: the menu bar icon and its menu (`menu_bar`).
-    #[cfg(target_os = "macos")]
-    menu_bar: Option<menu_bar::MenuBar>,
 }
 
 impl Overlay {
@@ -290,7 +293,14 @@ impl Overlay {
         // Every quit (⌘Q, the menu, Settings › About, a quit Apple Event; Settings › About on Windows)
         // passes here: stop transcribing and free parakeet.cpp's backend before exit. With Metal ggml
         // aborts otherwise; on Windows (CPU) it's an orderly stop of the transcriber before exit.
-        cx.on_app_quit(|this, _| { this.stop_listening(); crate::stt::parakeet::shutdown(); async {} }).detach();
+        cx.on_app_quit(|this, _| {
+            this.stop_listening();
+            crate::stt::parakeet::shutdown();
+            // Windows leaves an exited app's tray icon behind until the pointer passes over it.
+            #[cfg(windows)]
+            { this.menu_bar = None; }
+            async {}
+        }).detach();
 
         let archive = Archive::default_location();
         if let Some(archive) = &archive {
@@ -365,14 +375,18 @@ impl Overlay {
             collapse: None, settings_height: Rc::default(), modes_ui, modes, updates: Default::default(), modes_window: None, switcher: None,
             #[cfg(windows)]
             setup: None,
+            #[cfg(any(target_os = "macos", windows))]
+            menu_bar: None,
             #[cfg(windows)]
-            unplaced: false,
-            #[cfg(target_os = "macos")]
-            menu_bar: None };
+            popups: Default::default(),
+            #[cfg(windows)]
+            unplaced: false };
         overlay.refresh_model_status();
         overlay.mark_existing_keys(window, cx);
         #[cfg(target_os = "macos")]
-        { overlay.update_dock(); overlay.start_menu_bar(window, cx); }
+        overlay.update_dock();
+        #[cfg(any(target_os = "macos", windows))]
+        overlay.start_menu_bar(window, cx);
         if start_live { overlay.set_live(true, window, cx); }
         #[cfg(windows)]
         if setup {
@@ -612,6 +626,8 @@ impl Overlay {
             }
             return;
         }
+        #[cfg(windows)]
+        if action == Action::Close && self.popups.close_open(cx) { return; }
         match action {
             Action::Toggle => {
                 // Hiding closes the mode switcher, handing the keyboard back.
@@ -676,9 +692,17 @@ impl Overlay {
         cx.notify();
     }
 
-    /// Quit CluelyRS (Settings › About). Live ends first, as when it's stopped, so the session is saved
-    /// to History; `on_app_quit` then stops the transcriber.
+    /// Quit CluelyRS (Settings › About; the tray menu on Windows). On Windows, quitting while Live is
+    /// on asks first (`ask_quit`).
     pub(crate) fn quit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        #[cfg(windows)]
+        if self.live_since.is_some() { self.ask_quit(cx); return; }
+        self.quit_now(window, cx);
+    }
+
+    /// Live ends first, as when it's stopped, so the session is saved to History; `on_app_quit`
+    /// then stops the transcriber.
+    pub(crate) fn quit_now(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.live_since.is_some() { self.set_live(false, window, cx); }
         cx.quit();
     }
@@ -1425,8 +1449,10 @@ mod card;
 mod chat;
 mod update_notice;
 mod switcher;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 mod menu_bar;
+#[cfg(windows)]
+mod tray_menu;
 pub(crate) use card::CARD_WIDTH;
 /// How many audio levels the Live waveform keeps (one per bar from the middle out).
 pub(crate) const LEVEL_HISTORY: usize = 3;
