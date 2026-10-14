@@ -1,9 +1,12 @@
 //! Windows: first-run setup in a window of its own, from the Paper "Onboarding v2 · Windows"
 //! artboards. It opens at launch until it is finished or skipped (`Settings::setup_done`), and again
-//! from Settings › About › Run setup again. The overlay stays hidden while it is open. Like the Modes
-//! window it is a normal window that draws its own title bar and hides from screen capture while
-//! the overlay does; its pages are drawn by the overlay, whose settings they change.
+//! from Settings › About › Run setup again. The overlay stays hidden while it is open, until Assist
+//! (or Show / hide) brings it up to see what Customize changes. Like the Modes window it is a normal
+//! window that draws its own title bar and hides from screen capture while the overlay does; its
+//! pages are drawn by the overlay, whose settings they change.
 
+mod answer;
+mod hearing;
 mod steps;
 
 use gpui::{
@@ -40,18 +43,28 @@ impl Step {
     fn offset(self, by: isize) -> Option<Step> { Step::ALL.get((self as usize).checked_add_signed(by)?).copied() }
 }
 
+/// The dropdowns on the setup pages; at most one is open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Menu { Mode, ApiProvider, Model, Mic, Desktop }
+
 /// Where setup is, kept on the overlay while its window is open.
 pub(crate) struct Setup {
     window: Option<WindowHandle<SetupWindow>>,
-    step: Step,
+    pub(crate) step: Step,
     /// The furthest step reached; the steps before it are marked done.
     furthest: Step,
-    /// Assist was pressed on the Shortcuts step (`Overlay::handle` routes it here while setup is open).
+    /// Assist was pressed while setup was open (`Overlay::handle` routes it here).
     pub(crate) tried_assist: bool,
-    /// Customize's "Start in mode" list is open.
-    mode_menu: bool,
+    menu: Option<Menu>,
     /// Customize's "Open at sign-in", as the registry has it.
     launch_at_login: bool,
+    answer: answer::AnswerState,
+    /// "Replace" was pressed beside a saved key: its field takes a new one.
+    replacing_key: bool,
+    /// Audio check's meters, while that step is open.
+    audio: Option<hearing::AudioCheck>,
+    /// What Audio check has heard (microphone, desktop audio), for the Done step.
+    heard: [bool; 2],
 }
 
 impl Overlay {
@@ -67,18 +80,16 @@ impl Overlay {
         self.close_panels(window, cx);
         self.hide();
         self.refresh_subscriptions(window, cx);
-        if let Some(handle) = self.setup.as_ref().and_then(|setup| setup.window) {
-            cx.defer(move |cx| { let _ = handle.update(cx, |_, window, _| window.activate_window()); });
-            return;
-        }
-        self.setup = Some(Setup { window: None, step: Step::Welcome, furthest: Step::Welcome, tried_assist: false, mode_menu: false,
-            launch_at_login: platform::launch_at_login() });
+        if self.raise_setup(cx) { return; }
+        self.setup = Some(Setup { window: None, step: Step::Welcome, furthest: Step::Welcome, tried_assist: false, menu: None,
+            launch_at_login: platform::launch_at_login(), answer: answer::AnswerState::default(), replacing_key: false, audio: None, heard: [false; 2] });
+        self.find_clis(window, cx);
         let overlay = cx.weak_entity();
         // Deferred: the window reads the overlay while it draws, and the overlay is being updated now.
         cx.defer(move |cx| {
             let Some(overlay) = overlay.upgrade() else { return };
             let options = WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(880.0), px(640.0)), cx))),
+                window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(880.0), px(642.0)), cx))),
                 titlebar: Some(TitlebarOptions { title: Some("Set up CluelyRS".into()), appears_transparent: true, traffic_light_position: None }),
                 kind: WindowKind::Normal,
                 focus: true,
@@ -98,22 +109,48 @@ impl Overlay {
     }
 
     /// End setup: Finish and Skip save it as done; closing the window before Done leaves it to
-    /// open again at the next launch. The overlay shows either way.
+    /// open again at the next launch. The overlay shows either way; a download carries on.
     fn close_setup(&mut self, done: bool, window: &mut Window, cx: &mut Context<Self>) {
         if done { self.update_settings(|s| s.setup_done = true, window, cx); }
-        if let Some(handle) = self.setup.take().and_then(|setup| setup.window) {
-            cx.defer(move |cx| { let _ = handle.update(cx, |_, window, _| window.remove_window()); });
+        if let Some(setup) = self.setup.take() {
+            setup.answer.cancel_sign_in();
+            if let Some(handle) = setup.window {
+                cx.defer(move |cx| { let _ = handle.update(cx, |_, window, _| window.remove_window()); });
+            }
         }
+        self.key_input.update(cx, |input, cx| input.clear(cx));
+        self.key_notice = None;
         self.show();
         cx.notify();
     }
 
-    fn go_to(&mut self, step: Step, cx: &mut Context<Self>) {
+    /// Show `step`, starting what it needs (devices and meters, the model's status) and stopping
+    /// what the one left had running.
+    fn go_to(&mut self, step: Step, window: &mut Window, cx: &mut Context<Self>) {
         let Some(setup) = &mut self.setup else { return };
+        let left = setup.step;
         setup.step = step;
         setup.furthest = setup.furthest.max(step);
-        setup.mode_menu = false;
+        setup.menu = None;
+        if left == step { return; }
+        setup.replacing_key = false;
+        if left == Step::AudioCheck { setup.audio = None; }
+        // The key field is shared by the answer and Deepgram keys.
+        self.key_input.update(cx, |input, cx| input.clear(cx));
+        self.key_notice = None;
+        match step {
+            Step::AnswerModel => self.choose_ready_path(window, cx),
+            Step::Transcription => self.refresh_model_status(),
+            Step::AudioCheck => { self.load_devices(window, cx); self.start_audio_check(window, cx); }
+            // What Customize changes shows on the overlay.
+            Step::Customize => self.show(),
+            _ => {}
+        }
         cx.notify();
+    }
+
+    fn set_menu(&mut self, menu: Option<Menu>, cx: &mut Context<Self>) {
+        if let Some(setup) = &mut self.setup && setup.menu != menu { setup.menu = menu; cx.notify(); }
     }
 
     /// The window's contents: steps on the left, the current step and its footer on the right.
@@ -124,12 +161,12 @@ impl Overlay {
         for step in Step::ALL {
             let current = step == setup.step;
             let done = !current && step < setup.furthest;
-            let trailing = if done { Some(ui::icon("icons/check.svg", 14.0, theme::ok()).into_any_element()) }
-                else if step == Step::Customize { Some(div().text_size(px(11.0)).text_color(theme::placeholder()).child("Optional").into_any_element()) }
+            let trailing = if done { Some(ui::icon("icons/setup-check.svg", 14.0, theme::ok()).into_any_element()) }
+                else if step == Step::Customize { Some(div().text_size(px(11.0)).text_color(rgb(steps::FAINT)).child("Optional").into_any_element()) }
                 else { None };
             rail = rail.child(div().id(("setup-step", step as usize)).flex().items_center().gap(px(10.0)).px(px(8.0)).py(px(7.0)).rounded(px(8.0)).cursor_pointer()
                 .when(current, |row| row.bg(rgb(0x1f2124)))
-                .on_mouse_down(MouseButton::Left, listen(cx, move |this, _, _, cx| this.go_to(step, cx)))
+                .on_mouse_down(MouseButton::Left, listen(cx, move |this, _, window, cx| this.go_to(step, window, cx)))
                 .child(div().size(px(20.0)).flex_none().flex().items_center().justify_center()
                     .child(ui::icon(step.icon(), 16.0, if current { theme::accent_soft() } else { theme::muted() })))
                 .child(div().flex_1().text_size(px(13.0)).line_height(px(16.0))
@@ -143,29 +180,38 @@ impl Overlay {
             .child(div().px(px(36.0)).pt(px(30.0)).pb(px(20.0)).child(self.setup_step(setup, cx)));
         div().size_full().flex()
             .child(rail)
-            .child(div().flex_1().min_w_0().flex().flex_col().child(body).child(self.setup_footer(setup.step, cx)))
+            .child(div().flex_1().min_w_0().flex().flex_col().child(body).child(self.setup_footer(setup, cx)))
     }
 
-    /// Skip setup on the left (not on Done), Back and the step's main button on the right.
-    fn setup_footer(&self, step: Step, cx: &mut Context<Self>) -> Div {
-        let button = |id: &'static str, label: &'static str| div().id(id).h(px(34.0)).flex().items_center().rounded(px(9.0)).cursor_pointer()
+    /// Skip setup on the left (kept but invisible on Done), Back and the step's main button on the
+    /// right. Continue waits only while a sign-in is running in the terminal.
+    fn setup_footer(&self, setup: &Setup, cx: &mut Context<Self>) -> Div {
+        let step = setup.step;
+        let button = |id: &'static str, label: &'static str| div().id(id).h(px(34.0)).flex().items_center().rounded(px(9.0))
             .text_size(px(13.0)).child(label);
         let primary = match step { Step::Welcome => "Get started", Step::Done => "Open CluelyRS", _ => "Continue" };
+        let waiting = step == Step::AnswerModel && setup.answer.signing_in().is_some();
         let next = step.offset(1);
-        let nav = div().flex().items_center().gap(px(8.0))
-            .when_some(step.offset(-1), |nav, previous| nav.child(button("setup-back", "Back").px(px(14.0)).bg(theme::field()).border_1().border_color(theme::hairline())
-                .text_color(rgb(0xe6e3dc))
-                .on_mouse_down(MouseButton::Left, listen(cx, move |this, _, _, cx| this.go_to(previous, cx)))))
-            .child(button("setup-next", primary).px(px(16.0)).bg(theme::accent()).text_color(theme::accent_ink()).font_weight(FontWeight::SEMIBOLD)
+        let mut main = button("setup-next", primary).px(px(16.0)).font_weight(FontWeight::SEMIBOLD);
+        main = if waiting { main.bg(theme::divider()).text_color(rgb(steps::DISABLED)) } else {
+            main.bg(theme::accent()).text_color(theme::accent_ink()).cursor_pointer()
                 .on_mouse_down(MouseButton::Left, listen(cx, move |this, _, window, cx| match next {
-                    Some(next) => this.go_to(next, cx),
+                    Some(next) => this.go_to(next, window, cx),
                     None => this.close_setup(true, window, cx),
-                })));
-        let skip = div().id("setup-skip").cursor_pointer().text_size(px(13.0)).text_color(theme::muted()).child("Skip setup")
-            .on_mouse_down(MouseButton::Left, listen(cx, |this, _, window, cx| this.close_setup(true, window, cx)));
+                }))
+        };
+        let nav = div().flex().items_center().gap(px(8.0))
+            .when_some(step.offset(-1), |nav, previous| nav.child(button("setup-back", "Back").px(px(14.0)).cursor_pointer().bg(theme::field())
+                .border_1().border_color(theme::hairline()).text_color(rgb(steps::LIGHT))
+                .on_mouse_down(MouseButton::Left, listen(cx, move |this, _, window, cx| this.go_to(previous, window, cx)))))
+            .child(main);
+        let skip = div().id("setup-skip").text_size(px(13.0)).text_color(theme::muted()).child("Skip setup");
+        let skip = if step == Step::Done { skip.opacity(0.0) } else {
+            skip.cursor_pointer().on_mouse_down(MouseButton::Left, listen(cx, |this, _, window, cx| this.close_setup(true, window, cx)))
+        };
         div().flex_none().flex().items_center().justify_between().py(px(12.0)).pl(px(36.0)).pr(px(20.0))
             .bg(rgb(0x121316)).border_t_1().border_color(theme::divider())
-            .child(if step == Step::Done { div() } else { div().child(skip) })
+            .child(skip)
             .child(nav)
     }
 }

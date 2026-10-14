@@ -22,6 +22,9 @@ struct CliDetails {
     set: fn(&mut Settings, String),
 }
 
+/// Where to read how to install the provider's CLI.
+pub(crate) fn install_page(provider: Provider) -> Option<&'static str> { details(provider).map(|cli| cli.install_page) }
+
 fn details(provider: Provider) -> Option<CliDetails> {
     match provider {
         Provider::Codex => Some(CliDetails {
@@ -75,7 +78,7 @@ impl Overlay {
     }
 
     /// Pick the CLI with the system file picker, check it like the search would, and use it.
-    fn locate_cli(&mut self, provider: Provider, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn locate_cli(&mut self, provider: Provider, window: &mut Window, cx: &mut Context<Self>) {
         let Some(cli) = details(provider) else { return };
         let picked = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: false, prompt: Some("Use".into()) });
         cx.spawn_in(window, async move |this, cx| {

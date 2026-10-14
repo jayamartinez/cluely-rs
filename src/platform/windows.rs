@@ -97,6 +97,22 @@ pub fn set_width_centred(hwnd: HWND, width: f32) {
     });
 }
 
+/// Put the window at the top centre of the primary screen's work area, 24 px down, where `main`
+/// opens a visible overlay.
+pub fn place_top_centre(hwnd: HWND) {
+    use windows::Win32::Graphics::Gdi::{MONITOR_DEFAULTTOPRIMARY, MonitorFromPoint};
+    unsafe {
+        let mut rect = RECT::default();
+        if GetWindowRect(hwnd, &mut rect).is_err() { return; }
+        let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+        if !GetMonitorInfoW(MonitorFromPoint(POINT::default(), MONITOR_DEFAULTTOPRIMARY), &mut info).as_bool() { return; }
+        let work = info.rcWork;
+        let width = rect.right - rect.left;
+        let top = (24.0 * f64::from(GetDpiForWindow(hwnd)) / 96.0).round() as i32;
+        let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), work.left + (work.right - work.left - width) / 2, work.top + top, 0, 0, SWP_NOACTIVATE | SWP_NOSIZE);
+    }
+}
+
 /// Move by a physical-pixel delta, clamped to the work area of the window's monitor. Below
 /// `content_bottom` (client pixels; the bottom of what is drawn) the window is transparent, so that
 /// part may go past the work area's bottom edge.
@@ -311,6 +327,34 @@ fn claim(mutex: &str, event: &str) -> Option<UnboundedReceiver<()>> {
 
 /// Open a folder in File Explorer.
 pub fn open_folder(path: &Path) -> std::io::Result<()> { Command::new("explorer.exe").arg(path).spawn().map(drop) }
+
+/// Run a CLI in a console window of its own, as if typed into a terminal: its sign-in is then the
+/// CLI's own, where the user can read what it does. The caller waits on the child to learn when it ends.
+pub fn run_in_console(program: &Path, args: &[&str]) -> std::io::Result<std::process::Child> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+    Command::new(program).args(args).creation_flags(CREATE_NEW_CONSOLE).spawn()
+}
+
+/// Bring the console window of process `pid` (from [`run_in_console`]) to the front, as far as
+/// Windows allows. In Windows Terminal the console's own window is a hidden stand-in owned by the
+/// terminal's, so the window raised is its root owner.
+pub fn raise_console(pid: u32) {
+    use windows::Win32::System::Console::{AttachConsole, FreeConsole, GetConsoleWindow};
+    use windows::Win32::UI::WindowsAndMessaging::{GA_ROOTOWNER, GetAncestor, SW_RESTORE};
+    // SAFETY: CluelyRS has no console of its own, so attaching to the child's and detaching again
+    // leaves nothing behind; the window handle is only passed back to Windows.
+    unsafe {
+        if AttachConsole(pid).is_err() { return; }
+        let console = GetConsoleWindow();
+        let _ = FreeConsole();
+        if console.is_invalid() { return; }
+        let root = GetAncestor(console, GA_ROOTOWNER);
+        let target = if root.is_invalid() { console } else { root };
+        let _ = ShowWindow(target, SW_RESTORE);
+        let _ = SetForegroundWindow(target);
+    }
+}
 
 /// Open File Explorer at a file's folder with the file selected.
 pub fn reveal_file(path: &Path) -> std::io::Result<()> { Command::new("explorer.exe").arg("/select,").arg(path).spawn().map(drop) }
