@@ -6,9 +6,12 @@ use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use futures::channel::mpsc::{UnboundedReceiver, unbounded};
 use gpui::{Pixels, Size, Window};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use windows::Win32::Foundation::{HWND, RECT};
+use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HWND, RECT, WAIT_OBJECT_0};
+use windows::Win32::System::Threading::{CreateEventW, CreateMutexW, INFINITE, SetEvent, WaitForSingleObject};
+use windows::core::HSTRING;
 use windows::Win32::Graphics::Dwm::{
     DWMNCRP_DISABLED, DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE, DWMWA_NCRENDERING_POLICY, DWMWA_WINDOW_CORNER_PREFERENCE,
     DWMWCP_DONOTROUND, DwmSetWindowAttribute,
@@ -273,8 +276,59 @@ fn fade(hwnd: HWND, visible: bool, generation: u64) {
 /// Slow in, slow out, like the macOS animation's default timing.
 fn ease_in_out(t: f32) -> f32 { if t < 0.5 { 2.0 * t * t } else { 1.0 - (-2.0 * t + 2.0).powi(2) / 2.0 } }
 
+/// The single-instance names. `Local\` is the user's own sign-in session, so each user gets one CluelyRS.
+const INSTANCE_MUTEX: &str = r"Local\CluelyRS.SingleInstance";
+const SHOW_EVENT: &str = r"Local\CluelyRS.Show";
+
+/// Claim this user's only CluelyRS. A second copy's shortcuts all fail (the first owns them), so a
+/// second launch instead asks the running copy to show its overlay, and gets `None`: it should exit
+/// at once. The first gets a channel that yields once per later launch. If the names can't be
+/// created, CluelyRS runs as before rather than not at all. Call before GPUI starts, and not in the
+/// mode-file extraction children, which are the same exe.
+pub fn single_instance() -> Option<UnboundedReceiver<()>> { claim(INSTANCE_MUTEX, SHOW_EVENT) }
+
+fn claim(mutex: &str, event: &str) -> Option<UnboundedReceiver<()>> {
+    // Never closed: the claim lasts until the process exits, and Windows frees it then, even after a crash.
+    let owner = unsafe { CreateMutexW(None, false, &HSTRING::from(mutex)) };
+    let already_running = owner.is_ok() && unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
+    // Auto-reset, so each launch shows the overlay once. Either launch may create it first, so a
+    // signal sent before the first copy starts waiting isn't lost.
+    let Ok(show) = (unsafe { CreateEventW(None, false, false, &HSTRING::from(event)) }) else { return Some(unbounded().1) };
+    if already_running {
+        let _ = unsafe { SetEvent(show) };
+        return None;
+    }
+    let (sender, receiver) = unbounded();
+    // HANDLE isn't Send; the event stays open for the app's lifetime.
+    let raw = show.0 as isize;
+    let _ = std::thread::Builder::new().name("cluelyrs-instance".into()).spawn(move || {
+        while unsafe { WaitForSingleObject(HANDLE(raw as *mut _), INFINITE) } == WAIT_OBJECT_0 && sender.unbounded_send(()).is_ok() {}
+    });
+    Some(receiver)
+}
+
 /// Open a folder in File Explorer.
 pub fn open_folder(path: &Path) -> std::io::Result<()> { Command::new("explorer.exe").arg(path).spawn().map(drop) }
 
 /// Open File Explorer at a file's folder with the file selected.
 pub fn reveal_file(path: &Path) -> std::io::Result<()> { Command::new("explorer.exe").arg("/select,").arg(path).spawn().map(drop) }
+
+#[cfg(test)]
+mod tests {
+    use futures::StreamExt;
+    use futures::executor::block_on;
+
+    use super::claim;
+
+    /// Names of the test's own, so it never signals a CluelyRS that is really running.
+    #[test]
+    fn a_second_launch_is_told_to_exit_and_shows_the_first() {
+        let id = std::process::id();
+        let (mutex, event) = (format!(r"Local\CluelyRS.Test.{id}.Instance"), format!(r"Local\CluelyRS.Test.{id}.Show"));
+        let mut first = claim(&mutex, &event).expect("the first launch runs");
+        for _ in 0..2 {
+            assert!(claim(&mutex, &event).is_none(), "a later launch exits");
+            assert_eq!(block_on(first.next()), Some(()), "and the first copy hears about it");
+        }
+    }
+}

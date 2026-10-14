@@ -206,7 +206,8 @@ pub struct Overlay {
 }
 
 impl Overlay {
-    pub fn new(hotkeys: Hotkeys, presses: UnboundedReceiver<Action>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    /// `relaunches` yields each time CluelyRS is launched again while this copy runs (`platform::single_instance`).
+    pub fn new(hotkeys: Hotkeys, presses: UnboundedReceiver<Action>, relaunches: UnboundedReceiver<()>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let native = platform::native_window(window);
         let mut store = Store::load();
         let modes = crate::modes::ModeStore::load();
@@ -227,6 +228,12 @@ impl Overlay {
                 if this.update_in(cx, |this, window, cx| this.handle(action, window, cx)).is_err() { break; }
             }
         }).detach();
+        cx.spawn_in(window, async move |this, cx| {
+            let mut relaunches = relaunches;
+            while relaunches.next().await.is_some() {
+                if this.update(cx, |this, _| this.relaunched()).is_err() { break; }
+            }
+        }).detach();
         // Text, answers and the transcript line let clicks through; only controls catch them.
         if let Some(native) = native { platform::enable_passthrough(native); }
         cx.spawn_in(window, async move |this, cx| loop {
@@ -239,9 +246,9 @@ impl Overlay {
             if this.update(cx, |this, cx| if this.live_since.is_some() { cx.notify() }).is_err() { break; }
         }).detach();
 
-        // Every quit (⌘Q, the menu, Settings › About, a quit Apple Event) passes here: stop
-        // transcribing and free parakeet.cpp's Metal backend before exit, or ggml aborts.
-        #[cfg(target_os = "macos")]
+        // Every quit (⌘Q, the menu, Settings › About, a quit Apple Event; Settings › About on Windows)
+        // passes here: stop transcribing and free parakeet.cpp's backend before exit. With Metal ggml
+        // aborts otherwise; on Windows (CPU) it's an orderly stop of the transcriber before exit.
         cx.on_app_quit(|this, _| { this.stop_listening(); crate::stt::parakeet::shutdown(); async {} }).detach();
 
         let archive = Archive::default_location();
@@ -507,6 +514,13 @@ impl Overlay {
         }
         self.fit(window);
         cx.notify();
+    }
+
+    /// Quit CluelyRS (Settings › About). Live ends first, as when it's stopped, so the session is saved
+    /// to History; `on_app_quit` then stops the transcriber.
+    pub(crate) fn quit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.live_since.is_some() { self.set_live(false, window, cx); }
+        cx.quit();
     }
 
     /// Open a History record when Live starts and close it when Live stops.
@@ -1032,6 +1046,17 @@ impl Overlay {
         }
     }
 
+    /// CluelyRS was launched again: show the overlay, kept on screen in case it was left on a screen
+    /// that's gone. Moved before showing, because the pop-in holds the position it starts from.
+    fn relaunched(&mut self) {
+        if let Some(native) = self.native { let _ = platform::move_by(native, 0, 0, self.content_bottom()); }
+        self.show();
+    }
+
+    /// The window is taller than the card (room for popovers below it); only the card has to stay on
+    /// screen, so the empty space under it may go past the bottom edge (`platform::move_by`).
+    fn content_bottom(&self) -> Option<i32> { self.shape.borrow().iter().map(|&(_, _, _, bottom, _)| bottom).max() }
+
     /// Start one polling loop per motion kind; it reads every arrow each frame, so
     /// holding two arrows moves diagonally and releasing the chord stops it.
     fn start_motion(&mut self, kind: Motion, window: &mut Window, cx: &mut Context<Self>) {
@@ -1057,10 +1082,7 @@ impl Overlay {
         let speed = (MOVE_START + frame as f32 * EASE_PER_FRAME).min(cruise);
         match kind {
             Motion::Move => if let Some(native) = self.native {
-                // The window is taller than the card (room for popovers below it); only the card has
-                // to stay on screen, so the empty space under it may go past the bottom edge.
-                let content_bottom = self.shape.borrow().iter().map(|&(_, _, _, bottom, _)| bottom).max();
-                let _ = platform::move_by(native, (dx as f32 * speed).round() as i32, (dy as f32 * speed).round() as i32, content_bottom);
+                let _ = platform::move_by(native, (dx as f32 * speed).round() as i32, (dy as f32 * speed).round() as i32, self.content_bottom());
             },
             Motion::Scroll => self.scroll_by(dy as f32 * speed, cx),
         }

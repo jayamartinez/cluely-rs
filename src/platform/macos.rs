@@ -121,6 +121,10 @@ pub fn set_width_centred(native: NativeWindow, width: f32) {
     });
 }
 
+/// Opening CluelyRS.app again brings the running copy forward (Launch Services) instead of starting
+/// a second one, so there is nothing to claim: the channel never yields (see the Windows version).
+pub fn single_instance() -> Option<futures::channel::mpsc::UnboundedReceiver<()>> { Some(futures::channel::mpsc::unbounded().1) }
+
 /// Move by a physical-pixel delta (y down, as on Windows), clamped to the visible frame of the
 /// window's screen (below the menu bar, beside the Dock). Below `content_bottom` (physical pixels
 /// from the top of the content; the bottom of what is drawn) the window is transparent, so that

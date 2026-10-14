@@ -16,7 +16,8 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 const NOTE_LINES: usize = 3;
 
 impl Overlay {
-    /// The Windows panel's About tab: the app's name and version over the Updates group.
+    /// The Windows panel's About tab: the app's name and version over the Updates group, then Quit, as
+    /// in the macOS Settings window. Without a Dock or menu bar this is the only way to quit on Windows.
     pub(crate) fn about_tab(&self, cx: &mut Context<Self>) -> Div {
         div().flex().flex_col().gap(px(18.0))
             .child(div().flex().items_center().gap(px(12.0))
@@ -25,6 +26,8 @@ impl Overlay {
                     .child(div().text_size(px(15.0)).font_weight(FontWeight::BOLD).text_color(theme::text()).child("CluelyRS"))
                     .child(div().text_size(px(12.0)).text_color(theme::muted()).child(format!("Version {VERSION}")))))
             .child(self.updates_section(cx))
+            .child(div().flex().child(button("quit", "Quit CluelyRS", false)
+                .on_mouse_down(MouseButton::Left, listen(cx, |this, _, window, cx| this.quit(window, cx)))))
     }
 
     /// UPDATES: the status row and "Check for updates automatically".
