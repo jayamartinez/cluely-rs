@@ -112,6 +112,8 @@ const ICONS: &[(&str, &[u8])] = &[
     ("icons/logo-mistral.svg", include_bytes!("../assets/icons/logo-mistral.svg")),
     ("icons/logo-ollama.svg", include_bytes!("../assets/icons/logo-ollama.svg")),
     ("icons/logo-lmstudio.svg", include_bytes!("../assets/icons/logo-lmstudio.svg")),
+    // The radial glow at the top of Windows setup, as an alpha mask (GPUI has no radial gradient).
+    ("icons/setup-glow.svg", include_bytes!("../assets/icons/setup-glow.svg")),
     // macOS first-run setup (`onboarding_window`) and Settings.
     ("icons/laptop-minimal.svg", include_bytes!("../assets/icons/laptop-minimal.svg")),
     ("icons/arrow-right.svg", include_bytes!("../assets/icons/arrow-right.svg")),

@@ -106,3 +106,11 @@ pub fn fluent_scrollbar() -> Rgba { rgba(0x9c98908c) }
 /// The nav pane's app mark tile, top and bottom of its gradient.
 pub const FLUENT_MARK_TOP: u32 = 0x24272c;
 pub const FLUENT_MARK_BOTTOM: u32 = 0x0f1012;
+// Windows onboarding: the first-run setup window (`onboarding`), on the Fluent window background
+// with the selected-row blue as its top glow.
+/// Panels and unselected choice cards.
+pub fn setup_panel() -> Rgba { rgb(0x131416) }
+/// Logos on the answer cards in their light tone (an unselected ChatGPT, Claude).
+pub fn setup_logo() -> Rgba { rgb(0xe8e4dc) }
+/// The hero tile's halo: the accent at 15%.
+pub fn setup_halo() -> Rgba { rgba(0x4c8dff26) }
