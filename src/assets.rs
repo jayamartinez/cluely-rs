@@ -156,6 +156,11 @@ const ICONS: &[(&str, &[u8])] = &[
     ("logos/together.svg", include_bytes!("../assets/logos/together.svg")),
     ("logos/lmstudio.svg", include_bytes!("../assets/logos/lmstudio.svg")),
     ("app-icon/app-icon.svg", include_bytes!("../assets/app-icon/app-icon.svg")),
+    // Redesign v3 (macOS Settings, setup on both platforms): the mark on its own, setup's glow, and the
+    // menu bar's mark for Settings › Window.
+    ("app-icon/mark.svg", include_bytes!("../assets/app-icon/mark.svg")),
+    ("app-icon/setup-glow.svg", include_bytes!("../assets/app-icon/setup-glow.svg")),
+    ("menu-bar/status-idle.svg", include_bytes!("../assets/menu-bar/status-idle.svg")),
 ];
 
 pub struct Assets;

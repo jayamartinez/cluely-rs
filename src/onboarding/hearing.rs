@@ -1,24 +1,27 @@
-//! Setup › Transcription (off, Parakeet on this PC with its download, or Deepgram with its key) and
-//! Setup › Audio check: both sources captured as Live would, each with a meter, its device and a
-//! hint when the microphone stays silent.
+//! Setup › Listening: both sources captured as Live would, each with a meter and its device (and a
+//! way to Windows' microphone privacy settings when the microphone stays silent), then the speech
+//! model: Parakeet on this PC (downloaded only when chosen) or Deepgram with its key.
 
 use std::time::{Duration, Instant};
 
-use gpui::{AnyElement, Context, Div, IntoElement, MouseButton, ParentElement, Styled, Window, div, prelude::*, px, relative, rgb};
+use gpui::{AnyElement, Context, Div, FontWeight, IntoElement, MouseButton, ParentElement, Styled, Window, div, prelude::*, px};
 
-use super::steps::{self, CAUTION, external, heading, hint, option_card, page, small_button, trailing};
-use super::{Menu, Setup};
+use super::steps::text;
+use super::{Menu, Setup, Step};
 use crate::audio::capture::AudioCapture;
 use crate::audio::frame::Source;
+use crate::hotkeys::Action;
 use crate::overlay::Overlay;
 use crate::settings::{Settings, SttProvider};
 use crate::settings_view::listen;
-use crate::stt::parakeet::MODEL;
+use crate::stt::{deepgram, parakeet::MODEL};
+use crate::transcript_view::model_size_label;
+use crate::ui_v3::{self, Kind, RADII};
 use crate::{theme, ui};
 
 /// How often the meters read the capture's levels.
 const METER_EVERY: Duration = Duration::from_millis(50);
-/// How long a silent microphone waits before the hint about microphone access shows.
+/// How long a silent microphone waits before the way to its privacy settings shows.
 const SILENT_HINT_AFTER: Duration = Duration::from_secs(10);
 /// A level above this (0..=1, `listening::level`) counts as hearing something.
 const HEARD: f32 = 0.12;
@@ -36,98 +39,31 @@ pub(super) struct AudioCheck {
 #[derive(Clone, Copy, Default)]
 struct Meter { level: f32, peak: f32, peak_at: Option<Instant>, last_heard: Option<Instant> }
 
+/// How long "heard" stays up after the last sound.
+const HEARD_FOR: Duration = Duration::from_millis(1500);
+
 fn slot(source: Source) -> usize { match source { Source::Me => 0, Source::Them => 1 } }
 
 /// "102 of 176 MB" for a download `progress` of the speech model.
-pub(super) fn megabytes(progress: f64) -> String {
+fn megabytes(progress: f64) -> String {
     let total = MODEL.bytes as f64 / 1e6;
     format!("{:.0} of {total:.0} MB", total * progress.clamp(0.0, 1.0))
 }
 
 impl Overlay {
-    fn choose_transcription(&mut self, on: bool, provider: SttProvider, window: &mut Window, cx: &mut Context<Self>) {
-        self.key_input.update(cx, |input, cx| input.clear(cx));
-        self.key_notice = None;
-        if let Some(setup) = &mut self.setup { setup.replacing_key = false; }
-        self.update_settings(|s| { s.transcribe = on; if on { s.stt_provider = provider; } }, window, cx);
-    }
-
-    pub(super) fn transcription(&self, setup: &Setup, cx: &mut Context<Self>) -> Div {
-        let s = &self.store.value;
-        let local = s.transcribe && s.stt_provider == SttProvider::Parakeet;
-        let cloud = s.transcribe && s.stt_provider == SttProvider::Deepgram;
-        let tint = |on| if on { theme::accent_soft() } else { theme::body() };
-        let deepgram_saved = s.saved_keys.contains_key(crate::stt::deepgram::PROVIDER_ID);
-        let recommended = div().px(px(7.0)).py(px(1.0)).rounded_full().border_1().border_color(theme::bubble_border())
-            .text_size(px(11.0)).line_height(px(14.0)).text_color(theme::accent_soft()).child("Recommended").into_any_element();
-        let cards = [
-            (false, SttProvider::Parakeet, !s.transcribe, ui::icon("icons/setup-wave-off.svg", 20.0, tint(!s.transcribe)).into_any_element(),
-                div().into_any_element(), "Off", "Typed questions only"),
-            (true, SttProvider::Parakeet, local, ui::icon("icons/setup-monitor.svg", 20.0, tint(local)).into_any_element(), recommended,
-                "On this PC", "Parakeet · English"),
-            (true, SttProvider::Deepgram, cloud, ui::icon("icons/logo-deepgram.svg", 18.0, tint(cloud)).into_any_element(),
-                if deepgram_saved { steps::status_text("Key saved", theme::ok()) } else { steps::status_text("Key needed", theme::muted()) },
-                "Deepgram", "Cloud · audio sent"),
-        ];
-        let mut row = div().flex().gap(px(10.0));
-        for (index, (on, provider, selected, icon, status, name, detail)) in cards.into_iter().enumerate() {
-            row = row.child(option_card(("setup-transcribe", index), selected, icon, status, name, steps::detail_text(detail))
-                .on_mouse_down(MouseButton::Left, listen(cx, move |this, _, window, cx| this.choose_transcription(on, provider, window, cx))));
+    /// Listening's choice of speech model. On this PC starts the download if the model isn't here
+    /// yet: it only ever starts from this click.
+    fn choose_speech(&mut self, provider: SttProvider, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(setup) = &mut self.setup else { return };
+        if setup.speech != Some(provider) {
+            setup.speech = Some(provider);
+            setup.replacing_key = false;
+            self.key_input.update(cx, |input, cx| input.clear(cx));
+            self.key_notice = None;
         }
-        let panel = if local { Some(self.speech_model_panel(cx)) } else if cloud { Some(self.deepgram_panel(setup, cx)) } else { None };
-        page().child(heading("Transcribe the conversation", "Only while Live is on."))
-            .child(row)
-            .children(panel)
-    }
-
-    /// The Parakeet model: Download, its progress with Cancel, or ready. Continue never waits for
-    /// it, and leaving the step doesn't stop it.
-    fn speech_model_panel(&self, cx: &mut Context<Self>) -> Div {
-        let progress = self.download_progress();
-        let (icon, color) = if self.model_installed { ("icons/setup-circle-check.svg", theme::ok()) }
-            else if progress.is_some() { ("icons/setup-download.svg", theme::accent_soft()) } else { ("icons/setup-download.svg", theme::muted()) };
-        let action: AnyElement = if let Some(progress) = progress {
-            div().flex().items_center().gap(px(12.0))
-                .child(steps::status_text(megabytes(progress), theme::muted()))
-                .child(trailing(56.0, steps::link("setup-cancel-download", "Cancel")
-                    .on_mouse_down(MouseButton::Left, listen(cx, |this, _, _, cx| { this.cancel_download(); cx.notify(); }))))
-                .into_any_element()
-        } else if self.model_installed {
-            steps::status_text("Ready", theme::ok())
-        } else {
-            small_button("setup-download", format!("Download {}", crate::transcript_view::model_size_label(&MODEL)), true)
-                .on_mouse_down(MouseButton::Left, listen(cx, |this, _, window, cx| this.download_model(window, cx))).into_any_element()
-        };
-        let mut panel = div().flex().flex_col().gap(px(10.0)).px(px(14.0)).py(px(12.0)).rounded(px(12.0)).border_1().border_color(theme::hairline())
-            .child(div().flex().items_center().gap(px(12.0)).min_h(px(30.0))
-                .child(ui::icon(icon, 16.0, color))
-                .child(div().flex_1().text_size(px(13.0)).text_color(theme::text()).child("Speech model"))
-                .child(action));
-        if let Some(progress) = progress {
-            panel = panel.child(div().h(px(4.0)).rounded_full().bg(theme::divider())
-                .child(div().h_full().rounded_full().bg(theme::accent()).w(relative(progress.clamp(0.0, 1.0) as f32))));
-        }
-        if let Some(notice) = self.model_notice.clone() {
-            panel = panel.child(div().text_size(px(12.0)).text_color(theme::muted()).child(notice));
-        }
-        panel.child(div().flex().child(external("setup-license", "NVIDIA Open Model License")
-            .on_mouse_down(MouseButton::Left, listen(cx, |_, _, _, cx| cx.open_url(MODEL.license_url)))))
-    }
-
-    /// Deepgram's key: saved and masked with Replace, or a box to paste it into.
-    fn deepgram_panel(&self, setup: &Setup, cx: &mut Context<Self>) -> Div {
-        let saved = self.store.value.saved_keys.get(crate::stt::deepgram::PROVIDER_ID).map(String::as_str);
-        let (field, action) = self.key_field(setup, saved, false, cx);
-        let mut panel = div().flex().flex_col().gap(px(8.0)).px(px(14.0)).py(px(12.0)).rounded(px(12.0)).border_1().border_color(theme::hairline())
-            .child(div().flex().items_center().gap(px(12.0))
-                .child(ui::icon("icons/setup-key.svg", 16.0, theme::muted()))
-                .child(div().flex_1().min_w_0().child(field))
-                .child(action)
-                .child(external("setup-deepgram-key", "Get a key").on_mouse_down(MouseButton::Left, listen(cx, |_, _, _, cx| cx.open_url("https://console.deepgram.com/")))));
-        if let Some(notice) = self.key_notice.clone() {
-            panel = panel.child(div().pl(px(28.0)).text_size(px(12.0)).text_color(theme::muted()).child(notice));
-        }
-        panel
+        self.update_settings(|s| { s.transcribe = true; s.stt_provider = provider; }, window, cx);
+        if provider == SttProvider::Parakeet && !self.model_installed && self.download_progress().is_none() { self.download_model(window, cx); }
+        cx.notify();
     }
 
     /// Capture the sources that are on, from the chosen devices, and keep the meters moving while
@@ -176,7 +112,7 @@ impl Overlay {
                             meter.peak = level.max(meter.peak - 0.02).max(0.0);
                             if level >= meter.peak { meter.peak_at = Some(now); }
                         }
-                        if level > HEARD { meter.last_heard = Some(now); setup.heard[slot(source)] = true; }
+                        if level > HEARD { meter.last_heard = Some(now); }
                     }
                     cx.notify();
                     true
@@ -191,7 +127,9 @@ impl Overlay {
         self.start_audio_check(window, cx);
     }
 
-    pub(super) fn audio_check(&self, setup: &Setup, cx: &mut Context<Self>) -> Div {
+    /// Each source with its level, then the speech model to use. Start waits until one is chosen
+    /// (and, on this PC, until its download has started).
+    pub(super) fn listening(&self, setup: &Setup, cx: &mut Context<Self>) -> Div {
         let s = &self.store.value;
         let devices = self.devices.clone().unwrap_or_default();
         let options = |names: &[String], default: Option<&String>| {
@@ -200,57 +138,84 @@ impl Overlay {
             options
         };
         let value = |chosen: &str, default: Option<&String>| if !chosen.is_empty() { chosen.to_string() } else {
-            match default { Some(name) => format!("Default · {name}"), None if self.devices_loading => "Finding devices…".into(), None => "Default".into() }
+            match default { Some(name) => name.clone(), None if self.devices_loading => "Finding devices…".into(), None => "Default".into() }
         };
-        let mic = self.source_card(setup, Source::Me, s.listen_mic, self.setup_dropdown(setup, Menu::Mic, value(&s.mic_device, devices.default_microphone.as_ref()),
-            options(&devices.microphones, devices.default_microphone.as_ref()), None, &s.mic_device, 36.0,
-            |this, name, window, cx| this.change_audio(|s| s.mic_device = name, window, cx), cx), cx);
-        let desktop = self.source_card(setup, Source::Them, s.listen_desktop, self.setup_dropdown(setup, Menu::Desktop, value(&s.desktop_device, devices.default_playback.as_ref()),
-            options(&devices.playback, devices.default_playback.as_ref()), None, &s.desktop_device, 36.0,
-            |this, name, window, cx| this.change_audio(|s| s.desktop_device = name, window, cx), cx), cx);
-        let mut page = page().child(heading("Check what it hears", "Say something, and play a video.")).child(mic).child(desktop);
-        if let Some(error) = setup.audio.as_ref().and_then(|check| check.error.clone()) {
-            page = page.child(steps::status_line("icons/setup-circle-alert.svg", error, rgb(steps::ERROR)).mt(px(0.0)));
+        let mic_face = ui_v3::device_face(("setup-device", 0usize), value(&s.mic_device, devices.default_microphone.as_ref()));
+        let mic_picker = self.setup_dropdown(setup, Menu::Mic, mic_face, 240.0, 22.0, options(&devices.microphones, devices.default_microphone.as_ref()), None,
+            &s.mic_device, |this, name, window, cx| this.change_audio(|s| s.mic_device = name, window, cx), cx);
+        let desktop_face = ui_v3::device_face(("setup-device", 1usize), value(&s.desktop_device, devices.default_playback.as_ref()));
+        let desktop_picker = self.setup_dropdown(setup, Menu::Desktop, desktop_face, 240.0, 22.0, options(&devices.playback, devices.default_playback.as_ref()), None,
+            &s.desktop_device, |this, name, window, cx| this.change_audio(|s| s.desktop_device = name, window, cx), cx);
+        let mut rows = vec![self.source_row(setup, Source::Me, mic_picker.into_any_element())];
+        if self.mic_silent(setup) {
+            rows.push(div().flex().items_center().gap(px(10.0)).pl(px(16.0)).pr(px(12.0)).py(px(10.0)).bg(theme::field())
+                .child(text(12.0, 16.0, theme::text(), "Windows may be blocking the microphone").font_weight(FontWeight::SEMIBOLD).flex_1())
+                .child(div().id("setup-mic-privacy").h(px(28.0)).flex().items_center().gap(px(6.0)).px(px(10.0)).rounded(px(RADII.control)).cursor_pointer()
+                    .bg(theme::raised()).border_1().border_color(theme::keycap_border())
+                    .on_mouse_down(MouseButton::Left, listen(cx, |_, _, _, cx| cx.open_url("ms-settings:privacy-microphone")))
+                    .child(text(12.0, 16.0, theme::text(), "Privacy settings"))
+                    .child(ui::icon("icons/setup-external.svg", 10.0, theme::body())))
+                .into_any_element());
         }
-        page.child(hint("icons/setup-headphones.svg", "Headphones keep you and them apart"))
+        rows.push(self.source_row(setup, Source::Them, desktop_picker.into_any_element()));
+        let choice = setup.speech;
+        let size = model_size_label(&MODEL);
+        let on_pc: AnyElement = match self.download_progress() {
+            Some(progress) => ui_v3::download_progress(progress as f32, megabytes(progress)).into_any_element(),
+            None if self.model_installed => ui_v3::done_note("Downloaded").into_any_element(),
+            None => ui_v3::card_button("setup-download", "icons/setup-download.svg", "Download").into_any_element(),
+        };
+        let deepgram_saved = s.saved_keys.get(deepgram::PROVIDER_ID).map(String::as_str);
+        let deepgram: AnyElement = if choice == Some(SttProvider::Deepgram) {
+            self.key_field(setup, deepgram_saved, false, 30.0, cx).into_any_element()
+        } else if deepgram_saved.is_some() {
+            ui_v3::done_note("Key saved").into_any_element()
+        } else {
+            ui_v3::card_button("setup-add-key", "icons/setup-key.svg", "Add API key").into_any_element()
+        };
+        let cards = div().flex().gap(px(10.0))
+            .child(ui_v3::speech_card("setup-speech-pc", "icons/setup-monitor.svg", 18.0, "On this PC", format!("Parakeet · private · {size}"),
+                choice == Some(SttProvider::Parakeet), on_pc)
+                .on_mouse_down(MouseButton::Left, listen(cx, |this, _, window, cx| this.choose_speech(SttProvider::Parakeet, window, cx))))
+            .child(ui_v3::speech_card("setup-speech-deepgram", "logos/deepgram.svg", 16.0, "Deepgram", "Cloud · your API key",
+                choice == Some(SttProvider::Deepgram), deepgram)
+                .on_mouse_down(MouseButton::Left, listen(cx, |this, _, window, cx| this.choose_speech(SttProvider::Deepgram, window, cx))));
+        let ready = match choice { Some(SttProvider::Parakeet) => self.model_installed || self.download_progress().is_some(), Some(SttProvider::Deepgram) => true, None => false };
+        let hints = [(Action::Assist, "Assist"), (Action::Focus, "Type"), (Action::Toggle, "Show / hide")].map(|(action, what)| (self.hotkeys.label(action), what));
+        let notice = match choice {
+            Some(SttProvider::Parakeet) => self.model_notice.clone(),
+            Some(SttProvider::Deepgram) => self.key_notice.clone(),
+            None => None,
+        };
+        let error = setup.audio.as_ref().and_then(|check| check.error.clone());
+        ui_v3::setup_page(div().gap(px(22.0)).child(ui_v3::heading("Check what it hears", "Say something, play a video, then pick a speech model."))
+                .child(div().w(px(ui_v3::SETUP_COLUMN)).flex().flex_col().gap(px(12.0))
+                    .child(ui_v3::rows_box(rows))
+                    .child(cards)
+                    .children(error.map(|error| text(12.0, 16.0, theme::danger(), error).px(px(2.0))))
+                    .children(notice.map(|notice| text(12.0, 16.0, theme::accent_soft(), notice).px(px(2.0))))),
+            div().child(self.next_button(Step::Transcription, "Start CluelyRS", if ready { Kind::Primary } else { Kind::Disabled }, cx))
+                .child(ui_v3::shortcut_hints(&hints)),
+            true)
     }
 
-    /// A source: its switch, what it hears, the meter with its peak, the device, and for a silent
-    /// microphone the way to its privacy settings.
-    fn source_card(&self, setup: &Setup, source: Source, on: bool, picker: Div, cx: &mut Context<Self>) -> Div {
+    /// Whether the microphone has been on and open for a while without a sound.
+    fn mic_silent(&self, setup: &Setup) -> bool {
+        let Some(check) = setup.audio.as_ref() else { return false };
+        self.store.value.listen_mic && check.capture.is_some() && check.meters[slot(Source::Me)].last_heard.is_none() && check.started.elapsed() > SILENT_HINT_AFTER
+    }
+
+    /// A source's row: its level, its device, and a check while it hears something (an alert while
+    /// the microphone stays silent).
+    fn source_row(&self, setup: &Setup, source: Source, picker: AnyElement) -> AnyElement {
         let mic = source == Source::Me;
-        let now = Instant::now();
-        let check = setup.audio.as_ref();
-        let meter = check.map(|check| check.meters[slot(source)]).unwrap_or_default();
-        let open = check.is_some_and(|check| check.capture.is_some());
-        let hearing = meter.last_heard.is_some_and(|at| now - at < Duration::from_millis(1500));
-        let silent = on && open && meter.last_heard.is_none() && check.is_some_and(|check| now - check.started > SILENT_HINT_AFTER);
-        let (status, color) = if !on { ("Off", theme::muted()) } else if hearing { ("Hearing sound", theme::ok()) }
-            else if silent && mic { ("No sound", rgb(CAUTION)) } else if silent { ("Play something", theme::muted()) }
-            else if open { ("Listening…", theme::muted()) } else { ("Opening…", theme::muted()) };
-        let warn = silent && mic;
-        let toggle = div().id(("setup-source", slot(source))).flex_none().cursor_pointer().child(ui::switch(on))
-            .on_mouse_down(MouseButton::Left, listen(cx, move |this, _, window, cx| this.change_audio(move |s| if mic { s.listen_mic = !on } else { s.listen_desktop = !on }, window, cx)));
-        let shown = |value: f32| if on { value.clamp(0.0, 1.0) } else { 0.0 };
-        let level_bar = div().relative().h(px(10.0)).rounded(px(3.0)).bg(theme::divider()).overflow_hidden()
-            .child(div().h_full().bg(theme::accent()).w(relative(shown(meter.level))))
-            .when(on && meter.peak > 0.0, |bar| bar.child(div().absolute().top_0().h_full().w(px(3.0)).bg(rgb(0x8fb4ff)).left(relative(shown(meter.peak)))));
-        let mut card = div().flex().flex_col().gap(px(12.0)).px(px(14.0)).pt(px(14.0)).pb(px(16.0)).rounded(px(12.0)).border_1()
-            .border_color(if warn { rgb(0x5a4a24) } else { theme::hairline() })
-            .child(div().flex().items_center().gap(px(10.0))
-                .child(ui::icon(if mic { "icons/setup-mic.svg" } else { "icons/setup-speaker.svg" }, 16.0, theme::body()))
-                .child(div().flex_1().text_size(px(13.0)).font_weight(gpui::FontWeight::SEMIBOLD).text_color(theme::text()).child(if mic { "Microphone · you" } else { "Desktop audio · them" }))
-                .child(steps::status_text(status, color))
-                .child(toggle))
-            .child(level_bar)
-            .child(picker);
-        if warn {
-            card = card.child(div().flex().items_center().gap(px(12.0)).px(px(12.0)).py(px(10.0)).rounded(px(10.0)).bg(rgb(0x1c1912)).border_1().border_color(rgb(0x3d3420))
-                .child(ui::icon("icons/setup-circle-alert.svg", 16.0, rgb(CAUTION)))
-                .child(div().flex_1().text_size(px(13.0)).font_weight(gpui::FontWeight::SEMIBOLD).text_color(theme::text()).child("Can't hear your microphone"))
-                .child(small_button("setup-mic-privacy", "Open microphone privacy settings", false)
-                    .on_mouse_down(MouseButton::Left, listen(cx, |_, _, _, cx| cx.open_url("ms-settings:privacy-microphone")))));
-        }
-        card
+        let on = if mic { self.store.value.listen_mic } else { self.store.value.listen_desktop };
+        let meter = setup.audio.as_ref().map(|check| check.meters[slot(source)]).unwrap_or_default();
+        let hearing = on && meter.last_heard.is_some_and(|at| at.elapsed() < HEARD_FOR);
+        let status = if hearing { Some(ui::icon("icons/setup-circle-check.svg", 16.0, theme::ok()).into_any_element()) }
+            else if mic && self.mic_silent(setup) { Some(ui::icon("icons/setup-circle-alert.svg", 16.0, theme::text()).into_any_element()) }
+            else { None };
+        let (icon, who) = if mic { ("icons/setup-mic.svg", "You") } else { ("icons/setup-speaker.svg", "Them") };
+        ui_v3::meter_row(icon, who, picker, if on { meter.level } else { 0.0 }, status).into_any_element()
     }
 }

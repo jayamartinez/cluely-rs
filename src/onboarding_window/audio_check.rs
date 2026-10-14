@@ -1,16 +1,16 @@
-//! Setup › Permissions' audio check: the microphone and desktop audio, each captured as Live would
-//! capture it, only to show its level. Nothing is recorded, transcribed or sent. A source runs only
-//! while its permission is allowed, so the check never shows a permission prompt of its own.
+//! The audio check behind setup's Listening step and Settings › Listening: the microphone and desktop
+//! audio, each captured as Live would capture it, only to show its level. Nothing is recorded,
+//! transcribed or sent. A source runs only while its permission is allowed, so the check never shows
+//! a permission prompt of its own.
 
 use std::sync::mpsc::{Receiver, channel};
 use std::time::{Duration, Instant};
 
 use gpui::Context;
 
-use super::OnboardingWindow;
 use crate::audio::{AudioCapture, AudioChunk, Devices, Source};
 use crate::platform::Access;
-use crate::settings::{OnboardingStep as Step, Settings};
+use crate::settings::Settings;
 
 const POLL: Duration = Duration::from_millis(50);
 /// A level (on `listening::level`'s 0..=1 scale) at or above this counts as hearing something.
@@ -57,6 +57,9 @@ pub(crate) enum MeterState {
 }
 
 impl Meter {
+    /// The level while it runs, else 0.
+    pub fn shown_level(&self) -> f32 { if matches!(self.state, MeterState::Running(..)) { self.level } else { 0.0 } }
+
     /// Whether it heard something in the last `HEARD_FOR`.
     pub fn hearing(&self) -> bool { self.heard.is_some_and(|at| at.elapsed() < HEARD_FOR) }
 
@@ -78,10 +81,15 @@ pub(crate) type AudioCheck = [Meter; 2];
 
 fn slot(source: Source) -> usize { match source { Source::Me => 0, Source::Them => 1 } }
 
-/// The device each source should capture from now: only on the Permissions step, while Live is
-/// off (Live has the audio then), with its switch on and its permission allowed.
-fn wanted(step: Step, settings: &Settings, permissions: &Permissions, live: bool) -> [Option<Option<String>>; 2] {
-    if step != Step::Permissions || live { return [None, None]; }
+/// A window that shows the audio check's meters.
+pub(crate) trait Metered: Sized + 'static {
+    fn meters(&mut self) -> &mut AudioCheck;
+}
+
+/// The device each source should capture from now: only while the window shows the meters
+/// (`showing`) and Live is off (Live has the audio then), with its switch on and its permission allowed.
+pub(crate) fn wanted(showing: bool, settings: &Settings, permissions: &Permissions, live: bool) -> [Option<Option<String>>; 2] {
+    if !showing || live { return [None, None]; }
     let Devices { mic, desktop } = settings.devices();
     [
         (settings.listen_mic && permissions.mic == Access::Allowed).then_some(mic),
@@ -89,64 +97,60 @@ fn wanted(step: Step, settings: &Settings, permissions: &Permissions, live: bool
     ]
 }
 
-impl OnboardingWindow {
-    /// Start, restart or stop each meter to match what it should capture now.
-    pub(super) fn sync_audio_check(&mut self, cx: &mut Context<Self>) {
-        let overlay = self.overlay.read(cx);
-        let wanted = wanted(self.step, &overlay.store.value, &self.permissions, overlay.live_since.is_some());
-        for (source, wanted) in [Source::Me, Source::Them].into_iter().zip(wanted) {
-            let meter = &mut self.audio[slot(source)];
-            if meter.wanted == wanted { continue; }
-            meter.stop();
-            meter.wanted = wanted.clone();
-            let Some(device) = wanted else { continue };
-            meter.state = MeterState::Starting;
-            let generation = meter.generation;
-            let devices = match source { Source::Me => Devices { mic: device, desktop: None }, Source::Them => Devices { mic: None, desktop: device } };
-            cx.spawn(async move |this, cx| {
-                let (sink, chunks) = channel();
-                // Opening a device can take a moment (up to 5 s before it counts as failed).
-                let mut started = Some(cx.background_executor().spawn(async move { AudioCapture::start_with(&[source], &devices, sink) }).await);
-                let running = this.update(cx, |this, cx| {
-                    let meter = &mut this.audio[slot(source)];
-                    if meter.generation != generation { return false; }
-                    meter.state = match started.take() {
-                        Some(Ok((capture, _))) => MeterState::Running(capture, chunks),
-                        Some(Err(error)) => MeterState::Failed(reason(source, &error.to_string())),
-                        None => MeterState::Off,
-                    };
-                    cx.notify();
-                    matches!(meter.state, MeterState::Running(..))
-                }).unwrap_or(false);
-                // Replaced (or setup closed) while it opened: stop it off the UI thread too.
-                if let Some(Ok((capture, _))) = started { std::thread::spawn(move || capture.stop()); }
-                if !running { return; }
-                loop {
-                    cx.background_executor().timer(POLL).await;
-                    if !this.update(cx, |this, cx| this.poll_meter(source, generation, cx)).unwrap_or(false) { return; }
-                }
-            }).detach();
-        }
-        cx.notify();
+/// Start, restart or stop each meter to capture what it should now (`wanted`).
+pub(crate) fn sync<T: Metered>(this: &mut T, wanted: [Option<Option<String>>; 2], cx: &mut Context<T>) {
+    for (source, wanted) in [Source::Me, Source::Them].into_iter().zip(wanted) {
+        let meter = &mut this.meters()[slot(source)];
+        if meter.wanted == wanted { continue; }
+        meter.stop();
+        meter.wanted = wanted.clone();
+        let Some(device) = wanted else { continue };
+        meter.state = MeterState::Starting;
+        let generation = meter.generation;
+        let devices = match source { Source::Me => Devices { mic: device, desktop: None }, Source::Them => Devices { mic: None, desktop: device } };
+        cx.spawn(async move |this, cx| {
+            let (sink, chunks) = channel();
+            // Opening a device can take a moment (up to 5 s before it counts as failed).
+            let mut started = Some(cx.background_executor().spawn(async move { AudioCapture::start_with(&[source], &devices, sink) }).await);
+            let running = this.update(cx, |this, cx| {
+                let meter = &mut this.meters()[slot(source)];
+                if meter.generation != generation { return false; }
+                meter.state = match started.take() {
+                    Some(Ok((capture, _))) => MeterState::Running(capture, chunks),
+                    Some(Err(error)) => MeterState::Failed(reason(source, &error.to_string())),
+                    None => MeterState::Off,
+                };
+                cx.notify();
+                matches!(meter.state, MeterState::Running(..))
+            }).unwrap_or(false);
+            // Replaced (or the window closed) while it opened: stop it off the UI thread too.
+            if let Some(Ok((capture, _))) = started { std::thread::spawn(move || capture.stop()); }
+            if !running { return; }
+            loop {
+                cx.background_executor().timer(POLL).await;
+                if !this.update(cx, |this, cx| poll(this.meters(), source, generation, cx)).unwrap_or(false) { return; }
+            }
+        }).detach();
     }
+    cx.notify();
+}
 
-    /// Read a running meter's level; `false` once it has stopped or been replaced.
-    fn poll_meter(&mut self, source: Source, generation: u64, cx: &mut Context<Self>) -> bool {
-        let meter = &mut self.audio[slot(source)];
-        if meter.generation != generation { return false; }
-        let MeterState::Running(capture, chunks) = &meter.state else { return false };
-        // The chunks themselves aren't needed; keeping the receiver keeps capture running.
-        while chunks.try_recv().is_ok() {}
-        let ended = capture.take_ended().into_iter().next();
-        meter.level = crate::listening::level(capture.level(source));
-        if meter.level >= HEARD { meter.heard = Some(Instant::now()); }
-        if let Some((_, why)) = ended {
-            meter.stop();
-            meter.state = MeterState::Failed(why);
-        }
-        cx.notify();
-        matches!(meter.state, MeterState::Running(..))
+/// Read a running meter's level; `false` once it has stopped or been replaced.
+fn poll<T: 'static>(meters: &mut AudioCheck, source: Source, generation: u64, cx: &mut Context<T>) -> bool {
+    let meter = &mut meters[slot(source)];
+    if meter.generation != generation { return false; }
+    let MeterState::Running(capture, chunks) = &meter.state else { return false };
+    // The chunks themselves aren't needed; keeping the receiver keeps capture running.
+    while chunks.try_recv().is_ok() {}
+    let ended = capture.take_ended().into_iter().next();
+    meter.level = crate::listening::level(capture.level(source));
+    if meter.level >= HEARD { meter.heard = Some(Instant::now()); }
+    if let Some((_, why)) = ended {
+        meter.stop();
+        meter.state = MeterState::Failed(why);
     }
+    cx.notify();
+    matches!(meter.state, MeterState::Running(..))
 }
 
 /// `AudioCapture::start_with`'s error for one source, without its "No audio source could be
@@ -161,17 +165,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_source_runs_only_on_its_step_with_its_switch_and_permission_and_without_live() {
+    fn a_source_runs_only_while_shown_with_its_switch_and_permission_and_without_live() {
         let allowed = Permissions { mic: Access::Allowed, screen_allowed: true, screen_asked: false, relaunch_error: None };
         let settings = Settings { mic_device: "USB Mic".into(), ..Settings::default() };
-        let runs = |step, settings: &Settings, permissions: &Permissions, live| wanted(step, settings, permissions, live).map(|device| device.is_some());
-        assert_eq!(wanted(Step::Permissions, &settings, &allowed, false), [Some(Some("USB Mic".into())), Some(None)]);
-        assert_eq!(runs(Step::Privacy, &settings, &allowed, false), [false, false], "only on the Permissions step");
-        assert_eq!(runs(Step::Permissions, &settings, &allowed, true), [false, false], "Live has the audio");
+        let runs = |showing, settings: &Settings, permissions: &Permissions, live| wanted(showing, settings, permissions, live).map(|device| device.is_some());
+        assert_eq!(wanted(true, &settings, &allowed, false), [Some(Some("USB Mic".into())), Some(None)]);
+        assert_eq!(runs(false, &settings, &allowed, false), [false, false], "only while the meters show");
+        assert_eq!(runs(true, &settings, &allowed, true), [false, false], "Live has the audio");
         let not_yet = Permissions { mic: Access::NotAsked, screen_allowed: false, ..allowed.clone() };
-        assert_eq!(runs(Step::Permissions, &settings, &not_yet, false), [false, false], "never prompts on its own");
+        assert_eq!(runs(true, &settings, &not_yet, false), [false, false], "never prompts on its own");
         let mic_off = Settings { listen_mic: false, ..settings.clone() };
-        assert_eq!(runs(Step::Permissions, &mic_off, &allowed, false), [false, true]);
+        assert_eq!(runs(true, &mic_off, &allowed, false), [false, true]);
     }
 
     #[test]

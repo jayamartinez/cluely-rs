@@ -22,6 +22,10 @@ mod cli_location;
 #[cfg(windows)]
 pub(crate) use cli_location::install_page;
 #[cfg(target_os = "macos")]
+mod mac;
+#[cfg(target_os = "macos")]
+pub(crate) use mac::{WindowAction, WindowState, menu as mac_menu};
+#[cfg(target_os = "macos")]
 mod onboarding;
 mod reveal;
 #[cfg(target_os = "macos")]
@@ -303,12 +307,12 @@ impl Overlay {
         }
     }
 
-    /// A tab's contents for the macOS Settings window. Its dropdowns record their areas in a
+    /// A tab's contents for the macOS Settings window (`mac`). Its dropdowns record their areas in a
     /// throwaway `Hits`: the overlay's own hit-testing must only see the overlay's controls.
     #[cfg(target_os = "macos")]
-    pub(crate) fn settings_window_body(&mut self, tab: Tab, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn settings_window_body(&mut self, tab: Tab, state: WindowState, cx: &mut Context<Self>) -> AnyElement {
         self.settings_window_tab = Some(tab);
-        self.in_window(cx, |this, cx| this.settings_body(tab, cx))
+        self.in_window(cx, |this, cx| this.mac_tab(tab, state, cx))
     }
 
     /// Lay out content for another window (Settings, setup) with a throwaway `Hits`: the overlay's

@@ -36,13 +36,13 @@ const SEARCH_HEIGHT: f32 = 34.0;
 /// The hairline between the list and what follows, with 3 px either side.
 const DIVIDER_HEIGHT: f32 = 7.0;
 /// The popover's border and padding, top and bottom together.
-const CHROME_HEIGHT: f32 = 10.0;
+const CHROME_HEIGHT: f32 = 12.0;
 /// The tallest the popover's list gets; longer lists scroll (and search narrows them).
 const LIST_MAX_HEIGHT: f32 = 300.0;
 /// Space kept between the popover and the window edge.
 const EDGE_MARGIN: f32 = 12.0;
-/// The face is 36 px tall; the popover hangs 4 px from it.
-const FACE_OFFSET: f32 = 40.0;
+/// The face is 32 px tall; the popover hangs 4 px from it.
+const FACE_OFFSET: f32 = 36.0;
 
 /// The model face's bounds and the window's height, from the last frame, to place the popover.
 type FaceBounds = Rc<Cell<Option<(Bounds<Pixels>, Pixels)>>>;
@@ -79,6 +79,17 @@ impl Overlay {
     pub(crate) fn key_saved(&mut self, provider: &str) {
         self.model_ui.key_editing = false;
         if provider == self.store.value.api_provider { self.key_notice = None; }
+    }
+
+    /// Whether the key field shows although a key is saved (Replace… was pressed).
+    pub(super) fn replacing_key(&self) -> bool { self.model_ui.key_editing }
+
+    /// Replace…: the key field takes a new key; the saved one stays until it's saved.
+    pub(super) fn replace_key(&mut self, cx: &mut Context<Self>) {
+        self.key_reveal.hide();
+        self.model_ui.key_editing = true;
+        self.key_notice = None;
+        cx.notify();
     }
 
     fn remove_key_and_reset(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -180,7 +191,7 @@ impl Overlay {
     }
 
     /// Provider, then its key (or endpoint), then the model, as one grouped box.
-    fn connection_group(&self, cx: &mut Context<Self>) -> Div {
+    pub(super) fn connection_group(&self, cx: &mut Context<Self>) -> Div {
         let s = &self.store.value;
         let presets: Vec<(String, String)> = providers::PRESETS.iter().map(|p| (p.id.to_string(), p.label.to_string())).collect();
         let current = providers::preset(&s.api_provider).map(|p| p.label).unwrap_or("Choose a provider");
@@ -199,8 +210,8 @@ impl Overlay {
         }
         let last = rows.len() - 1;
         rows.into_iter().enumerate().fold(
-            div().flex().flex_col().rounded(px(12.0)).bg(rgb(0x141518)).border_1().border_color(rgb(0x23262a)),
-            |group, (index, row)| group.child(if index == last { row } else { row.border_b_1().border_color(rgb(0x202327)) }),
+            div().flex().flex_col().rounded(px(12.0)).bg(theme::title_bar()).border_1().border_color(theme::hairline()),
+            |group, (index, row)| group.child(if index == last { row } else { row.border_b_1().border_color(theme::divider()) }),
         )
     }
 
@@ -283,7 +294,7 @@ impl Overlay {
             this.toggle_picker(picker, cx);
             if this.open_picker == Some(picker) { opened(this, window, cx); }
         });
-        let face = ui::picker(("model-face", picker as usize), value, open).relative()
+        let face = crate::ui_v3::dropdown_face(("model-face", picker as usize), None, value, open).relative()
             .on_mouse_down(MouseButton::Left, move |event, window, cx| {
                 toggle(event, window, cx);
                 window.focus(&search.focus_handle(cx));
@@ -304,7 +315,7 @@ impl Overlay {
     /// The popover's box, closed by a click anywhere else but its face (which toggles it itself).
     fn popover_shell(&self, cx: &mut Context<Self>) -> gpui::Stateful<Div> {
         let face_bounds = self.model_ui.face.clone();
-        ui::menu().id("model-popover").w(px(POPOVER_WIDTH)).shadow_lg().line_height(px(LINE_HEIGHT))
+        super::mac_menu().id("model-popover").w(px(POPOVER_WIDTH)).line_height(px(LINE_HEIGHT))
             .on_mouse_down_out(listen(cx, move |this, event: &MouseDownEvent, _, cx| {
                 if face_bounds.get().is_some_and(|(face, _)| face.contains(&event.position)) { return; }
                 this.close_picker(cx);
