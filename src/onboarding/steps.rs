@@ -160,16 +160,19 @@ impl Overlay {
     }
 
     /// A dropdown on a setup page: its face, and the list under it while open. `pick` gets the
-    /// chosen option's id. Shorter than 32 px, it is the compact kind with smaller text.
+    /// chosen option's id; `logo`, if given, maps an id to the icon shown before its name (the face
+    /// shows the selected one's). Shorter than 32 px, it is the compact kind with smaller text.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn setup_dropdown(&self, setup: &Setup, menu: Menu, value: impl Into<SharedString>, options: Vec<(String, String)>, selected: &str, height: f32,
-        pick: impl Fn(&mut Overlay, String, &mut Window, &mut Context<Overlay>) + Clone + 'static, cx: &mut Context<Self>) -> Div {
+    pub(super) fn setup_dropdown(&self, setup: &Setup, menu: Menu, value: impl Into<SharedString>, options: Vec<(String, String)>, logo: Option<fn(&str) -> &'static str>,
+        selected: &str, height: f32, pick: impl Fn(&mut Overlay, String, &mut Window, &mut Context<Overlay>) + Clone + 'static, cx: &mut Context<Self>) -> Div {
         let open = setup.menu == Some(menu);
         let compact = height < 32.0;
         let face = div().id(("setup-menu", menu as usize)).w_full().h(px(height)).px(px(if height > 32.0 { 12.0 } else { 10.0 }))
             .flex().items_center().justify_between().gap(px(6.0)).rounded(px(if height > 32.0 { 9.0 } else { 8.0 })).cursor_pointer()
             .bg(theme::field()).border_1().border_color(if open { theme::accent() } else { theme::hairline() })
-            .child(div().min_w_0().truncate().text_size(px(if compact { 12.0 } else { 13.0 })).text_color(theme::text()).child(value.into()))
+            .child(div().min_w_0().flex().items_center().gap(px(8.0))
+                .when_some(logo, |name, logo| name.child(ui::icon(logo(selected), 14.0, theme::body())))
+                .child(div().min_w_0().truncate().text_size(px(if compact { 12.0 } else { 13.0 })).text_color(theme::text()).child(value.into())))
             .child(ui::icon("icons/chevron-down.svg", if compact { 10.0 } else { 12.0 }, theme::muted()))
             .on_mouse_down(MouseButton::Left, listen(cx, move |this, _, _, cx| this.set_menu(Some(menu), cx)));
         let mut dropdown = div().relative().w_full().child(face);
@@ -178,7 +181,7 @@ impl Overlay {
                 .on_mouse_down_out(listen(cx, |this, _, _, cx| this.set_menu(None, cx)));
             for (index, (id, label)) in options.into_iter().enumerate() {
                 let (chosen, pick) = (id.clone(), pick.clone());
-                list = list.child(ui::menu_item(("setup-option", index), label, id == selected)
+                list = list.child(ui::menu_item_with_icon(("setup-option", index), logo.map(|logo| logo(&id)), label, id == selected)
                     .on_mouse_down(MouseButton::Left, listen(cx, move |this, _, window, cx| {
                         cx.stop_propagation();
                         this.set_menu(None, cx);
@@ -300,7 +303,7 @@ impl Overlay {
 
         let modes: Vec<(String, String)> = self.modes.modes().iter().map(|mode| (mode.id.clone(), mode.name.clone())).collect();
         let active = self.modes.active();
-        let mode_picker = div().w(px(150.0)).child(self.setup_dropdown(setup, Menu::Mode, active.name.clone(), modes, &active.id, 28.0,
+        let mode_picker = div().w(px(150.0)).child(self.setup_dropdown(setup, Menu::Mode, active.name.clone(), modes, None, &active.id, 28.0,
             |this, id, _, cx| this.activate_mode(&id, cx), cx));
         let mut answers = div().flex_1().flex().flex_col().gap(px(4.0))
             .child(title("ANSWERS", 0.0))

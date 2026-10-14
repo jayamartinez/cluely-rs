@@ -123,9 +123,20 @@ pub fn menu() -> Div {
 }
 
 pub fn menu_item(id: impl Into<ElementId>, label: impl Into<SharedString>, selected: bool) -> gpui::Stateful<Div> {
+    menu_item_with_icon(id, None, label, selected)
+}
+
+/// A menu row with an optional muted icon (a provider's logo) before its label. The icon sits in a
+/// fixed-width slot so the labels line up down the list.
+pub fn menu_item_with_icon(id: impl Into<ElementId>, leading: Option<&'static str>, label: impl Into<SharedString>, selected: bool) -> gpui::Stateful<Div> {
+    let label = div().truncate().child(label.into());
     let row = div().id(id).flex().items_center().justify_between().gap(px(8.0)).px(px(10.0)).py(px(7.0)).rounded(px(7.0)).cursor_pointer()
         .text_size(px(13.0)).hover(|row| row.bg(rgb(0x26292d)))
-        .child(div().truncate().child(label.into()));
+        .child(match leading {
+            Some(path) => div().min_w_0().flex().items_center().gap(px(8.0))
+                .child(div().w(px(16.0)).flex_none().flex().justify_center().child(icon(path, 14.0, theme::muted()))).child(label.min_w_0()),
+            None => label,
+        });
     if selected { row.bg(rgb(0x26292d)).text_color(theme::text()).child(div().text_color(theme::accent()).font_weight(FontWeight::BOLD).child("✓")) }
     else { row.text_color(theme::body()) }
 }

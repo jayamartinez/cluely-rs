@@ -269,7 +269,7 @@ impl Overlay {
         let start_live = store.value.start_live_on_launch && !setup;
         let composer = cx.new(|cx| TextInput::new(composer_placeholder(&store.value), cx));
         let key_input = cx.new(|cx| TextInput::new("Paste your API key", cx).masked(true));
-        let model_input = cx.new(|cx| TextInput::new("Model id, e.g. from the list below", cx));
+        let model_input = cx.new(|cx| TextInput::new(MODEL_PLACEHOLDER, cx));
         let base_url_input = cx.new(|cx| TextInput::new("https://your-endpoint.example/v1", cx));
         model_input.update(cx, |input, cx| input.set_text(store.value.api_model().to_string(), cx));
         base_url_input.update(cx, |input, cx| input.set_text(store.value.custom_base_url.clone(), cx));
@@ -1348,6 +1348,9 @@ fn region(children: &[Hit], floating: &[Hit], scale: f32) -> Vec<platform::Shape
             (radius * scale).round() as i32)
     }).collect()
 }
+
+/// Settings › Model's model box placeholder; setup swaps in an example id while it is open.
+pub(crate) const MODEL_PLACEHOLDER: &str = "Model id, e.g. from the list below";
 
 /// The text box's placeholder says what an answer will see: the screen only while Screen on send is on.
 fn composer_placeholder(settings: &Settings) -> &'static str {

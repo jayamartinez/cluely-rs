@@ -107,6 +107,10 @@ const ICONS: &[(&str, &[u8])] = &[
     ("icons/logo-gemini.svg", include_bytes!("../assets/icons/logo-gemini.svg")),
     ("icons/logo-openrouter.svg", include_bytes!("../assets/icons/logo-openrouter.svg")),
     ("icons/logo-deepgram.svg", include_bytes!("../assets/icons/logo-deepgram.svg")),
+    ("icons/logo-deepseek.svg", include_bytes!("../assets/icons/logo-deepseek.svg")),
+    ("icons/logo-mistral.svg", include_bytes!("../assets/icons/logo-mistral.svg")),
+    ("icons/logo-ollama.svg", include_bytes!("../assets/icons/logo-ollama.svg")),
+    ("icons/logo-lmstudio.svg", include_bytes!("../assets/icons/logo-lmstudio.svg")),
 ];
 
 pub struct Assets;
