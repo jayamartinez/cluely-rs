@@ -1,79 +1,73 @@
-//! The overlay card, the same on Windows and macOS, laid out like the Paper artboards "macOS · Overlay
-//! v2 · Unified · Chat above composer" and "Windows · Overlay · Unified card (same as macOS)". During
-//! Live its top holds the transcript strip, the answers and the quick actions; below them sit the text
-//! box and a toolbar of plain icons (the mark and the mode chip, the two toggles, the Live waveform
-//! with its timer, Sessions and Settings). The card's top edge stays put, so the text box moves down as the
-//! conversation grows.
-//!
-//! Settings: macOS opens its own window. Where Settings is a panel under the card (Windows), the card
-//! shows only its text box and toolbar while the panel is open; typing still works there, and sending
-//! collapses the panel into the conversation (see `Overlay::collapse_progress`).
+//! The overlay card, the same on Windows and macOS, laid out like the Paper artboards "Overlay ·
+//! Idle", "Overlay · Live" (Redesign v3 · Windows) and their macOS twins. The text box is the card's
+//! top row and the toolbar its bottom row: the viewfinder (Settings) and the mode chip on the left,
+//! the two toggles and the Live waveform with its timer in the middle, Sessions on the right. During
+//! Live (and after it, until the next session) the conversation sits between them: what was heard,
+//! the answers and the quick actions. The card's top edge stays put, so the toolbar moves down as the
+//! conversation grows. Sessions replaces the whole card with its panel (`sessions_panel`). Settings
+//! opens in its own window on both platforms.
 
-use gpui::{Context, Focusable, InteractiveElement, IntoElement, MouseButton, ParentElement, Styled, div, prelude::*, px, rgb, rgba};
+use gpui::{Context, Focusable, FontWeight, InteractiveElement, IntoElement, MouseButton, ParentElement, Styled, div, prelude::*, px};
 
 use super::{Overlay, WIDTH};
 use crate::settings_view::Tab;
-use crate::toggles::Toggle;
+use crate::toggles::{self, Align, Tip, Toggle};
 use crate::{theme, ui};
 
-/// The card behind the conversation and the toolbar, as see-through as Settings › Window › Background
-/// opacity makes it (`Overlay::card_fill`).
-const CARD: u32 = 0x121315;
-/// The text box row, lighter than the rest of the card.
-const INPUT_ROW: u32 = 0x2e3034;
-const EDGE: u32 = 0xffffff14;
-/// The return button while there is nothing to send.
-const RETURN_IDLE: u32 = 0x43464b;
-/// Toolbar icons while off.
-const ICON_OFF: u32 = 0x8a867e;
-const HOVER: u32 = 0xffffff0f;
-/// The conversation (transcript strip, answers, quick actions) grows to this height, then the
+/// The text box row and the toolbar.
+pub(super) const INPUT_ROW_HEIGHT: f32 = 48.0;
+pub(super) const TOOLBAR_HEIGHT: f32 = 48.0;
+/// The toolbar's left (viewfinder, mode chip) and right (Sessions) groups, so the middle group is
+/// centred on the card.
+const TOOLBAR_SIDE: f32 = 190.0;
+/// The conversation (what was heard, answers, quick actions) grows to this height, then the
 /// answers scroll.
-const CONVERSATION_MAX_HEIGHT: f32 = 418.0;
+pub(super) const CONVERSATION_MAX_HEIGHT: f32 = 418.0;
 /// The card's default width (Settings › Window › Card width); the Settings panel under it matches.
 pub(crate) const CARD_WIDTH: f32 = WIDTH - 40.0;
+/// How far a 32 px toolbar button's bottom is above the card's bottom edge (its border included).
+const BELOW_BUTTON: f32 = (TOOLBAR_HEIGHT - toggles::BUTTON) / 2.0 + 1.0;
 
 impl Overlay {
-    /// `collapse` is how far Settings has collapsed into the conversation (0 to 1), while it does.
-    pub(super) fn card(&self, collapse: Option<f32>, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn card(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        if let Some(panel) = &self.sessions_panel { return self.sessions_card(panel, cx).into_any_element(); }
         let live = self.live_since.is_some();
-        // With Settings open the card is just the text box and toolbar; the conversation grows back
-        // in as Settings collapses.
         // After Live stops, the last chat stays until the next session starts (see `chat`).
-        let conversation_shown = (live || !self.turns.is_empty()) && (self.settings_tab.is_none() || collapse.is_some());
+        let conversation_shown = live || !self.turns.is_empty();
         // Each section paints its own translucent background, so none is stacked on another and the
-        // whole card stays equally see-through.
-        let mut card = div().id("card").relative().w(px(self.store.value.card_width.card())).flex().flex_col().rounded(px(20.0))
-            .border_1().border_color(rgba(EDGE));
+        // whole card stays equally see-through. Inner corners are a pixel tighter than the border's.
+        let mut card = div().id("card").relative().w(px(self.store.value.card_width.card())).flex().flex_col().rounded(px(theme::radius::CARD))
+            .border_1().border_color(theme::keycap_border());
+        // An update notice (never during Live) is the card's top row.
+        let notice = self.update_notice(cx);
+        let notice_shown = notice.is_some();
+        card = card.children(notice);
+        // The conversation sits above the text box, so the question is typed under the answer it follows.
         if conversation_shown {
-            let (ticker, thread, actions) = self.live_parts(cx);
+            let (heard, thread, actions) = self.live_parts(cx);
             // The conversation hugs its content up to a cap; past it the thread (which may shrink,
-            // unlike the strip and the actions) scrolls.
-            let grown = collapse.unwrap_or(1.0);
-            let mut conversation = div().flex().flex_col().max_h(px(CONVERSATION_MAX_HEIGHT * grown)).overflow_hidden()
-                .bg(self.card_fill(CARD)).rounded_t(px(19.0)).child(ticker.flex_none());
-            if collapse.is_some() { conversation = conversation.opacity(grown); }
+            // unlike the heard line and the actions) scrolls.
+            let mut conversation = div().flex().flex_col().gap(px(12.0)).px(px(18.0)).py(px(14.0)).max_h(px(CONVERSATION_MAX_HEIGHT)).overflow_hidden()
+                .bg(self.card_fill(theme::CARD)).child(heard.flex_none())
+                .when(notice_shown, |conversation| conversation.border_t_1().border_color(theme::divider()))
+                .when(!notice_shown, |conversation| conversation.rounded_t(px(theme::radius::CARD - 1.0)));
             if !self.turns.is_empty() { conversation = conversation.child(thread.flex_initial().min_h_0()); }
             card = card.child(conversation.child(actions.flex_none()));
         }
-        // An update notice (never during Live) sits above the text box, as the conversation does.
-        let notice = self.update_notice(cx);
-        let below = conversation_shown || notice.is_some();
-        card.children(notice).child(self.input_row(below, cx)).child(self.toolbar(live, cx))
+        card.child(self.input_row(notice_shown || conversation_shown, cx)).child(self.toolbar(live, cx)).into_any_element()
     }
 
     /// The text box and the return button, which turns blue once there is something to send.
-    fn input_row(&self, below_conversation: bool, cx: &mut Context<Self>) -> impl IntoElement {
+    fn input_row(&self, below: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let ready = !self.composer.read(cx).text().is_empty();
-        let send = div().id("send").size(px(32.0)).flex_none().rounded(px(8.0)).flex().items_center().justify_center().cursor_pointer()
-            .bg(if ready { theme::accent() } else { rgb(RETURN_IDLE) })
+        let send = div().id("send").size(px(28.0)).flex_none().rounded(px(theme::radius::BUTTON)).flex().items_center().justify_center().cursor_pointer()
+            .border_1().border_color(if ready { theme::accent() } else { theme::keycap_border() }).bg(if ready { theme::accent() } else { theme::pressed() })
             .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| { let input = this.composer.clone(); this.send_composer(input, window, cx); }))
             .child(ui::icon("icons/return.svg", 14.0, if ready { theme::accent_ink() } else { theme::body() }));
-        // Without the conversation the text box is the top of the card; under it a hairline
-        // separates the two.
-        div().relative().flex().items_center().gap(px(10.0)).h(px(54.0)).pl(px(18.0)).pr(px(11.0)).bg(self.card_fill(INPUT_ROW))
-            .when(!below_conversation, |row| row.rounded_t(px(19.0)))
-            .when(below_conversation, |row| row.border_t_1().border_color(rgba(EDGE)))
+        // The card's top row, unless the update notice or the conversation is above it.
+        div().relative().flex().flex_none().items_center().gap(px(10.0)).h(px(INPUT_ROW_HEIGHT)).pl(px(16.0)).pr(px(10.0)).bg(self.card_fill(theme::CARD_FIELD))
+            .when(!below, |row| row.rounded_t(px(theme::radius::CARD - 1.0)))
+            .when(below, |row| row.border_t_1().border_color(theme::divider()))
             .child(div().id("composer-input").flex_1().min_w_0().cursor_text()
                 .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| this.focus_text_box(window, cx)))
                 .child(self.composer.clone()))
@@ -92,54 +86,69 @@ impl Overlay {
 
     /// A click in the text box gives it the keyboard. The overlay doesn't activate on a click (a
     /// non-activating panel on macOS), so take it as the Type shortcut does; Esc, the shortcut again
-    /// or sending hands it back. Settings stays open: typing there is allowed, and sending collapses it.
+    /// or sending hands it back.
     fn focus_text_box(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) {
         self.take_keyboard(cx);
         window.focus(&self.composer.focus_handle(cx));
     }
 
     fn toolbar(&self, live: bool, cx: &mut Context<Self>) -> impl IntoElement {
-        let icon_button = |id: &'static str| div().id(id).flex().flex_none().items_center().justify_center().h(px(32.0)).rounded(px(8.0))
-            .cursor_pointer().hover(|button| button.bg(rgba(HOVER)));
-        // The waveform starts and stops Live; while live it is blue, moves with what is heard and has the
-        // elapsed time beside it.
+        let icon_button = |id: &'static str| div().id(id).flex().flex_none().items_center().justify_center().h(px(toggles::BUTTON))
+            .rounded(px(theme::radius::ICON_BUTTON)).cursor_pointer();
+        // The viewfinder is the brand mark and opens Settings; hovering says so, since the mark alone doesn't.
+        let logo = icon_button("settings").relative().w(px(toggles::BUTTON)).bg(theme::raised()).border_1().border_color(theme::hairline())
+            .hover(|button| button.bg(theme::pressed()))
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| { cx.stop_propagation(); this.open_settings(Tab::default(), window, cx); }))
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| this.hover_tip(Tip::Settings, *hovered, cx)))
+            .child(ui::viewfinder(18.0));
+        let logo = if self.tip == Some(Tip::Settings) {
+            self.tooltip_under_card(logo, toggles::BUTTON, BELOW_BUTTON, Align::Start, toggles::tooltip("Open settings", None))
+        } else { logo };
+        // The waveform starts and stops Live; while live it moves with what is heard (`level_bars`)
+        // and has the elapsed time beside it.
         let bars: gpui::AnyElement = if live && !self.levels.is_empty() { self.level_bars().into_any_element() }
-            else { ui::icon("icons/tab-listening.svg", 18.0, if live { theme::accent_soft() } else { rgb(ICON_OFF) }).into_any_element() };
-        let wave = icon_button("live").gap(px(6.0)).px(px(9.0))
+            else { ui::icon("icons/tab-listening.svg", 18.0, if live { theme::accent_soft() } else { theme::body() }).into_any_element() };
+        let wave = icon_button("live").gap(px(6.0)).px(px(if live { 9.0 } else { 7.0 }))
+            .when(live, |wave| wave.bg(theme::selected_row()))
+            .when(!live, |wave| wave.hover(|wave| wave.bg(theme::pressed())))
             // Read when clicked: the state may have changed since this frame was drawn.
             .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| this.set_live(this.live_since.is_none(), window, cx)))
             .child(bars)
-            .when(live, |wave| wave.child(div().font_family(theme::MONO).text_size(px(12.0)).text_color(theme::accent_soft()).child(self.elapsed())));
-        let middle = div().flex().items_center().gap(px(6.0))
-            .child(self.toggle_button(Toggle::ScreenOnSend, cx))
-            .child(self.toggle_button(Toggle::HideFromCapture, cx))
-            .child(div().w(px(1.0)).h(px(16.0)).bg(theme::hairline()))
+            .when(live, |wave| wave.child(div().font_family(theme::MONO).text_size(px(12.0)).line_height(px(16.0)).text_color(theme::accent_soft()).child(self.elapsed())));
+        let middle = div().flex_1().flex().items_center().justify_center().gap(px(4.0))
+            .child(self.toggle_button(Toggle::ScreenOnSend, BELOW_BUTTON, cx))
+            .child(self.toggle_button(Toggle::HideFromCapture, BELOW_BUTTON, cx))
+            .child(div().w(px(1.0)).h(px(18.0)).flex_none().bg(theme::hairline()))
             .child(wave);
-        let sessions = icon_button("sessions").gap(px(8.0)).pl(px(10.0)).pr(px(4.0))
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.open_sessions(cx)))
-            .child(div().text_size(px(13.0)).font_weight(gpui::FontWeight::SEMIBOLD).text_color(theme::body()).child("Sessions"))
-            .child(div().size(px(24.0)).flex().items_center().justify_center().rounded(px(6.0)).bg(rgb(0x26282c))
-                .child(ui::icon("icons/chevron-down.svg", 10.0, theme::body())));
-        // Opens Settings, or closes the panel under the card when it is open.
-        let settings_open = self.settings_tab.is_some();
-        let settings = icon_button("settings").w(px(32.0)).when(settings_open, |button| button.bg(rgba(HOVER)))
-            .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, window, cx| {
-                if settings_open { this.close_panels(window, cx) } else { this.open_settings(Tab::default(), window, cx) }
-            }))
-            .child(ui::icon("icons/gear.svg", 17.0, if settings_open { theme::text() } else { theme::muted() }));
+        // Sessions opens its panel in place of the card.
+        let sessions = div().id("sessions").flex().flex_none().items_center().gap(px(8.0)).h(px(toggles::BUTTON)).pl(px(6.0)).cursor_pointer()
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| { cx.stop_propagation(); this.open_sessions_panel(window, cx); }))
+            .child(div().text_size(px(12.0)).line_height(px(16.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::body()).child("Sessions"))
+            .child(div().size(px(22.0)).flex().flex_none().items_center().justify_center().rounded(px(theme::radius::ICON_BUTTON))
+                .bg(theme::raised()).border_1().border_color(theme::hairline())
+                .child(ui::icon("icons/chevron-down.svg", 12.0, theme::body())));
         // The overlay moves with its shortcuts only (Ctrl Alt arrows, ⌃⌥ arrows on macOS), not by dragging.
-        div().flex().items_center().gap(px(6.0)).h(px(46.0)).pl(px(16.0)).pr(px(10.0)).bg(self.card_fill(CARD)).rounded_b(px(19.0))
-            .child(div().flex_1().flex().items_center().gap(px(12.0)).child(ui::mark(22.0)).child(self.mode_chip(cx)))
+        div().flex().flex_none().items_center().h(px(TOOLBAR_HEIGHT)).px(px(8.0)).border_t_1().border_color(theme::divider())
+            .bg(self.card_fill(theme::CARD)).rounded_b(px(theme::radius::CARD - 1.0))
+            .child(div().w(px(TOOLBAR_SIDE)).flex_none().flex().items_center().gap(px(6.0)).child(logo).child(self.mode_chip(cx)))
             .child(middle)
-            .child(div().flex_1().flex().items_center().justify_end().gap(px(2.0)).child(sessions).child(settings))
+            .child(div().w(px(TOOLBAR_SIDE)).flex_none().flex().items_center().justify_end().child(sessions))
             .child(self.hits.mark())
+    }
+
+    /// The mode chip's "Switch mode" tooltip with its shortcut, while the pointer is on the closed chip.
+    pub(super) fn chip_tooltip(&self, chip: gpui::Stateful<gpui::Div>, chip_height: f32) -> gpui::Stateful<gpui::Div> {
+        if self.tip != Some(Tip::ModeChip) || self.switcher.is_some() { return chip; }
+        let below = (TOOLBAR_HEIGHT - chip_height) / 2.0 + 1.0;
+        let keys = self.hotkeys.label(crate::hotkeys::Action::SwitchMode);
+        self.tooltip_under_card(chip, chip_height, below, Align::Start, toggles::tooltip("Switch mode", Some(keys)))
     }
 }
 
 impl Overlay {
     /// One of the card's own fills at the chosen background opacity. Each section paints its own,
     /// so the whole card is equally see-through.
-    fn card_fill(&self, rgb: u32) -> gpui::Rgba { crate::appearance::fill(rgb, self.store.value.background_opacity) }
+    pub(super) fn card_fill(&self, rgb: u32) -> gpui::Rgba { crate::appearance::fill(rgb, self.store.value.background_opacity) }
 
     /// The waveform icon's five bars (same size and spacing as `tab-listening.svg`), driven by the
     /// last levels: the newest in the middle, older ones outwards, scaled by the icon's diamond so
@@ -152,13 +161,11 @@ impl Overlay {
         div().size(px(18.0)).flex().items_center().justify_center().gap(px(1.0))
             .children(SHAPE.iter().enumerate().map(|(index, scale)| {
                 let level = at(index.abs_diff(2));
-                div().w(px(2.0)).h(px((3.0 + 13.0 * scale * level).round())).rounded_full().bg(theme::accent_soft())
+                div().w(px(2.0)).h(px((3.0 + 13.0 * scale * level).round())).rounded(px(1.0)).bg(theme::accent_soft())
             }))
     }
 }
 
-/// Eased progress (0 to 1) of an animation `elapsed` into one lasting `duration`: ease-out cubic, so
-/// it moves most at the start and settles gently.
 /// What a press of the Type shortcut does, from whether the text box has the keyboard.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TypeShortcut {
@@ -172,26 +179,9 @@ impl TypeShortcut {
     fn when(text_box_has_keyboard: bool) -> Self { if text_box_has_keyboard { Self::Leave } else { Self::Enter } }
 }
 
-pub(super) fn collapse_eased(elapsed: std::time::Duration, duration: std::time::Duration) -> f32 {
-    let t = (elapsed.as_secs_f32() / duration.as_secs_f32().max(f32::EPSILON)).clamp(0.0, 1.0);
-    1.0 - (1.0 - t).powi(3)
-}
-
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
-    use super::{TypeShortcut, collapse_eased};
-
-    #[test]
-    fn the_collapse_eases_out_and_ends_exactly_at_one() {
-        let duration = Duration::from_millis(200);
-        assert_eq!(collapse_eased(Duration::ZERO, duration), 0.0);
-        let halfway = collapse_eased(Duration::from_millis(100), duration);
-        assert!(halfway > 0.8 && halfway < 0.9, "{halfway}");
-        assert_eq!(collapse_eased(duration, duration), 1.0);
-        assert_eq!(collapse_eased(Duration::from_secs(5), duration), 1.0);
-    }
+    use super::TypeShortcut;
 
     #[test]
     fn the_type_shortcut_enters_the_text_box_or_leaves_it_when_typing_there() {

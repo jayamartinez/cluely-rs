@@ -10,7 +10,7 @@ use futures::StreamExt;
 use gpui::{AnyElement, Context, FontStyle, FontWeight, HighlightStyle, IntoElement, ParentElement, SharedString, Styled, StyledText, Window, div, px};
 
 use crate::appearance::{CardWidth, TextSize};
-use crate::archive::{self, Line, Speaker};
+use crate::archive::{Line, Speaker};
 use crate::audio::Source;
 use crate::listening::{self, Listening, Message, Status};
 use crate::models::ModelFile;
@@ -191,7 +191,9 @@ impl Overlay {
         (offset + audio_ms).max(0.0) as u64
     }
 
-    /// Status line plus the recent transcript, at the top of the Live panel.
+    /// What was heard, at the top of the card's conversation: the newest lines, each after its
+    /// speaker ("THEM", "YOU"), or the transcription status while nothing has been heard (or when a
+    /// source failed).
     pub(crate) fn transcript_block(&self) -> gpui::Div {
         let (dot, label, color): (gpui::Rgba, SharedString, gpui::Rgba) = match &self.listening_status {
             None if !self.store.value.transcribe => (theme::muted(), "Transcription off · turn it on in Settings → Listening".into(), theme::muted()),
@@ -205,28 +207,28 @@ impl Overlay {
             }
             Some(Status::Failed(reason)) => (gpui::rgb(0xffb4a8), reason.clone().into(), gpui::rgb(0xffb4a8)),
         };
-        let status = div().flex().items_center().gap(px(8.0)).px(px(16.0)).pt(px(10.0)).pb(px(6.0))
-            .child(div().text_size(px(11.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::accent_soft()).child("HEARD"))
-            .child(div().size(px(6.0)).flex_none().rounded_full().bg(dot))
-            .child(div().text_size(px(12.0)).text_color(color).truncate().child(label));
+        let failed = match &self.listening_status { Some(Status::Failed(_)) => true, Some(Status::Listening { failures, .. }) => !failures.is_empty(), _ => false };
+        let status = div().flex().items_center().gap(px(8.0))
+            .child(div().size(px(5.0)).flex_none().rounded_full().bg(dot))
+            .child(div().w(px(LABEL_WIDTH)).flex_none().text_size(px(11.0)).line_height(px(14.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::accent_soft()).child("HEARD"))
+            .child(div().min_w_0().text_size(px(12.0)).line_height(px(16.0)).text_color(color).truncate().child(label));
         // At most two lines, always the newest: a two-line in-progress utterance, or the last
         // committed line plus the one in progress. The strip only grows from one line to two, so
         // the answer thread below barely moves, and there is never empty space above the text.
         let strip = Strip::new(self.store.value.text_size, self.store.value.card_width);
-        let mut lines = div().flex().flex_col().justify_end().gap(px(ROW_GAP)).max_h(px(strip.height())).overflow_hidden()
-            .mx(px(16.0)).mb(px(10.0));
+        let mut lines = div().flex().flex_col().justify_end().gap(px(ROW_GAP)).max_h(px(strip.height())).overflow_hidden();
         let shown = self.transcript.len().saturating_sub(SHOWN_LINES);
         for line in &self.transcript[shown..] {
-            lines = lines.child(transcript_row(strip, line.source, archive::clock(line.at_ms), committed_text(&line.text)));
+            lines = lines.child(transcript_row(strip, line.source, committed_text(&line.text)));
         }
         for source in [Source::Them, Source::Me] {
-            if let Some(line) = &self.provisional[slot(source)] { lines = lines.child(transcript_row(strip, source, "now".into(), provisional_text(strip, line))); }
+            if let Some(line) = &self.provisional[slot(source)] { lines = lines.child(transcript_row(strip, source, provisional_text(strip, line))); }
         }
-        if self.transcript.is_empty() && self.provisional.iter().all(Option::is_none) {
-            let hint = if matches!(self.listening_status, Some(Status::Listening { .. })) { "Listening for the conversation…" } else { "" };
-            lines = lines.child(div().text_size(px(12.0)).text_color(theme::muted()).child(hint));
-        }
-        div().flex().flex_col().border_b_1().border_color(theme::divider()).child(status).child(lines)
+        let heard = !self.transcript.is_empty() || self.provisional.iter().any(Option::is_some);
+        let block = div().flex().flex_col().gap(px(ROW_GAP));
+        if heard && !failed { return block.child(lines); }
+        let block = block.child(status);
+        if heard { block.child(lines) } else { block }
     }
 
     /// Re-check whether the local model file is present (cheap: file metadata).
@@ -285,21 +287,20 @@ impl Overlay {
 
 pub fn model_size_label(model: &ModelFile) -> String { format!("{:.0} MB", model.bytes as f64 / 1e6) }
 
-fn transcript_row(strip: Strip, source: Source, when: String, text: AnyElement) -> impl IntoElement {
-    let (label_color, label_bg) = match source {
-        Source::Them => (theme::accent_soft(), theme::bubble()),
-        Source::Me => (theme::body(), theme::raised()),
-    };
+/// A heard line: a dot and the speaker in capitals (accent for them, body for you), then the text.
+fn transcript_row(strip: Strip, source: Source, text: AnyElement) -> impl IntoElement {
+    let color = match source { Source::Them => theme::accent_soft(), Source::Me => theme::body() };
+    let label_offset = ((strip.line_height - 14.0) / 2.0).max(0.0);
     div().flex().items_start().gap(px(8.0))
-        .child(div().w(px(40.0)).flex_none().text_size(px(10.0)).font_weight(FontWeight::SEMIBOLD).text_color(label_color)
-            .px(px(6.0)).py(px(1.0)).rounded(px(5.0)).bg(label_bg).flex().justify_center().child(source.label()))
-        .child(div().w(px(34.0)).flex_none().font_family(theme::MONO).text_size(px(10.0)).text_color(theme::muted()).pt(px(2.0)).child(when))
+        .child(div().h(px(strip.line_height)).flex().flex_none().items_center().child(div().size(px(5.0)).rounded_full().bg(color)))
+        .child(div().w(px(LABEL_WIDTH)).flex_none().pt(px(label_offset)).text_size(px(11.0)).line_height(px(14.0)).font_weight(FontWeight::SEMIBOLD)
+            .text_color(color).child(source.label().to_uppercase()))
         .child(div().flex_1().min_w_0().text_size(px(strip.text_size)).line_height(px(strip.line_height)).child(text))
 }
 
 /// One row each, so the strip keeps its height; the full text is in the session archive.
 fn committed_text(text: &str) -> AnyElement {
-    div().text_color(theme::text()).truncate().child(SharedString::from(text.to_string())).into_any_element()
+    div().text_color(theme::muted()).truncate().child(SharedString::from(text.to_string())).into_any_element()
 }
 
 /// Stable words in the body color, the unstable tail muted and italic, plus a question mark
@@ -327,13 +328,16 @@ fn provisional_text(strip: Strip, line: &ProvisionalLine) -> AnyElement {
 }
 
 const ROW_GAP: f32 = 4.0;
+/// The speaker label's column, so the text lines up under "THEM" and "YOU".
+const LABEL_WIDTH: f32 = 40.0;
 const ELLIPSIS: &str = "… ";
 /// Characters that fit in two lines of the strip's text column at the default size and width (about
-/// 438 px at 13 px Segoe UI, whose lowercase letters average about 6 px). Budgeted at 7.3 px a
+/// 508 px at 13 px Segoe UI, whose lowercase letters average about 6 px). Budgeted at 7.3 px a
 /// character, less a word per line lost to wrapping, so real speech never needs a third line.
-const PROVISIONAL_CHARS: usize = 104;
-/// The card is this much wider than the strip's text column.
-const STRIP_MARGIN: f32 = 202.0;
+const PROVISIONAL_CHARS: usize = 120;
+/// The card is this much wider than the strip's text column: the conversation's padding, the dot,
+/// the label and the gaps between them.
+const STRIP_MARGIN: f32 = 2.0 * 18.0 + 5.0 + 8.0 + LABEL_WIDTH + 8.0 + 1.0;
 
 /// The transcript strip's text as Settings › Window › Appearance sizes it.
 #[derive(Clone, Copy, Debug, PartialEq)]

@@ -90,14 +90,14 @@ impl Overlay {
     }
 
     /// Show `percent` on the overlay without writing settings.json yet (`finish_opacity_drag` does).
-    fn preview_opacity(&mut self, percent: u8, cx: &mut Context<Self>) {
+    pub(super) fn preview_opacity(&mut self, percent: u8, cx: &mut Context<Self>) {
         if self.store.value.background_opacity == percent { return; }
         self.store.value.background_opacity = percent;
         cx.notify();
     }
 
     /// The slider was released (anywhere): save what it was dragged to.
-    fn finish_opacity_drag(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn finish_opacity_drag(&mut self, cx: &mut Context<Self>) {
         if !std::mem::take(&mut self.opacity_drag) { return; }
         self.store.save();
         cx.notify();

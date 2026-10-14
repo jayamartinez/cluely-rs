@@ -1,8 +1,7 @@
 //! The Modes page, laid out like the Paper "Modes v2" and "Modes v3" artboards: the modes in a
 //! sidebar by group, and the selected one's meeting context and files beside it, with a footer to
-//! make it active. macOS shows it in the Settings window ("macOS · Settings window · Modes");
-//! Windows in its own Modes window (`modes_window`, "Modes v3 · Windows · Modes window"), with a
-//! short summary in the overlay's Settings panel.
+//! make it active. macOS shows it in the Settings window ("macOS · Settings window · Modes").
+//! Windows draws the same state and actions as Fluent pages in its Settings window (`fluent`).
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -19,6 +18,9 @@ use crate::overlay::Overlay;
 use crate::settings::{Provider, Settings};
 use crate::text_area::TextArea;
 use crate::{theme, ui};
+
+#[cfg(windows)]
+mod fluent;
 
 /// Context edits are saved after typing pauses this long.
 const SAVE_DELAY: Duration = Duration::from_millis(600);
@@ -91,7 +93,9 @@ pub struct ModesUi {
 impl ModesUi {
     pub fn new(store: &ModeStore, window: &mut Window, cx: &mut Context<Overlay>) -> Self {
         let context = cx.new(|cx| TextArea::new(CUSTOM_PLACEHOLDER, cx).with_max_chars(modes::MAX_CONTEXT_CHARS));
-        let name = cx.new(|cx| TextInput::new("Mode name", cx).with_text_size(LOOK.title.0, LOOK.title.1));
+        // Windows edits the name in a Fluent TextBox (`fluent`), at the size of its other fields.
+        let (size, line) = if cfg!(windows) { (13.0, 16.0) } else { LOOK.title };
+        let name = cx.new(|cx| TextInput::new("Mode name", cx).with_text_size(size, line));
         let new_group = cx.new(|cx| TextInput::new("New group…", cx));
         cx.subscribe_in(&context, window, |this, _, event, _, cx| if matches!(event, InputEvent::Changed) { this.context_edited(cx) }).detach();
         cx.subscribe_in(&name, window, |this, _, event, _, cx| if matches!(event, InputEvent::Submit) { this.commit_rename(cx) }).detach();
@@ -581,14 +585,16 @@ impl Overlay {
             .into_any_element()
     }
 
-    /// Open the Windows Modes window on `mode` (the active one when `None`), or bring it forward.
-    /// An open window keeps what it shows, such as a rename or a menu, unless asked for another mode.
+    /// Windows: open Settings › Modes (the list, or `mode`'s own page) in the Settings window, or
+    /// bring it forward ("Edit modes…" in the switcher and the tray menu).
     pub(crate) fn open_modes_window(&mut self, mode: Option<&str>, cx: &mut Context<Self>) {
-        // Closing it from its own title bar removes the window without clearing the handle.
-        let open = self.modes_window.is_some_and(|handle| cx.windows().iter().any(|window| window.window_id() == handle.window_id()));
-        let id = mode.map(str::to_string).or_else(|| (!open).then(|| self.modes.active().id.clone()));
-        if let Some(id) = id.filter(|id| !open || *id != self.modes_ui.selected) { self.select_mode(&id, cx); }
-        crate::modes_window::open(self, cx);
+        match mode {
+            Some(id) => self.select_mode(id, cx),
+            None => self.prepare_modes_tab(cx),
+        }
+        self.open_picker = None;
+        #[cfg(windows)]
+        crate::settings_view::fluent::open(self, crate::settings_view::Tab::Modes, mode.map(str::to_string), cx);
     }
 
     /// The menu's shortcuts, while the tab itself (not a text field) has the keyboard.

@@ -7,11 +7,12 @@
 //! own. Nothing is kept across launches, so the overlay starts empty after a restart.
 
 use chrono::{DateTime, Local};
-use gpui::{FontWeight, IntoElement, ParentElement, Styled, div, px};
+use gpui::{Div, FontWeight, IntoElement, ParentElement, SharedString, Styled, div, prelude::*, px};
 
 use super::{Status, Turn};
 use crate::answer::Exchange;
-use crate::theme;
+use crate::markdown;
+use crate::{theme, ui};
 
 /// Where a later session starts on the card.
 pub(super) struct Divider {
@@ -62,6 +63,42 @@ pub(super) fn stopped_mark() -> impl IntoElement {
     div().flex().items_center().gap(px(6.0)).pt(px(6.0))
         .child(div().size(px(6.0)).flex_none().rounded_full().bg(theme::muted()))
         .child(div().text_size(px(12.0)).text_color(theme::muted()).child("Stopped when Live ended"))
+}
+
+/// The icon beside a quick action, in its pill and in the bubble of a turn it asked. Assist has none:
+/// its label reads on its own.
+pub(super) fn action_icon(action: &str) -> Option<&'static str> {
+    match action {
+        "What do I say?" => Some("icons/setup-chat.svg"),
+        "Follow-ups" => Some("icons/setup-arrow.svg"),
+        "Recap" => Some("icons/setup-history.svg"),
+        _ => None,
+    }
+}
+
+/// What was asked, right-aligned in an accent bubble: a quick action with its icon, or the typed question.
+pub(super) fn bubble(turn: &Turn) -> Div {
+    let typed = !turn.question.is_empty();
+    let label: SharedString = if typed { turn.question.clone().into() } else { turn.action.clone() };
+    let icon = if typed { None } else { action_icon(&turn.action) };
+    div().flex().justify_end().child(div().max_w(px(420.0)).flex().items_center().gap(px(6.0)).px(px(12.0)).py(px(6.0))
+        .rounded(px(theme::radius::BUBBLE)).border_1().border_color(theme::bubble_border()).bg(theme::bubble())
+        .children(icon.map(|icon| ui::icon(icon, 13.0, theme::accent_soft())))
+        .child(div().min_w_0().text_size(px(if typed { 13.0 } else { 12.0 })).line_height(px(16.0)).text_color(theme::text())
+            .when(!typed, |label| label.font_weight(FontWeight::SEMIBOLD)).child(label)))
+}
+
+/// Above an answer that was given a screenshot.
+pub(super) fn viewed_screen() -> Div {
+    div().flex().items_center().gap(px(6.0))
+        .child(ui::icon("icons/monitor.svg", 12.0, theme::placeholder()))
+        .child(div().text_size(px(11.0)).line_height(px(14.0)).text_color(theme::placeholder()).child("Viewed screen"))
+}
+
+/// An answer as the model wrote it, in the body style. `size` is Settings › Window › Answer text
+/// size (14 by default).
+pub(super) fn answer(text: &str, size: f32) -> Div {
+    div().min_w_0().child(markdown::render(text, size).line_height(px((size * 1.57).round())))
 }
 
 #[cfg(test)]
