@@ -386,6 +386,40 @@ pub fn open_folder(path: &Path) -> std::io::Result<()> { Command::new("open").ar
 /// Open Finder at a file's folder with the file selected.
 pub fn reveal_file(path: &Path) -> std::io::Result<()> { Command::new("open").arg("-R").arg(path).spawn().map(drop) }
 
+/// Run `exe` with `args` in a new window of the user's terminal app, where its output and prompts are
+/// seen (a CLI's own sign-in). The command goes in a `.command` script that `open` hands to the app
+/// that runs them (Terminal unless the user chose another), so no AppleScript, Automation permission
+/// or synthetic input is involved. The script lives in a folder only this user can read and removes
+/// itself as it starts, so closing the window early leaves nothing behind.
+pub fn run_in_terminal(exe: &Path, args: &[&str]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+    static SCRIPTS: AtomicU64 = AtomicU64::new(0);
+    let script = terminal_script(exe, args).ok_or_else(|| std::io::Error::other("the CLI's location isn't valid text"))?;
+    let dir = std::env::temp_dir().join("cluelyrs-terminal");
+    match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
+        Err(error) if error.kind() != std::io::ErrorKind::AlreadyExists => return Err(error),
+        _ => {}
+    }
+    // An existing folder must be a real folder of this user's that nobody else can open.
+    let meta = std::fs::symlink_metadata(&dir)?;
+    if !meta.is_dir() || meta.uid() != unsafe { libc::getuid() } { return Err(std::io::Error::other("the script folder isn't private")); }
+    if meta.permissions().mode() & 0o777 != 0o700 { std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?; }
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |since| since.as_nanos());
+    let path = dir.join(format!("sign-in-{}-{nanos}-{}.command", std::process::id(), SCRIPTS.fetch_add(1, Ordering::Relaxed)));
+    std::fs::OpenOptions::new().write(true).create_new(true).mode(0o700).open(&path)?.write_all(script.as_bytes())?;
+    Command::new("open").arg(&path).spawn().map(drop)
+}
+
+/// The `.command` script `run_in_terminal` opens; `None` for a path that isn't UTF-8.
+fn terminal_script(exe: &Path, args: &[&str]) -> Option<String> {
+    let command = std::iter::once(exe.to_str()?).chain(args.iter().copied()).map(shell_quote).collect::<Vec<_>>().join(" ");
+    Some(format!("#!/bin/zsh\nrm -f -- \"$0\"\nif {command}; then\n  echo\n  echo 'Signed in. You can close this window.'\nelse\n  echo\n  echo \"Sign-in didn't finish. Close this window and try again from CluelyRS.\"\nfi\n"))
+}
+
+/// `word` as one shell word: in single quotes, each single quote written as '\''.
+fn shell_quote(word: &str) -> String { format!("'{}'", word.replace('\'', r"'\''")) }
+
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
@@ -393,7 +427,17 @@ mod tests {
 
     use futures::executor::block_on;
 
-    use super::wait_until;
+    use super::{terminal_script, wait_until};
+
+    #[test]
+    fn the_terminal_script_quotes_the_command_and_removes_itself() {
+        let script = terminal_script(std::path::Path::new("/Users/jay/My Tools/it's/claude"), &["auth", "login", "--claudeai"]).unwrap();
+        assert_eq!(script, "#!/bin/zsh\nrm -f -- \"$0\"\nif '/Users/jay/My Tools/it'\\''s/claude' 'auth' 'login' '--claudeai'; then\n  echo\n  \
+            echo 'Signed in. You can close this window.'\nelse\n  echo\n  echo \"Sign-in didn't finish. Close this window and try again from CluelyRS.\"\nfi\n");
+        // Shell syntax in a path stays text.
+        let hostile = terminal_script(std::path::Path::new("/tmp/$(touch x); `id` \"q\""), &["login"]).unwrap();
+        assert!(hostile.contains("if '/tmp/$(touch x); `id` \"q\"' 'login'; then"), "{hostile}");
+    }
 
     const LIMIT: Duration = Duration::from_millis(600);
     const POLL: Duration = Duration::from_millis(20);

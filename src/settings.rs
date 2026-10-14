@@ -31,6 +31,16 @@ impl ClaudeModel {
 #[serde(rename_all = "camelCase")]
 pub enum AnswerStyle { #[default] Spoken, Standard }
 
+/// The steps of the macOS first-run setup (`onboarding_window`), saved while it's open so a relaunch
+/// resumes there. Every step is listed so a newer build's step still reads; `onboarding_window::STEPS`
+/// says which ones are shown.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum OnboardingStep { Welcome, Model, Transcription, Permissions, Privacy, Shortcuts, Done }
+
+/// The setup a finished `onboarding_version` refers to; a later one can be shown to users who saw an older one.
+pub const ONBOARDING_VERSION: u32 = 1;
+
 /// Which recognizer transcribes Live audio.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -107,6 +117,10 @@ pub struct Settings {
     pub last_update_check: Option<u64>,
     /// The version whose notice was closed in the overlay; it shows again only for a newer one.
     pub dismissed_update: String,
+    /// The first-run setup last finished (closed or skipped counts); 0 before it ever was.
+    pub onboarding_version: u32,
+    /// The setup step open when CluelyRS last ran; `Some` means setup is unfinished and shows again.
+    pub onboarding_step: Option<OnboardingStep>,
     /// The active mode's meeting context and file text (see `modes`). Not saved here: the
     /// overlay fills it from `modes.json` when it starts and whenever the mode changes.
     #[serde(skip)]
@@ -125,7 +139,8 @@ impl Default for Settings {
             mic_device: String::new(), desktop_device: String::new(),
             hide_from_capture: true, screen_on_send: true, start_live_on_launch: false, show_in_dock: false, show_menu_bar_icon: true,
             save_sessions: true, save_screenshots: true, keep_sessions: Retention::default(),
-            check_for_updates: true, last_update_check: None, dismissed_update: String::new(), mode: None,
+            check_for_updates: true, last_update_check: None, dismissed_update: String::new(),
+            onboarding_version: 0, onboarding_step: None, mode: None,
         }
     }
 }
@@ -176,13 +191,18 @@ pub struct Store {
     path: Option<PathBuf>,
     pub value: Settings,
     pub warning: Option<&'static str>,
+    /// Whether settings.json was there at launch, before anything saved this run (keys are marked and
+    /// updates checked within seconds), so a first run is told apart from a returning user.
+    pub existed: bool,
 }
 
 impl Store {
-    pub fn load() -> Self {
-        let path = dirs::config_dir().map(|dir| dir.join("CluelyRS").join("settings.json"));
-        let mut store = Self { path, value: Settings::default(), warning: None };
-        if let Some(path) = &store.path && path.exists() {
+    pub fn load() -> Self { Self::load_from(dirs::config_dir().map(|dir| dir.join("CluelyRS").join("settings.json"))) }
+
+    fn load_from(path: Option<PathBuf>) -> Self {
+        let existed = path.as_ref().is_some_and(|path| path.exists());
+        let mut store = Self { path, value: Settings::default(), warning: None, existed };
+        if let Some(path) = &store.path && existed {
             match fs::read(path).ok().filter(|bytes| bytes.len() <= 65536).and_then(|bytes| serde_json::from_slice(&bytes).ok()) {
                 Some(value) => store.value = value,
                 None => store.warning = Some("Saved settings could not be read. Defaults are in use."),
@@ -190,6 +210,12 @@ impl Store {
         }
         store.publish_cli_paths();
         store
+    }
+
+    /// Whether the macOS first-run setup opens at launch: on a first run, or when the last run quit
+    /// in the middle of it. Users from before it existed have settings and never see it unasked.
+    pub fn onboarding_pending(&self) -> bool {
+        cfg!(target_os = "macos") && (!self.existed || self.value.onboarding_step.is_some())
     }
 
     /// Hand the located CLIs to `cli_path`, which the CLIs resolve through.
@@ -288,6 +314,40 @@ mod tests {
         let json = serde_json::to_string(&settings).unwrap();
         assert!(json.contains(r#""checkForUpdates":false"#) && json.contains(r#""lastUpdateCheck":1791500000"#) && json.contains(r#""dismissedUpdate":"0.2.0""#), "{json}");
         assert_eq!(serde_json::from_str::<Settings>(&json).unwrap(), settings);
+    }
+
+    #[test]
+    fn onboarding_state_defaults_to_never_run_and_saves_under_its_own_names() {
+        let older: Settings = serde_json::from_str(r#"{"provider":"claude"}"#).unwrap();
+        assert_eq!((older.onboarding_version, older.onboarding_step), (0, None));
+        let midway = Settings { onboarding_step: Some(OnboardingStep::Transcription), ..Settings::default() };
+        let json = serde_json::to_string(&midway).unwrap();
+        assert!(json.contains(r#""onboardingVersion":0"#) && json.contains(r#""onboardingStep":"transcription""#), "{json}");
+        assert_eq!(serde_json::from_str::<Settings>(&json).unwrap(), midway);
+    }
+
+    #[test]
+    fn existed_is_captured_at_load_and_decides_onboarding() {
+        let dir = std::env::temp_dir().join(format!("cluelyrs-settings-existed-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let path = dir.join("settings.json");
+        let mut first = Store::load_from(Some(path.clone()));
+        assert!(!first.existed);
+        first.save();
+        assert!(!first.existed, "saving during the run doesn't make it a returning user");
+        assert_eq!(first.onboarding_pending(), cfg!(target_os = "macos"));
+
+        // Setup quit midway resumes; finished setup and users from before it never see it again.
+        let mut returning = Store::load_from(Some(path.clone()));
+        assert!(returning.existed && !returning.onboarding_pending(), "an existing user");
+        returning.value.onboarding_step = Some(OnboardingStep::Model);
+        returning.save();
+        assert_eq!(Store::load_from(Some(path.clone())).onboarding_pending(), cfg!(target_os = "macos"));
+        fs::write(&path, b"not json").unwrap();
+        let unreadable = Store::load_from(Some(path));
+        assert!(unreadable.existed && unreadable.warning.is_some() && !unreadable.onboarding_pending(), "unreadable settings aren't a first run");
+        assert!(!Store::load_from(None).existed);
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

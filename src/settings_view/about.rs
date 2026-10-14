@@ -103,7 +103,7 @@ impl Overlay {
     }
 }
 
-fn spinner() -> AnyElement {
+pub(super) fn spinner() -> AnyElement {
     gpui::svg().path("icons/spinner.svg").size(px(16.0)).flex_none().text_color(theme::accent_soft())
         .with_animation("update-checking", Animation::new(std::time::Duration::from_millis(900)).repeat(),
             |spinner, delta| spinner.with_transformation(Transformation::rotate(percentage(delta))))

@@ -14,15 +14,15 @@ use crate::theme;
 
 /// What differs between the two subscription CLIs.
 #[derive(Clone, Copy)]
-struct CliDetails {
-    name: &'static str,
-    install_page: &'static str,
+pub(super) struct CliDetails {
+    pub(super) name: &'static str,
+    pub(super) install_page: &'static str,
     /// The same rules the automatic search applies to a file.
     check: fn(&Path) -> Result<(), String>,
     set: fn(&mut Settings, String),
 }
 
-fn details(provider: Provider) -> Option<CliDetails> {
+pub(super) fn details(provider: Provider) -> Option<CliDetails> {
     match provider {
         Provider::Codex => Some(CliDetails {
             name: "Codex CLI",
@@ -75,7 +75,7 @@ impl Overlay {
     }
 
     /// Pick the CLI with the system file picker, check it like the search would, and use it.
-    fn locate_cli(&mut self, provider: Provider, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn locate_cli(&mut self, provider: Provider, window: &mut Window, cx: &mut Context<Self>) {
         let Some(cli) = details(provider) else { return };
         let picked = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: false, prompt: Some("Use".into()) });
         cx.spawn_in(window, async move |this, cx| {
@@ -97,7 +97,7 @@ impl Overlay {
     }
 
     /// Save the CLI's location (empty: automatic), then check the subscription again with it.
-    fn set_cli_location(&mut self, provider: Provider, path: String, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn set_cli_location(&mut self, provider: Provider, path: String, window: &mut Window, cx: &mut Context<Self>) {
         let Some(cli) = details(provider) else { return };
         self.cli_error = None;
         self.update_settings(|s| (cli.set)(s, path), window, cx);

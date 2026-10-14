@@ -18,6 +18,8 @@ use crate::ui;
 
 mod about;
 mod cli_location;
+#[cfg(target_os = "macos")]
+mod onboarding;
 mod reveal;
 #[cfg(target_os = "macos")]
 mod model_form;
@@ -132,17 +134,22 @@ fn answer_early(s: &Settings, cx: &mut Context<Overlay>) -> Div {
             switch("auto-answer", s.auto_answer, |s, v| s.auto_answer = v, cx)).px(px(ROW_INSET)))
 }
 
+/// Show menu bar icon (Settings › Window, setup's last step). Turning the icon off may ask first
+/// (`Overlay::set_menu_bar_icon`).
+#[cfg(target_os = "macos")]
+fn menu_bar_switch(s: &Settings, cx: &mut Context<Overlay>) -> impl IntoElement {
+    let on = s.show_menu_bar_icon;
+    div().id("show-menu-bar-icon").flex_none().cursor_pointer()
+        .on_mouse_down(MouseButton::Left, listen(cx, move |this, _, window, cx| { cx.stop_propagation(); this.set_menu_bar_icon(!on, window, cx) }))
+        .child(ui::switch(on))
+}
+
 /// Settings → Window → Menu bar and Dock (macOS). `toggle` is the Show / hide overlay shortcut.
 #[cfg(target_os = "macos")]
 fn menu_bar_and_dock_section(s: &Settings, toggle: &str, cx: &mut Context<Overlay>) -> Div {
-    let on = s.show_menu_bar_icon;
-    // Turning the icon off may ask first (`Overlay::set_menu_bar_icon`).
-    let menu_bar_switch = div().id("show-menu-bar-icon").flex_none().cursor_pointer()
-        .on_mouse_down(MouseButton::Left, listen(cx, move |this, _, window, cx| { cx.stop_propagation(); this.set_menu_bar_icon(!on, window, cx) }))
-        .child(ui::switch(on));
     div().flex().flex_col().gap(px(12.0)).pt(px(16.0)).border_t_1().border_color(gpui::rgb(0x23262a))
         .child(ui::section_label("MENU BAR AND DOCK"))
-        .child(switch_row("Show menu bar icon", "Live, modes, Settings and Quit from the menu bar. On by default.", menu_bar_switch))
+        .child(switch_row("Show menu bar icon", "Live, modes, Settings and Quit from the menu bar. On by default.", menu_bar_switch(s, cx)))
         .child(switch_row("Show in Dock", "Also puts CluelyRS in ⌘Tab. Off by default.",
             switch("show-in-dock", s.show_in_dock, |s, v| s.show_in_dock = v, cx)))
         .child(div().flex().gap(px(8.0)).text_size(px(12.0)).line_height(px(16.0)).text_color(theme::muted())
@@ -150,7 +157,14 @@ fn menu_bar_and_dock_section(s: &Settings, toggle: &str, cx: &mut Context<Overla
             .child(div().flex_1().min_w_0().child(format!("With the icon hidden, press {toggle} to show the overlay and open Settings from its gear."))))
 }
 
-fn button(id: &'static str, label: impl Into<SharedString>, primary: bool) -> gpui::Stateful<Div> {
+/// The "Recommended" pill beside an option's title.
+#[cfg(target_os = "macos")]
+fn recommended() -> Div {
+    div().px(px(7.0)).py(px(1.0)).rounded_full().bg(theme::bubble()).border_1().border_color(theme::bubble_border())
+        .text_size(px(11.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::accent_soft()).child("Recommended")
+}
+
+pub(crate) fn button(id: &'static str, label: impl Into<SharedString>, primary: bool) -> gpui::Stateful<Div> {
     let base = div().id(id).flex_none().px(px(12.0)).py(px(6.0)).rounded(px(9.0)).cursor_pointer().text_size(px(12.0)).font_weight(FontWeight::SEMIBOLD).child(label.into());
     if primary { base.bg(theme::accent()).text_color(theme::accent_ink()) } else { base.border_1().border_color(theme::hairline()).text_color(theme::body()) }
 }
@@ -197,7 +211,16 @@ pub(crate) fn latest_gpt_models(models: &[(String, String)]) -> Vec<(String, Str
 }
 
 /// "plus" → "ChatGPT Plus", "max_5x" → "Max 5x": the plan as the CLI reports it, made readable.
+/// ChatGPT's ids don't all read as its plans' names ("prolite" is Pro Lite, and Team is now
+/// Business), so the known ones are named; any other id is title-cased.
 fn plan_label(provider: Provider, plan: &str) -> String {
+    let id = plan.to_ascii_lowercase().replace(['_', '-', ' '], "");
+    let chatgpt = provider == Provider::Codex || id.starts_with("chatgpt");
+    let known = match id.strip_prefix("chatgpt").unwrap_or(&id) {
+        "free" => Some("Free"), "go" => Some("Go"), "plus" => Some("Plus"), "pro" => Some("Pro"), "prolite" => Some("Pro Lite"),
+        "team" | "business" => Some("Business"), "enterprise" => Some("Enterprise"), "edu" => Some("Edu"), _ => None,
+    };
+    if chatgpt && let Some(name) = known { return format!("ChatGPT {name}"); }
     let words: Vec<String> = plan.split(['_', '-', ' ']).filter(|w| !w.is_empty()).map(|word| {
         let mut chars = word.chars();
         match chars.next() { Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(), None => String::new() }
@@ -262,10 +285,18 @@ impl Overlay {
     /// throwaway `Hits`: the overlay's own hit-testing must only see the overlay's controls.
     #[cfg(target_os = "macos")]
     pub(crate) fn settings_window_body(&mut self, tab: Tab, cx: &mut Context<Self>) -> AnyElement {
+        self.settings_window_tab = Some(tab);
+        self.in_window(cx, |this, cx| this.settings_body(tab, cx))
+    }
+
+    /// Lay out content for another window (Settings, setup) with a throwaway `Hits`: the overlay's
+    /// own hit-testing must only see the overlay's controls.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn in_window<R>(&mut self, cx: &mut Context<Self>, build: impl FnOnce(&Self, &mut Context<Self>) -> R) -> R {
         let hits = std::mem::take(&mut self.hits);
-        let body = self.settings_body(tab, cx);
+        let built = build(self, cx);
         self.hits = hits;
-        body
+        built
     }
 
     pub(crate) fn toggle_picker(&mut self, picker: Picker, cx: &mut Context<Self>) {
@@ -395,10 +426,18 @@ impl Overlay {
                     .into_any_element()
             }
             Some(st) if !st.installed => text("CLI not found".into(), theme::muted()),
-            Some(_) => div().id(("sign-in", index)).flex_none().px(px(10.0)).py(px(5.0)).rounded(px(8.0)).bg(theme::accent()).cursor_pointer()
-                .text_size(px(12.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::accent_ink())
-                .on_mouse_down(MouseButton::Left, listen(cx, move |this, _, window, cx| { cx.stop_propagation(); this.sign_in(provider, window, cx) }))
-                .child(if self.signing_in { "Waiting for browser…" } else { "Sign in" }).into_any_element(),
+            Some(_) => {
+                let waiting = self.signing_in == Some(provider);
+                // macOS signs in in Terminal; clicking the waiting button there stops waiting.
+                let (hint, label) = if cfg!(target_os = "macos") { ("Finish in Terminal", "Waiting for Terminal…") } else { ("", "Waiting for browser…") };
+                div().flex().items_center().gap(px(10.0))
+                    .when(waiting && !hint.is_empty(), |badge| badge.child(div().text_size(px(12.0)).text_color(theme::muted()).child(hint)))
+                    .child(div().id(("sign-in", index)).flex_none().px(px(10.0)).py(px(5.0)).rounded(px(8.0)).bg(theme::accent()).cursor_pointer()
+                        .text_size(px(12.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::accent_ink()).when(waiting, |button| button.opacity(0.7))
+                        .on_mouse_down(MouseButton::Left, listen(cx, move |this, _, window, cx| { cx.stop_propagation(); this.sign_in(provider, window, cx) }))
+                        .child(if waiting { label } else { "Sign in" }))
+                    .into_any_element()
+            }
         }
     }
 
@@ -505,35 +544,16 @@ impl Overlay {
                 .child(div().text_size(px(13.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child("Transcribe conversations"))
                 .child(div().text_size(px(12.0)).text_color(theme::muted()).child(if s.stt_provider == SttProvider::Deepgram { "Sent to Deepgram, while Live is on" } else { "On this PC, while Live is on" })))
             .child(switch("transcribe", s.transcribe, |s, v| s.transcribe = v, cx));
-        let devices = self.devices.clone().unwrap_or_default();
-        let default_label = |default: Option<&String>| match default {
-            // macOS captures all system audio rather than a device, so that one option is named plainly.
-            #[cfg(target_os = "macos")]
-            Some(name) if name == crate::audio::capture::SYSTEM_AUDIO => name.clone(),
-            Some(name) => format!("Default · {name}"),
-            None => "Default".to_string(),
-        };
-        let device_options = |names: &[String], default: Option<&String>| {
-            let mut options = vec![(String::new(), default_label(default))];
-            options.extend(names.iter().map(|name| (name.clone(), name.clone())));
-            options
-        };
-        let value = |chosen: &str, default: Option<&String>| if chosen.is_empty() {
-            match default { Some(_) => default_label(default), None => if self.devices_loading { "Loading devices…".into() } else { "Default".into() } }
-        } else { chosen.to_string() };
-        let device_column = |label: &'static str, name: &'static str, on: bool, set_on: fn(&mut Settings, bool), picker: Picker, chosen: &str,
-            names: &[String], default: Option<&String>, set: fn(&mut Settings, String), cx: &mut Context<Self>| {
+        let device_column = |label: &'static str, name: &'static str, on: bool, set_on: fn(&mut Settings, bool), picker: Picker, cx: &mut Context<Self>| {
             div().flex().flex_col().gap(px(6.0)).flex_1().min_w_0()
                 .child(div().flex().items_center().justify_between().h(px(20.0))
                     .child(div().text_size(px(12.0)).text_color(theme::muted()).child(label))
                     .child(switch(name, on, set_on, cx)))
-                .child(self.dropdown(picker, value(chosen, default), device_options(names, default), chosen, set, cx))
+                .child(self.device_picker(picker, cx))
         };
         let columns = div().flex().gap(px(12.0))
-            .child(device_column("Microphone", "listen-mic", s.listen_mic, |s, v| s.listen_mic = v, Picker::Mic, &s.mic_device,
-                &devices.microphones, devices.default_microphone.as_ref(), |s, v| s.mic_device = v, cx))
-            .child(device_column("Desktop audio", "listen-desktop", s.listen_desktop, |s, v| s.listen_desktop = v, Picker::Desktop, &s.desktop_device,
-                &devices.playback, devices.default_playback.as_ref(), |s, v| s.desktop_device = v, cx));
+            .child(device_column("Microphone", "listen-mic", s.listen_mic, |s, v| s.listen_mic = v, Picker::Mic, cx))
+            .child(device_column("Desktop audio", "listen-desktop", s.listen_desktop, |s, v| s.listen_desktop = v, Picker::Desktop, cx));
         let providers = [(SttProvider::Parakeet, "Parakeet Realtime · on this PC"), (SttProvider::Deepgram, "Deepgram · cloud")];
         let current = providers.iter().find(|(p, _)| *p == s.stt_provider).map(|(_, l)| *l).unwrap_or("Parakeet Realtime · on this PC");
         let with = field("Transcribe with", self.dropdown(Picker::SttProvider, current,
@@ -544,6 +564,30 @@ impl Overlay {
             SttProvider::Deepgram => self.deepgram_key_row(cx),
         };
         div().flex().flex_col().gap(px(16.0)).child(transcribe).child(with).child(provider_row).child(columns)
+    }
+
+    /// The microphone (`Picker::Mic`) or desktop audio (`Picker::Desktop`) picker: the system
+    /// default first, then each device (Settings › Listening, setup's audio check).
+    fn device_picker(&self, picker: Picker, cx: &mut Context<Self>) -> Div {
+        let s = &self.store.value;
+        let devices = self.devices.clone().unwrap_or_default();
+        let desktop = picker == Picker::Desktop;
+        let (chosen, names, default) = if desktop { (&s.desktop_device, &devices.playback, devices.default_playback.as_ref()) }
+            else { (&s.mic_device, &devices.microphones, devices.default_microphone.as_ref()) };
+        let set: fn(&mut Settings, String) = if desktop { |s, v| s.desktop_device = v } else { |s, v| s.mic_device = v };
+        let default_label = match default {
+            // macOS captures all system audio rather than a device, so that one option is named plainly.
+            #[cfg(target_os = "macos")]
+            Some(name) if name == crate::audio::capture::SYSTEM_AUDIO => name.clone(),
+            Some(name) => format!("Default · {name}"),
+            None => "Default".to_string(),
+        };
+        let value = if !chosen.is_empty() { chosen.to_string() }
+            else if default.is_some() { default_label.clone() }
+            else if self.devices_loading { "Loading devices…".into() } else { "Default".into() };
+        let mut options = vec![(String::new(), default_label)];
+        options.extend(names.iter().map(|name| (name.clone(), name.clone())));
+        self.dropdown(picker, value, options, chosen, set, cx)
     }
 
     /// The Deepgram API key: paste and save, or the saved key's hint with Remove.
@@ -619,8 +663,7 @@ impl Overlay {
             .child(div().flex().flex_col().gap(px(1.0)).flex_1().min_w_0()
                 .child(div().flex().items_center().gap(px(8.0))
                     .child(div().text_size(px(13.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child("Use GPU (Metal)"))
-                    .child(div().px(px(7.0)).py(px(1.0)).rounded_full().bg(theme::bubble()).border_1().border_color(theme::bubble_border())
-                        .text_size(px(11.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::accent_soft()).child("Recommended")))
+                    .child(recommended()))
                 .child(note.text_size(px(12.0))))
             .child(switch("use-gpu", on, |s, v| s.use_gpu = v, cx))
     }
@@ -746,6 +789,13 @@ mod tests {
         assert_eq!(plan_label(Provider::Codex, "plus"), "ChatGPT Plus");
         assert_eq!(plan_label(Provider::Codex, "chatgpt_pro"), "ChatGPT Pro");
         assert_eq!(plan_label(Provider::Claude, "max_5x"), "Max 5x");
+        // ChatGPT's plans by name, however the id is written.
+        for (id, label) in [("free", "ChatGPT Free"), ("go", "ChatGPT Go"), ("pro", "ChatGPT Pro"), ("prolite", "ChatGPT Pro Lite"), ("pro_lite", "ChatGPT Pro Lite"),
+            ("chatgptprolite", "ChatGPT Pro Lite"), ("team", "ChatGPT Business"), ("business", "ChatGPT Business"), ("Enterprise", "ChatGPT Enterprise"), ("edu", "ChatGPT Edu")] {
+            assert_eq!(plan_label(Provider::Codex, id), label, "{id}");
+        }
+        assert_eq!(plan_label(Provider::Codex, "some_new_plan"), "ChatGPT Some New Plan", "an unknown id is title-cased");
+        assert_eq!(plan_label(Provider::Claude, "pro"), "Pro", "Claude's Pro isn't ChatGPT's");
         assert_eq!(masked("martinezjay404@gmail.com"), format!("m{}", "•".repeat(15)));
         assert_eq!(masked("ab"), "a••••••");
         assert_eq!(masked(""), "••••••");

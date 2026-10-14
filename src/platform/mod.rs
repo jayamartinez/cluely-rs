@@ -7,7 +7,8 @@
 //! the functions `overlay` and `sessions_window` call, though macOS's `take_focus` calls back once
 //! CluelyRS is the active app rather than returning at once. macOS also provides system audio capture
 //! (`SystemAudio`), which `audio::capture` uses where Windows has WASAPI loopback, and the menu bar
-//! icon with its menu (`StatusMenu`), which Windows doesn't have.
+//! icon with its menu (`StatusMenu`) and the privacy permissions setup asks for (`microphone_access`,
+//! `screen_recording_allowed`), which Windows doesn't have.
 
 /// Showing and hiding the overlay fades it over this long; showing also settles it `POP_DISTANCE`
 /// (logical pixels) down into place. The same on every platform.
@@ -27,6 +28,11 @@ pub use self::macos::*;
 mod macos_system_audio;
 #[cfg(target_os = "macos")]
 pub use self::macos_system_audio::{SystemAudio, SystemAudioBuffer, SystemAudioEvent};
+#[cfg(target_os = "macos")]
+mod macos_permissions;
+#[cfg(target_os = "macos")]
+pub use self::macos_permissions::{Access, PrivacyPane, microphone_access, open_privacy_pane, relaunch_after_exit, request_microphone,
+    request_screen_recording, screen_recording_allowed};
 #[cfg(target_os = "macos")]
 mod macos_status_item;
 #[cfg(target_os = "macos")]
