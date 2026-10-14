@@ -1,0 +1,5 @@
+<!-- The CluelyRS mark (the viewfinder in app-icon.svg) on its own: the accent disc and four corner brackets. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="30" height="30" viewBox="0 0 30 30">
+  <circle cx="15" cy="15" r="15" fill="#4C8DFF"/>
+  <path d="M8 13V8h5M17 8h5v5M22 17v5h-5M13 22H8v-5" fill="none" stroke="#061230" stroke-width="1.8"/>
+</svg>

@@ -15,6 +15,7 @@ use gpui::{
 };
 
 use super::Overlay;
+use super::card::MAC;
 use crate::archive::{Archive, Summary};
 use crate::input::{InputEvent, TextInput};
 use crate::{theme, ui};
@@ -184,7 +185,7 @@ impl Overlay {
     /// The card while the panel is open.
     pub(super) fn sessions_card(&self, panel: &SessionsPanel, cx: &mut Context<Self>) -> impl IntoElement {
         let back = div().id("sessions-back").size(px(28.0)).flex().flex_none().items_center().justify_center().rounded(px(theme::radius::BUTTON)).cursor_pointer()
-            .bg(theme::pressed()).border_1().border_color(theme::keycap_border()).hover(|button| button.border_color(theme::bubble_border()))
+            .bg(theme::pressed()).border_1().border_color(if MAC { theme::pressed() } else { theme::keycap_border() }).hover(|button| button.border_color(theme::bubble_border()))
             .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| { cx.stop_propagation(); this.close_sessions_panel(true, window, cx); }))
             // No left arrow asset: setup-arrow turned around.
             .child(gpui::svg().path("icons/setup-arrow.svg").size(px(14.0)).flex_none().text_color(theme::body())
@@ -214,8 +215,9 @@ impl Overlay {
         for line in lines(&shown, Local::now().date_naive()) {
             list = list.child(match line {
                 Line::Day { label, first } => div().flex().flex_col()
-                    .when(!first, |day| day.child(div().h(px(1.0)).mx(px(8.0)).mt(px(8.0)).bg(theme::divider())))
-                    .child(div().px(px(8.0)).pt(px(if first { 8.0 } else { 12.0 })).pb(px(6.0)).text_size(px(11.0)).line_height(px(14.0))
+                    // macOS separates days by their labels alone.
+                    .when(!first && !MAC, |day| day.child(div().h(px(1.0)).mx(px(8.0)).mt(px(8.0)).bg(theme::divider())))
+                    .child(div().px(px(8.0)).pt(px(if first && !MAC { 8.0 } else { 12.0 })).pb(px(if MAC { 4.0 } else { 6.0 })).text_size(px(11.0)).line_height(px(14.0))
                         .font_weight(FontWeight::SEMIBOLD).text_color(theme::placeholder()).child(label.to_uppercase()))
                     .into_any_element(),
                 Line::Session(index) => self.session_row(shown[index], index, index == panel.selected, cx).into_any_element(),
@@ -258,7 +260,9 @@ impl Overlay {
         let id = summary.id.clone();
         div().id(("session", index)).flex().flex_none().items_center().gap(px(12.0)).py(px(7.0)).px(px(8.0)).rounded(px(theme::radius::ROW)).border_1()
             .cursor_pointer()
-            .when(selected, |row| row.bg(theme::selected_row()).border_color(theme::bubble_border()))
+            // macOS lifts the selected row onto the raised fill; Windows marks it in blue.
+            .when(selected && MAC, |row| row.bg(theme::raised()).border_color(gpui::transparent_black()))
+            .when(selected && !MAC, |row| row.bg(theme::selected_row()).border_color(theme::bubble_border()))
             .when(!selected, |row| row.border_color(gpui::transparent_black()).hover(|row| row.bg(theme::row_hover())))
             .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, window, cx| {
                 cx.stop_propagation();
@@ -266,11 +270,13 @@ impl Overlay {
                 this.open_sessions_at(Some(id.clone()), cx);
             }))
             .child(div().size(px(32.0)).flex().flex_none().items_center().justify_center().rounded(px(theme::radius::TILE)).border_1()
-                .bg(if selected { theme::bubble() } else { theme::raised() }).border_color(if selected { theme::bubble_border() } else { theme::hairline() })
-                .child(ui::icon(icon, 15.0, if selected { theme::accent_soft() } else { theme::body() })))
+                .bg(match (selected, MAC) { (true, true) => theme::pressed(), (true, false) => theme::bubble(), _ => theme::raised() })
+                .border_color(match (selected, MAC) { (true, true) => theme::keycap_border(), (true, false) => theme::bubble_border(), _ => theme::hairline() })
+                .child(ui::icon(icon, 15.0, match (selected, MAC) { (true, true) => theme::text(), (true, false) => theme::accent_soft(), _ => theme::body() })))
             .child(div().flex_1().min_w_0().truncate().text_size(px(13.0)).line_height(px(18.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child(title))
-            .child(div().flex_none().px(px(7.0)).py(px(2.0)).rounded_full().bg(if selected { theme::bubble() } else { theme::raised() })
-                .text_size(px(11.0)).line_height(px(14.0)).font_weight(FontWeight::SEMIBOLD).text_color(if selected { theme::body() } else { theme::muted() })
+            .child(div().flex_none().px(px(if MAC { 8.0 } else { 7.0 })).py(px(2.0)).rounded_full()
+                .bg(if MAC { theme::pressed() } else if selected { theme::bubble() } else { theme::raised() })
+                .text_size(px(11.0)).line_height(px(14.0)).font_weight(FontWeight::SEMIBOLD).text_color(if MAC || selected { theme::body() } else { theme::muted() })
                 .child(duration(summary.started_at, summary.ended_at)))
             .child(div().w(px(62.0)).flex_none().flex().justify_end().text_size(px(12.0)).line_height(px(16.0)).text_color(theme::muted()).child(time))
     }

@@ -19,7 +19,7 @@ use gpui::{
 };
 
 use super::Overlay;
-use super::card::{CONVERSATION_MAX_HEIGHT, INPUT_ROW_HEIGHT, TOOLBAR_HEIGHT};
+use super::card::{CONVERSATION_MAX_HEIGHT, INPUT_ROW_HEIGHT, MAC, TOOLBAR_HEIGHT};
 use crate::modes::{self, Mode, ModeStore};
 use crate::toggles::Tip;
 use crate::{theme, ui};
@@ -28,8 +28,12 @@ const LIST_WIDTH: f32 = 248.0;
 /// The rows scroll past this height (about six rows), so the whole list fits on a 900 px tall
 /// screen under the tallest Live card.
 const ROWS_MAX_HEIGHT: f32 = 226.0;
-/// The chip: 16 px text, 2 px padding and its border; centred in the toolbar at the card's bottom.
-const CHIP_HEIGHT: f32 = 22.0;
+/// The chip: 16 px text, its padding (2 px, 5 px on macOS) and its border; centred in the toolbar at
+/// the card's bottom.
+const CHIP_PADDING: f32 = if MAC { 5.0 } else { 2.0 };
+const CHIP_HEIGHT: f32 = 16.0 + 2.0 * CHIP_PADDING + 2.0;
+/// The list's fill: the chrome on Windows, the raised popover on macOS.
+fn list_fill() -> gpui::Rgba { if MAC { theme::raised() } else { theme::chrome() } }
 const CHIP_IN_TOOLBAR: f32 = (TOOLBAR_HEIGHT - CHIP_HEIGHT) / 2.0;
 /// The list hangs this far under the card, with the pointer (on the chip's centre) in between.
 const LIST_GAP: f32 = 6.0;
@@ -153,7 +157,7 @@ impl Overlay {
         let mode = self.modes.active();
         let open = self.switcher.is_some();
         let general = mode.id == modes::GENERAL;
-        let mut chip = div().id("mode-chip").relative().flex().flex_none().items_center().gap(px(5.0)).py(px(2.0)).px(px(7.0)).rounded(px(theme::radius::CHIP))
+        let mut chip = div().id("mode-chip").relative().flex().flex_none().items_center().gap(px(5.0)).py(px(CHIP_PADDING)).px(px(7.0)).rounded(px(theme::radius::CHIP))
             .cursor_pointer().text_size(px(12.0)).line_height(px(16.0)).border_1()
             .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
                 cx.stop_propagation();
@@ -163,10 +167,12 @@ impl Overlay {
         chip = if open {
             chip.bg(theme::bubble()).border_color(theme::accent()).text_color(theme::text())
         } else {
-            chip.border_dashed().border_color(theme::chip_edge()).text_color(if general { theme::placeholder() } else { theme::body() })
+            chip.border_dashed().border_color(theme::chip_edge()).text_color(if general && !MAC { theme::placeholder() } else { theme::body() })
                 .hover(|chip| chip.bg(theme::hover()))
         };
-        if !general { chip = chip.child(ui::icon(mode.icon.path(), 12.0, if open { theme::accent_soft() } else { theme::body() })); }
+        // macOS names every mode with its icon, in semibold; Windows dims General and shows no icon.
+        if MAC { chip = chip.font_weight(FontWeight::SEMIBOLD); }
+        if !general || MAC { chip = chip.child(ui::icon(mode.icon.path(), 12.0, if open { theme::accent_soft() } else { theme::body() })); }
         chip = chip.child(div().whitespace_nowrap().child(mode.name.clone()))
             .child(ui::icon(if open { "icons/chevron-up.svg" } else { "icons/chevron-down.svg" }, 8.0, if open { theme::muted() } else { theme::placeholder() }));
         let Some(switcher) = &self.switcher else { return self.chip_tooltip(chip, CHIP_HEIGHT).into_any_element() };
@@ -213,7 +219,7 @@ impl Overlay {
                 .rounded(px(2.0)).bg(theme::keycap_border())
         });
         let fade = (max - offset > 0.5).then(|| div().absolute().left_0().right_0().bottom_0().h(px(FADE))
-            .bg(linear_gradient(180.0, linear_color_stop(gpui::Rgba { a: 0.0, ..theme::chrome() }, 0.0), linear_color_stop(theme::chrome(), 1.0))));
+            .bg(linear_gradient(180.0, linear_color_stop(gpui::Rgba { a: 0.0, ..list_fill() }, 0.0), linear_color_stop(list_fill(), 1.0))));
         let list = div().relative().flex_none().max_h(px(ROWS_MAX_HEIGHT))
             .child(lines)
             .children(fade).children(thumb);
@@ -232,8 +238,10 @@ impl Overlay {
             .when(edit_focused, |row| row.child(enter_mark()));
         let chip = switcher.chip.clone();
         let keys = self.hotkeys.label(crate::hotkeys::Action::SwitchMode);
-        div().id("mode-switcher").relative().w(px(LIST_WIDTH)).flex().flex_col().p(px(4.0)).rounded(px(theme::radius::POPOVER)).bg(theme::chrome())
+        div().id("mode-switcher").relative().w(px(LIST_WIDTH)).flex().flex_col().p(px(4.0)).rounded(px(theme::radius::POPOVER)).bg(list_fill())
             .border_1().border_color(theme::keycap_border())
+            .when(MAC, |list| list.shadow(vec![gpui::BoxShadow { color: gpui::hsla(0.0, 0.0, 0.0, 0.5), offset: point(px(0.0), px(16.0)),
+                blur_radius: px(40.0), spread_radius: px(0.0) }]))
             .track_focus(&switcher.focus)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| this.switcher_key(event, window, cx)))
             .on_mouse_down_out(cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
@@ -242,7 +250,7 @@ impl Overlay {
             }))
             .child(div().flex().flex_none().items_center().justify_between().h(px(26.0)).px(px(8.0))
                 .child(div().text_size(px(11.0)).line_height(px(14.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::placeholder()).child("SWITCH MODE"))
-                .child(ui::keycaps(&keys, 18.0, 10.0, theme::muted(), theme::raised())))
+                .child(ui::keycaps(&keys, 18.0, 10.0, theme::muted(), if MAC { theme::field() } else { theme::raised() })))
             .child(list)
             .child(div().h(px(1.0)).my(px(4.0)).flex_none().bg(theme::divider()))
             .child(edit)
@@ -254,16 +262,20 @@ impl Overlay {
     fn switcher_row(&self, mode: &Mode, number: Option<usize>, index: usize, active: bool, focused: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let id = mode.id.clone();
         let trailing = if active {
-            ui::icon("icons/check.svg", 14.0, theme::accent_soft()).into_any_element()
+            ui::icon("icons/check.svg", 14.0, if MAC { theme::accent() } else { theme::accent_soft() }).into_any_element()
         } else if focused {
             enter_mark().into_any_element()
         } else {
             div().into_any_element()
         };
+        // Windows marks the keyboard-focused row's tile; macOS marks the active mode's (tile, name and
+        // check in the accent) and keeps the focused row to its fill and ↵.
+        let marked = if MAC { active } else { focused };
         let tile = div().size(px(24.0)).flex().flex_none().items_center().justify_center().rounded(px(theme::radius::SMALL_TILE)).border_1()
-            .bg(if focused { theme::bubble() } else { theme::raised() }).border_color(if focused { theme::bubble_border() } else { theme::hairline() })
-            .child(ui::icon(mode.icon.path(), 13.0, if focused { theme::accent_soft() } else { theme::body() }));
-        div().id(("switch-mode", index)).flex().flex_none().items_center().gap(px(9.0)).px(px(8.0)).py(px(5.0)).rounded(px(theme::radius::SWITCHER_ROW))
+            .bg(if marked { theme::bubble() } else if MAC { theme::field() } else { theme::raised() }).border_color(if marked { theme::bubble_border() } else { theme::hairline() })
+            .child(ui::icon(mode.icon.path(), 13.0, if marked { theme::accent_soft() } else if MAC { theme::text() } else { theme::body() }));
+        div().id(("switch-mode", index)).flex().flex_none().items_center().gap(px(9.0)).px(px(if MAC { 7.0 } else { 8.0 })).py(px(if MAC { 3.0 } else { 5.0 }))
+            .rounded(px(theme::radius::SWITCHER_ROW))
             .border_1().cursor_pointer()
             .when(focused, |row| row.bg(theme::selected_row()).border_color(theme::bubble_border()))
             .when(!focused, |row| row.border_color(gpui::transparent_black()).hover(|row| row.bg(theme::row_hover())))
@@ -273,9 +285,11 @@ impl Overlay {
                 .when(!focused, |number| number.text_color(theme::placeholder()))
                 .child(number.map(|n| n.to_string()).unwrap_or_default()))
             .child(tile)
-            .child(div().flex_1().min_w_0().truncate().text_size(px(13.0)).line_height(px(18.0))
-                .when(active || focused, |name| name.font_weight(FontWeight::SEMIBOLD).text_color(theme::text()))
-                .when(!active && !focused, |name| name.text_color(theme::body()))
+            .child(div().flex_1().min_w_0().truncate().text_size(px(13.0)).line_height(px(if MAC { 16.0 } else { 18.0 }))
+                .when(MAC && active, |name| name.font_weight(FontWeight::SEMIBOLD).text_color(theme::accent_soft()))
+                .when(MAC && !active, |name| name.font_weight(theme::MEDIUM).text_color(theme::text()))
+                .when(!MAC && (active || focused), |name| name.font_weight(FontWeight::SEMIBOLD).text_color(theme::text()))
+                .when(!MAC && !active && !focused, |name| name.text_color(theme::body()))
                 .child(mode.name.clone()))
             .child(div().w(px(14.0)).flex_none().flex().justify_end().child(trailing))
     }

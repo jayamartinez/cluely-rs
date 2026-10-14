@@ -1,7 +1,12 @@
 //! The Modes page, laid out like the Paper "Modes v2" and "Modes v3" artboards: the modes in a
 //! sidebar by group, and the selected one's meeting context and files beside it, with a footer to
-//! make it active. macOS shows it in the Settings window ("macOS · Settings window · Modes").
-//! Windows draws the same state and actions as Fluent pages in its Settings window (`fluent`).
+//! make it active. macOS draws it in its Settings window in the v3 layout (`mac`); Windows draws the
+//! same state and actions as Fluent pages in its Settings window (`fluent`). The layout here is the
+//! older one, unused on macOS.
+#![cfg_attr(target_os = "macos", allow(dead_code))]
+
+#[cfg(target_os = "macos")]
+mod mac;
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -88,13 +93,17 @@ pub struct ModesUi {
     context: Entity<TextArea>,
     name: Entity<TextInput>,
     new_group: Entity<TextInput>,
+    /// The macOS sidebar's scroll position, for its scrollbar (`mac`).
+    #[cfg(target_os = "macos")]
+    sidebar_scroll: gpui::ScrollHandle,
 }
 
 impl ModesUi {
     pub fn new(store: &ModeStore, window: &mut Window, cx: &mut Context<Overlay>) -> Self {
         let context = cx.new(|cx| TextArea::new(CUSTOM_PLACEHOLDER, cx).with_max_chars(modes::MAX_CONTEXT_CHARS));
-        // Windows edits the name in a Fluent TextBox (`fluent`), at the size of its other fields.
-        let (size, line) = if cfg!(windows) { (13.0, 16.0) } else { LOOK.title };
+        // macOS shows the name in a 22 px field (`mac`); Windows edits it in a Fluent TextBox (`fluent`),
+        // at the size of its other fields.
+        let (size, line) = if cfg!(target_os = "macos") { (22.0, 28.0) } else if cfg!(windows) { (13.0, 16.0) } else { LOOK.title };
         let name = cx.new(|cx| TextInput::new("Mode name", cx).with_text_size(size, line));
         let new_group = cx.new(|cx| TextInput::new("New group…", cx));
         cx.subscribe_in(&context, window, |this, _, event, _, cx| if matches!(event, InputEvent::Changed) { this.context_edited(cx) }).detach();
@@ -109,7 +118,7 @@ impl ModesUi {
         let text = store.active().context.clone();
         context.update(cx, |area, cx| area.set_text(&text, cx));
         Self { selected, popover: None, renaming: false, notices: Vec::new(), reading: Vec::new(), next_id: 0, pending_save: None,
-            focus: cx.focus_handle(), context, name, new_group }
+            focus: cx.focus_handle(), context, name, new_group, #[cfg(target_os = "macos")] sidebar_scroll: gpui::ScrollHandle::new() }
     }
 }
 
@@ -204,6 +213,9 @@ fn on_click(cx: &Context<Overlay>, focus: Option<FocusHandle>, f: impl Fn(&mut O
 impl Overlay {
     /// The whole tab: sidebar, detail, footer and any open popover.
     pub(crate) fn modes_tab(&self, cx: &mut Context<Self>) -> AnyElement {
+        // macOS draws the v3 page; what follows is the Windows Modes window's.
+        #[cfg(target_os = "macos")]
+        if cfg!(target_os = "macos") { return self.mac_modes_tab(cx); }
         let mode = self.modes.get(&self.modes_ui.selected).unwrap_or_else(|| self.modes.active());
         let focus = self.modes_ui.focus.clone();
         let mut tab = div().id("modes-tab").relative().flex().size_full().min_h_0()

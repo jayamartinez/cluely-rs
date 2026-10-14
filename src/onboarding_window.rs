@@ -1,59 +1,52 @@
-//! macOS first-run setup: a normal window, "Set up CluelyRS", stepping through the choices that matter
-//! before the first Live session. Layout follows the Paper "Menu bar + macOS onboarding" artboards.
-//! The pages are the overlay's own settings (`settings_view::onboarding`), so every choice saves and
-//! applies as it does in Settings: skipping a step keeps what is set, and closing the window or Skip
-//! setup counts as finishing. The overlay stays hidden, and Live waits, until a first run finishes.
+//! macOS first-run setup: a normal window, "Set up CluelyRS", four short steps before the first Live
+//! session (Welcome, Permissions, Answer model, Listening). Layout follows the Paper "Redesign v3 ·
+//! Onboarding" macOS artboards. The pages are the overlay's own settings (`settings_view::onboarding`),
+//! so every choice saves and applies as it does in Settings, and closing the window counts as
+//! finishing. The overlay stays hidden, and Live waits, until a first run finishes.
 
-mod audio_check;
+pub(crate) mod audio_check;
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use gpui::{
-    App, AppContext, Bounds, Context, Entity, FocusHandle, FontWeight, InteractiveElement, IntoElement, MouseButton, ParentElement, Render,
-    ScrollHandle, Styled, Subscription, TitlebarOptions, Window, WindowBounds, WindowKind, WindowOptions, div, point, prelude::*, px, rgb, size,
+    App, AppContext, Bounds, Context, Entity, FocusHandle, ImageSource, InteractiveElement, IntoElement, MouseButton, ObjectFit, ParentElement, Render,
+    Resource, Styled, StyledImage, Subscription, TitlebarOptions, Window, WindowBounds, WindowKind, WindowOptions, div, img, point, px, size,
 };
 
-pub(crate) use self::audio_check::{AudioCheck, Meter, MeterState, Permissions};
+pub(crate) use self::audio_check::{AudioCheck, Meter, MeterState, Metered, Permissions};
 use crate::overlay::Overlay;
 use crate::platform::{self, NativeWindow, PrivacyPane};
-use crate::providers::{Message, Part, Role};
-use crate::settings::{ONBOARDING_VERSION, OnboardingStep as Step, Provider, Settings};
-use crate::settings_view::button;
+use crate::settings::{ONBOARDING_VERSION, OnboardingStep as Step, Settings, SttProvider};
 use crate::settings_window::{CloseSettings, sync_capture};
-use crate::theme;
+use crate::{theme, ui_v3};
 
-/// The steps this build shows, in order.
-pub(crate) const STEPS: [Step; 7] = [Step::Welcome, Step::Model, Step::Transcription, Step::Permissions, Step::Privacy, Step::Shortcuts, Step::Done];
+/// The steps this build shows, in order. Answer model is `Model` and Listening is `Transcription`,
+/// the names they're saved under.
+pub(crate) const STEPS: [Step; 4] = [Step::Welcome, Step::Permissions, Step::Model, Step::Transcription];
 
 const WIDTH: f32 = 760.0;
-const HEIGHT: f32 = 700.0;
-/// Room the window always leaves on the screen.
-const SCREEN_MARGIN: f32 = 80.0;
-/// How long the keys light up after Assist is pressed as practice (Shortcuts).
+const HEIGHT: f32 = 560.0;
+/// How long the keys light up after Assist is pressed as practice (the overlay's `practice_assist`).
 pub(crate) const PRACTICE_FLASH: Duration = Duration::from_millis(700);
-/// The test request: one short question, no screenshot.
-const TEST_SYSTEM: &str = "You are checking that a connection works.";
-const TEST_QUESTION: &str = "Reply with OK.";
 
-/// What the footer and the summary's Change links do.
+/// Where the back arrow and the main button lead.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Nav { Back, Next, Go(Step), Finish }
+pub(crate) enum Nav { Back, Next, Finish }
 
-/// Where `nav` leads from `step`: another step, or `None` once setup is finished (Continue on the
-/// last step, Skip setup).
+/// Where `nav` leads from `step`: another step, or `None` once setup is finished (the last step's
+/// Start CluelyRS).
 fn next_step(step: Step, nav: Nav) -> Option<Step> {
     let index = position(step);
     match nav {
         Nav::Back => Some(STEPS[index.saturating_sub(1)]),
         Nav::Next => STEPS.get(index + 1).copied(),
-        Nav::Go(step) => Some(shown(step)),
         Nav::Finish => None,
     }
 }
 
 fn position(step: Step) -> usize { STEPS.iter().position(|shown| *shown == step).unwrap_or(0) }
 
-/// A step this build shows: one saved by a newer build that this one doesn't have starts over.
+/// A step this build shows: one saved by a newer or older build that this one doesn't have starts over.
 pub(crate) fn shown(step: Step) -> Step { STEPS[position(step)] }
 
 /// Settings as setup leaves them: open on `step`, so a relaunch resumes there, or finished (`None`).
@@ -62,22 +55,12 @@ pub(crate) fn record(settings: &mut Settings, step: Option<Step>) {
     if step.is_none() { settings.onboarding_version = ONBOARDING_VERSION; }
 }
 
-/// Setup › Model's test request, for the provider and model it was sent with.
-#[derive(Clone)]
-pub(crate) struct TestRun {
-    pub provider: Provider,
-    pub model: String,
-    pub state: TestState,
-}
-
-#[derive(Clone)]
-pub(crate) enum TestState { Sending, Answered(Duration), Failed(String) }
-
 /// What the setup window itself holds for its pages (the rest is the overlay's).
 pub(crate) struct PageState<'a> {
-    pub test: Option<&'a TestRun>,
     pub permissions: &'a Permissions,
     pub audio: &'a AudioCheck,
+    /// The speech model chosen on Listening; nothing is chosen until one is clicked.
+    pub speech: Option<SttProvider>,
 }
 
 pub struct OnboardingWindow {
@@ -86,12 +69,15 @@ pub struct OnboardingWindow {
     focus: FocusHandle,
     native: Option<NativeWindow>,
     capture_hidden: Option<bool>,
-    scroll: ScrollHandle,
-    test: Option<TestRun>,
     permissions: Permissions,
     audio: AudioCheck,
+    speech: Option<SttProvider>,
     _overlay_changed: Subscription,
     _activation: Subscription,
+}
+
+impl Metered for OnboardingWindow {
+    fn meters(&mut self) -> &mut AudioCheck { &mut self.audio }
 }
 
 /// Show setup on `step`, opening it if needed; it becomes key only once CluelyRS is active, as
@@ -106,10 +92,9 @@ pub fn open(step: Step, cx: &mut Context<Overlay>) {
             }).is_ok() {
             return;
         }
-        let height = cx.primary_display().map_or(HEIGHT, |display| HEIGHT.min(f32::from(display.bounds().size.height) - SCREEN_MARGIN));
         let options = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(WIDTH), px(height)), cx))),
-            titlebar: Some(TitlebarOptions { title: Some("Set up CluelyRS".into()), appears_transparent: true, traffic_light_position: Some(point(px(14.0), px(14.0))) }),
+            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(WIDTH), px(HEIGHT)), cx))),
+            titlebar: Some(TitlebarOptions { title: Some("Set up CluelyRS".into()), appears_transparent: true, traffic_light_position: Some(point(px(14.0), px(15.0))) }),
             kind: WindowKind::Normal,
             focus: active,
             is_resizable: false,
@@ -127,19 +112,19 @@ impl OnboardingWindow {
     fn new(overlay: Entity<Overlay>, step: Step, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus = cx.focus_handle();
         window.focus(&focus);
-        // The red button finishes setup like Skip setup: nothing chosen is lost.
+        // The red button finishes setup: nothing chosen is lost.
         let closing = overlay.downgrade();
         window.on_window_should_close(cx, move |_, cx| {
             if let Some(overlay) = closing.upgrade() { finish(&overlay, cx); }
             true
         });
-        // A settings change can change what the audio check captures (its switches and devices).
-        let _overlay_changed = cx.observe(&overlay, |this, _, cx| this.sync_audio_check(cx));
+        // A settings change can change what the audio check captures (its devices).
+        let _overlay_changed = cx.observe(&overlay, |this, _, cx| this.sync_audio(cx));
         // Coming back from System Settings (or a permission prompt) is when permissions change.
         let _activation = cx.observe_window_activation(window, |this, window, cx| if window.is_window_active() { this.refresh_permissions(cx) });
-        let mut setup = Self { overlay, step, focus, native: platform::native_window(window), capture_hidden: None, scroll: ScrollHandle::new(), test: None,
-            permissions: Permissions::read(), audio: AudioCheck::default(), _overlay_changed, _activation };
-        setup.sync_audio_check(cx);
+        let mut setup = Self { overlay, step, focus, native: platform::native_window(window), capture_hidden: None,
+            permissions: Permissions::read(), audio: AudioCheck::default(), speech: None, _overlay_changed, _activation };
+        setup.sync_audio(cx);
         setup
     }
 
@@ -158,9 +143,7 @@ impl OnboardingWindow {
 
     fn show_step(&mut self, step: Step, cx: &mut Context<Self>) {
         self.step = step;
-        self.scroll.set_offset(point(px(0.0), px(0.0)));
-        // The audio check runs only on the Permissions step.
-        if step == Step::Permissions { self.refresh_permissions(cx) } else { self.sync_audio_check(cx) }
+        self.refresh_permissions(cx);
     }
 
     /// Read both permissions again (they change in System Settings), then match the audio check to them.
@@ -168,11 +151,20 @@ impl OnboardingWindow {
         let read = Permissions::read();
         self.permissions.mic = read.mic;
         self.permissions.screen_allowed = read.screen_allowed;
-        self.sync_audio_check(cx);
+        self.sync_audio(cx);
     }
 
-    /// Allow… for the microphone: macOS's prompt, then the answer.
+    /// The meters run on the Listening step only.
+    fn sync_audio(&mut self, cx: &mut Context<Self>) {
+        let overlay = self.overlay.read(cx);
+        let wanted = audio_check::wanted(self.step == Step::Transcription, &overlay.store.value, &self.permissions, overlay.live_since.is_some());
+        audio_check::sync(self, wanted, cx);
+    }
+
+    /// Grant for the microphone: macOS's prompt, then the answer. Once denied, macOS doesn't ask
+    /// again, so Grant opens its pane in System Settings.
     pub(crate) fn allow_microphone(&mut self, cx: &mut Context<Self>) {
+        if self.permissions.mic == platform::Access::Denied { return self.open_privacy(PrivacyPane::Microphone, cx); }
         let (answered, answer) = futures::channel::oneshot::channel();
         platform::request_microphone(move |_| { let _ = answered.send(()); });
         cx.spawn(async move |this, cx| {
@@ -181,8 +173,8 @@ impl OnboardingWindow {
         }).detach();
     }
 
-    /// Allow… for Screen Recording. macOS prompts only the first time it's ever asked, and what is
-    /// allowed applies after a relaunch, so from here the row offers System Settings and Quit & Reopen.
+    /// Grant for Screen & System Audio Recording. macOS prompts only the first time it's ever asked,
+    /// and what is allowed applies after a relaunch, so from here the row offers Quit & Reopen.
     pub(crate) fn allow_screen_recording(&mut self, cx: &mut Context<Self>) {
         platform::request_screen_recording();
         self.permissions.screen_asked = true;
@@ -203,80 +195,23 @@ impl OnboardingWindow {
         }
     }
 
-    /// Ask the selected provider a one-word question off the UI thread and time the answer. A
-    /// subscription's CLI or a saved API key is used exactly as for an answer; nothing waits on it.
-    pub(crate) fn send_test(&mut self, cx: &mut Context<Self>) {
-        let overlay = self.overlay.read(cx);
-        let (provider, model) = (overlay.store.value.provider, overlay.model_choice().value);
-        let messages = vec![Message { role: Role::User, parts: vec![Part::Text(TEST_QUESTION.into())] }];
-        let target = crate::answer::target(&overlay.store.value, &overlay.codex, TEST_SYSTEM.into(), messages, 16);
-        let run = |state| Some(TestRun { provider, model: model.clone(), state });
-        let target = match target {
-            Ok(target) => target,
-            Err(reason) => { self.test = run(TestState::Failed(reason)); cx.notify(); return; }
-        };
-        self.test = run(TestState::Sending);
+    /// Listening's choice of speech model. On this Mac starts the download if the model isn't here
+    /// yet: it only ever starts from this click.
+    pub(crate) fn choose_speech(&mut self, provider: SttProvider, cx: &mut Context<Self>) {
+        self.speech = Some(provider);
         cx.notify();
-        cx.spawn(async move |this, cx| {
-            let started = Instant::now();
-            let result = cx.background_executor().spawn(async move { crate::answer::complete(target) }).await;
-            let elapsed = started.elapsed();
-            let _ = this.update(cx, |this, cx| {
-                // Only the latest test reports; one for another provider or model was replaced.
-                let Some(test) = this.test.as_mut().filter(|test| test.provider == provider && test.model == model) else { return };
-                test.state = match result { Ok(_) => TestState::Answered(elapsed), Err(reason) => TestState::Failed(reason) };
-                cx.notify();
-            });
-        }).detach();
-    }
-
-    /// The title and the step indicator: done steps outlined in blue, the current one filled.
-    fn header(&self) -> impl IntoElement {
-        const CELL: f32 = 80.0;
-        let current = position(self.step);
-        // One track behind the dots, from the first to the last. The row has no gap: GPUI would add
-        // one after this absolutely placed first child.
-        let track = div().absolute().top(px(14.0)).left(px(CELL / 2.0)).right(px(CELL / 2.0)).h(px(1.0)).bg(theme::hairline());
-        let steps = STEPS.iter().enumerate().fold(div().relative().flex().justify_center().pt(px(4.0)).child(track), |row, (index, step)| {
-            let (dot, number, label) = match index.cmp(&current) {
-                std::cmp::Ordering::Less => (div().bg(theme::bubble()).border_1().border_color(theme::bubble_border()), theme::accent_soft(), theme::body()),
-                std::cmp::Ordering::Equal => (div().bg(theme::accent()), theme::accent_ink(), theme::text()),
-                std::cmp::Ordering::Greater => (div().bg(rgb(0x17181b)).border_1().border_color(theme::keycap_border()), theme::muted(), theme::muted()),
-            };
-            row.child(div().w(px(CELL)).flex().flex_col().items_center().gap(px(5.0))
-                .child(dot.size(px(20.0)).rounded_full().flex().items_center().justify_center()
-                    .text_size(px(11.0)).font_weight(if index > current { FontWeight::SEMIBOLD } else { FontWeight::BOLD }).text_color(number).child((index + 1).to_string()))
-                .child(div().text_size(px(11.0)).text_color(label).when(index == current, |text| text.font_weight(FontWeight::SEMIBOLD)).child(label_of(*step))))
+        with_overlay(&self.overlay, cx, move |overlay, window, cx| {
+            overlay.update_settings(|s| { s.transcribe = true; s.stt_provider = provider; }, window, cx);
+            if provider == SttProvider::Parakeet && !overlay.model_installed && overlay.download_progress().is_none() { overlay.download_model(window, cx); }
         });
-        // The title sits beside the traffic lights, in the transparent title bar.
-        div().flex().flex_col().gap(px(8.0)).px(px(14.0)).pt(px(10.0)).pb(px(10.0)).bg(rgb(0x17181b)).border_b_1().border_color(theme::divider())
-            .child(div().h(px(16.0)).flex().justify_center().text_size(px(13.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::body()).child("Set up CluelyRS"))
-            .child(steps)
     }
 
-    /// Skip (Skip setup on the first step; a reminder on the last) on the left; Back and Continue
-    /// (Open CluelyRS on the last step) on the right.
-    fn footer(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let (first, last) = (position(self.step) == 0, self.step == Step::Done);
-        let go = |nav: Nav| cx.listener(move |this, _, window, cx| this.navigate(nav, window, cx));
-        let left = if last { div().px(px(10.0)).text_size(px(12.0)).text_color(theme::muted()).child("Setup can be run again any time").into_any_element() }
-            else { div().id("skip").px(px(10.0)).py(px(7.0)).rounded(px(9.0)).cursor_pointer().text_size(px(12.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::body())
-                .hover(|skip| skip.text_color(theme::text()))
-                .on_mouse_down(MouseButton::Left, go(if first { Nav::Finish } else { Nav::Next }))
-                .child(if first { "Skip setup" } else { "Skip" }).into_any_element() };
-        let back = button("back", "Back", false).px(px(14.0)).py(px(7.0)).when(first, |back| back.opacity(0.4).cursor_default())
-            .when(!first, |back| back.on_mouse_down(MouseButton::Left, go(Nav::Back)));
-        let primary = button("continue", if last { "Open CluelyRS" } else { "Continue" }, true).px(px(16.0)).py(px(7.0)).on_mouse_down(MouseButton::Left, go(Nav::Next));
-        div().flex().items_center().justify_between().px(px(16.0)).py(px(12.0)).bg(rgb(0x131416)).border_t_1().border_color(theme::divider())
-            .child(left)
-            .child(div().flex().items_center().gap(px(8.0)).child(back).child(primary))
-    }
-}
-
-fn label_of(step: Step) -> &'static str {
-    match step {
-        Step::Welcome => "Welcome", Step::Model => "Model", Step::Transcription => "Transcription", Step::Permissions => "Permissions",
-        Step::Privacy => "Privacy", Step::Shortcuts => "Shortcuts", Step::Done => "Done",
+    /// The step indicator in the title bar, between the traffic lights and an equal space.
+    fn top_bar(&self) -> impl IntoElement {
+        div().h(px(44.0)).flex_none().flex().items_center().px(px(14.0))
+            .child(div().w(px(80.0)).flex_none())
+            .child(div().flex_1().child(ui_v3::progress_dashes(STEPS.len(), position(self.step))))
+            .child(div().w(px(80.0)).flex_none())
     }
 }
 
@@ -295,16 +230,21 @@ impl Render for OnboardingWindow {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         sync_capture(self.native, &mut self.capture_hidden, &self.overlay.read(cx).store.value);
         let (step, setup) = (self.step, cx.weak_entity());
-        let state = PageState { test: self.test.as_ref(), permissions: &self.permissions, audio: &self.audio };
+        let state = PageState { permissions: &self.permissions, audio: &self.audio, speech: self.speech };
         let page = self.overlay.update(cx, |overlay, cx| overlay.in_window(cx, |overlay, cx| overlay.onboarding_page(step, &state, &setup, cx)));
-        div().size_full().flex().flex_col().bg(rgb(0x0f1012)).font_family(theme::FONT).text_color(theme::text())
+        let back = (position(step) > 0).then(|| div().id("back").absolute().left(px(16.0)).top(px(56.0)).size(px(32.0)).flex().items_center().justify_center()
+            .rounded(px(ui_v3::RADII.small)).cursor_pointer().hover(|back| back.bg(theme::raised()))
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| this.navigate(Nav::Back, window, cx)))
+            .child(ui_v3::back_arrow()));
+        let glow = img(ImageSource::Resource(Resource::Embedded("app-icon/setup-glow.svg".into()))).absolute().top_0().left_0().size_full().object_fit(ObjectFit::Fill);
+        div().relative().size_full().flex().flex_col().bg(theme::window_bg()).font_family(theme::FONT).text_color(theme::text())
             // ⌘W closes it, as it does Settings.
             .key_context("SettingsWindow").track_focus(&self.focus)
             .on_action(cx.listener(|this, _: &CloseSettings, window, cx| this.navigate(Nav::Finish, window, cx)))
-            .child(self.header())
-            .child(div().id("onboarding-page").flex_1().min_h_0().overflow_y_scroll().track_scroll(&self.scroll)
-                .child(div().w(px(600.0)).mx_auto().pt(px(30.0)).pb(px(28.0)).child(page)))
-            .child(self.footer(cx))
+            .child(glow)
+            .child(self.top_bar())
+            .child(page)
+            .children(back)
     }
 }
 
@@ -314,30 +254,27 @@ mod tests {
 
     #[test]
     fn steps_go_forward_and_back_and_finish_after_the_last() {
-        assert_eq!(next_step(Step::Welcome, Nav::Next), Some(Step::Model));
+        assert_eq!(next_step(Step::Welcome, Nav::Next), Some(Step::Permissions));
+        assert_eq!(next_step(Step::Permissions, Nav::Next), Some(Step::Model));
         assert_eq!(next_step(Step::Model, Nav::Next), Some(Step::Transcription));
-        assert_eq!(next_step(Step::Transcription, Nav::Next), Some(Step::Permissions));
-        assert_eq!(next_step(Step::Permissions, Nav::Next), Some(Step::Privacy));
-        assert_eq!(next_step(Step::Privacy, Nav::Next), Some(Step::Shortcuts));
-        assert_eq!(next_step(Step::Shortcuts, Nav::Next), Some(Step::Done));
-        assert_eq!(next_step(Step::Privacy, Nav::Back), Some(Step::Permissions));
+        assert_eq!(next_step(Step::Transcription, Nav::Next), None, "Start CluelyRS finishes");
+        assert_eq!(next_step(Step::Model, Nav::Back), Some(Step::Permissions));
         assert_eq!(next_step(Step::Welcome, Nav::Back), Some(Step::Welcome));
-        assert_eq!(next_step(Step::Done, Nav::Next), None, "Open CluelyRS finishes");
-        assert_eq!(next_step(Step::Model, Nav::Finish), None, "Skip setup finishes");
-        assert_eq!(next_step(Step::Done, Nav::Go(Step::Model)), Some(Step::Model), "a summary's Change link");
+        assert_eq!(next_step(Step::Permissions, Nav::Finish), None, "closing finishes");
     }
 
     #[test]
-    fn every_step_is_shown_in_order() {
+    fn every_step_is_shown_in_order_and_retired_steps_start_over() {
         assert_eq!(STEPS.map(shown), STEPS);
-        assert_eq!(position(Step::Done), STEPS.len() - 1);
+        for retired in [Step::Privacy, Step::Shortcuts, Step::Done] { assert_eq!(shown(retired), Step::Welcome, "{retired:?}"); }
+        assert_eq!(position(Step::Transcription), STEPS.len() - 1);
     }
 
     #[test]
     fn each_step_is_saved_and_finishing_records_the_version() {
         let mut settings = Settings::default();
-        record(&mut settings, Some(Step::Privacy));
-        assert_eq!((settings.onboarding_step, settings.onboarding_version), (Some(Step::Privacy), 0));
+        record(&mut settings, Some(Step::Permissions));
+        assert_eq!((settings.onboarding_step, settings.onboarding_version), (Some(Step::Permissions), 0));
         record(&mut settings, None);
         assert_eq!((settings.onboarding_step, settings.onboarding_version), (None, ONBOARDING_VERSION));
     }

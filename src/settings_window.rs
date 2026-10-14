@@ -1,20 +1,19 @@
-//! macOS Settings: a normal window, opened with ⌘, or the overlay's gear, with a toolbar of tabs as
-//! Mac apps show their settings. Layout follows the Paper "macOS · Settings window" artboards. The
-//! tabs' contents are the overlay's own settings (`settings_view`) drawn here; Windows keeps them in
-//! the overlay's panel.
-
-use std::cell::Cell;
-use std::rc::Rc;
+//! macOS Settings: a normal window, opened with ⌘, or the overlay's gear, with a centred bar of
+//! icon tabs as Mac apps show their settings. Layout follows the Paper "Redesign v3 · Cluely 2.0
+//! style" Settings artboards: a fixed-height window whose page scrolls under a thin overlay
+//! scrollbar. The tabs' contents are the overlay's own settings (`settings_view::mac`) drawn here;
+//! Windows keeps them in the overlay's panel.
 
 use gpui::{
     AnyElement, App, AppContext, Bounds, Context, Entity, FocusHandle, FontWeight, InteractiveElement, IntoElement, KeyBinding, MouseButton,
-    ParentElement, Render, Styled, Subscription, TitlebarOptions, Window, WindowBounds, WindowHandle, WindowKind, WindowOptions, div, point, prelude::*, px,
-    rgb, size,
+    MouseDownEvent, ParentElement, Render, ScrollHandle, Styled, Subscription, TitlebarOptions, Window, WindowBounds, WindowHandle, WindowKind,
+    WindowOptions, div, point, prelude::*, px, size,
 };
 
+use crate::onboarding_window::{AudioCheck, Metered, Permissions, audio_check};
 use crate::overlay::{self, Overlay};
 use crate::platform::{self, NativeWindow};
-use crate::settings_view::Tab;
+use crate::settings_view::{Tab, WindowAction, WindowState};
 use crate::{theme, ui};
 
 gpui::actions!(settings_window, [CloseSettings]);
@@ -22,7 +21,7 @@ gpui::actions!(settings_window, [CloseSettings]);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Page { Settings(Tab), About }
 
-/// The toolbar: page, label, icon.
+/// The tab bar: page, label, icon.
 const PAGES: [(Page, &str, &str); 7] = [
     (Page::Settings(Tab::Model), "Model", "icons/tab-model.svg"),
     (Page::Settings(Tab::Listening), "Listening", "icons/tab-listening.svg"),
@@ -33,18 +32,20 @@ const PAGES: [(Page, &str, &str); 7] = [
     (Page::About, "About", "icons/tab-about.svg"),
 ];
 
+const TITLE: &str = "CluelyRS Settings";
+
 /// ⌘W closes the window, as in any Mac app.
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([KeyBinding::new("cmd-w", CloseSettings, Some("SettingsWindow"))]);
 }
 
-/// The window's width; its height follows the open tab, within these limits.
-const WIDTH: f32 = 760.0;
-const MIN_HEIGHT: f32 = 420.0;
-/// Taller tabs scroll rather than make a tall window.
-const MAX_HEIGHT: f32 = 640.0;
+/// The window's size; it never changes with the tab. A shorter screen gets a shorter window.
+const WIDTH: f32 = 880.0;
+const HEIGHT: f32 = 720.0;
 /// Room the window always leaves on the screen.
-const SCREEN_MARGIN: f32 = 120.0;
+const SCREEN_MARGIN: f32 = 80.0;
+/// The page's column.
+const COLUMN: f32 = 640.0;
 
 pub struct SettingsWindow {
     overlay: Entity<Overlay>,
@@ -53,14 +54,23 @@ pub struct SettingsWindow {
     native: Option<NativeWindow>,
     /// The capture exclusion last applied, so it is only set when the setting changes.
     capture_hidden: Option<bool>,
-    /// The toolbar's and the tab's laid-out heights, so the window can fit the tab without scrolling.
-    heights: Rc<Cell<(f32, f32)>>,
+    scroll: ScrollHandle,
+    /// Listening's meters, and the permissions they wait for.
+    permissions: Permissions,
+    audio: AudioCheck,
+    /// How many sessions are saved, counted as Sessions opens.
+    sessions: Option<usize>,
     _overlay_changed: Subscription,
+    _activation: Subscription,
+}
+
+impl Metered for SettingsWindow {
+    fn meters(&mut self) -> &mut AudioCheck { &mut self.audio }
 }
 
 /// Show the Settings window on `tab`, opening it if needed, and bring CluelyRS forward so the menu
 /// bar (Settings…, Quit) is its own while the window is in front.
-pub fn open(tab: Tab, cx: &mut Context<Overlay>) { open_page(Page::Settings(tab), cx) }
+pub fn open(tab: Tab, cx: &mut Context<Overlay>) { open_page(if tab == Tab::About { Page::About } else { Page::Settings(tab) }, cx) }
 
 /// Show the Settings window on About (the menu's "Check for Updates…").
 pub fn open_about(cx: &mut Context<Overlay>) { open_page(Page::About, cx) }
@@ -72,15 +82,15 @@ fn open_page(page: Page, cx: &mut Context<Overlay>) {
     cx.defer(move |cx| platform::activate_then(cx, move |active, cx| {
         if let Some(handle) = entity.read(cx).settings_window
             && handle.update(cx, |this, window, cx| {
-                this.page = page;
+                this.select(page, cx);
                 if active { window.activate_window(); } else if let Some(native) = this.native { platform::order_front(native); }
-                cx.notify();
             }).is_ok() {
             return;
         }
+        let height = cx.primary_display().map_or(HEIGHT, |display| HEIGHT.min(f32::from(display.bounds().size.height) - SCREEN_MARGIN));
         let options = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(WIDTH), px(640.0)), cx))),
-            titlebar: Some(TitlebarOptions { title: Some("Settings".into()), appears_transparent: true, traffic_light_position: Some(point(px(14.0), px(14.0))) }),
+            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(WIDTH), px(height)), cx))),
+            titlebar: Some(TitlebarOptions { title: Some(TITLE.into()), appears_transparent: true, traffic_light_position: Some(point(px(14.0), px(12.0))) }),
             kind: WindowKind::Normal,
             focus: active,
             is_resizable: false,
@@ -131,11 +141,18 @@ impl SettingsWindow {
             if let Some(overlay) = closing.upgrade() { closed(&overlay, cx); }
             true
         });
-        let _overlay_changed = cx.observe(&overlay, |_, _, cx| cx.notify());
-        Self { overlay, page, focus, native: platform::native_window(window), capture_hidden: None, heights: Rc::default(), _overlay_changed }
+        // A settings change can change what the meters capture (their switches and devices).
+        let _overlay_changed = cx.observe(&overlay, |this, _, cx| { this.sync_audio(cx); cx.notify(); });
+        // Coming back from System Settings is when permissions change.
+        let _activation = cx.observe_window_activation(window, |this, window, cx| if window.is_window_active() { this.refresh_permissions(cx) });
+        let mut this = Self { overlay, page, focus, native: platform::native_window(window), capture_hidden: None, scroll: ScrollHandle::new(),
+            permissions: Permissions::read(), audio: AudioCheck::default(), sessions: None, _overlay_changed, _activation };
+        this.opened(cx);
+        this
     }
 
     fn select(&mut self, page: Page, cx: &mut Context<Self>) {
+        let changed = self.page != page;
         self.page = page;
         if let Page::Settings(tab) = page {
             // Refresh what the tab shows (accounts, devices, history size) from the overlay's window.
@@ -143,70 +160,78 @@ impl SettingsWindow {
             let own = overlay.read(cx).own_window;
             let _ = own.update(cx, |_, window, cx| overlay.update(cx, |overlay, cx| overlay.prepare_tab(tab, window, cx)));
         }
+        if changed { self.scroll.set_offset(point(px(0.0), px(0.0))); }
+        self.opened(cx);
         cx.notify();
     }
 
-    /// Fit the tab, as Mac settings windows do, keeping the top edge in place: shorter tabs make a
-    /// shorter window, and tabs taller than `MAX_HEIGHT` (or the screen allows) scroll.
-    fn fit_to_tab(&self, window: &mut Window, cx: &App) {
-        let (toolbar, tab) = self.heights.get();
-        if toolbar <= 0.0 { return; }
-        // Modes lays out its own scrolling columns in the tallest window allowed.
-        let tab = if self.page == Page::Settings(Tab::Modes) { MAX_HEIGHT - toolbar } else { tab };
-        if tab <= 0.0 { return; }
-        let screen = window.display(cx).map_or(f32::MAX, |display| f32::from(display.bounds().size.height) - SCREEN_MARGIN);
-        let wanted = (toolbar + tab).ceil().clamp(MIN_HEIGHT, MAX_HEIGHT.min(screen).max(MIN_HEIGHT));
-        if (wanted - f32::from(window.viewport_size().height)).abs() > 1.0 {
-            platform::resize(window, self.native, size(px(WIDTH), px(wanted)));
-        }
+    /// What a page needs as it opens: Listening's meters run only while it shows; Sessions counts.
+    fn opened(&mut self, cx: &mut Context<Self>) {
+        if self.page == Page::Settings(Tab::Listening) { self.permissions = Permissions::read(); }
+        self.sync_audio(cx);
+        if self.page == Page::Settings(Tab::History) { self.count_sessions(cx); }
     }
 
-    fn toolbar(&self, title: &'static str, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut tabs = div().flex().justify_center().gap(px(4.0));
+    fn refresh_permissions(&mut self, cx: &mut Context<Self>) {
+        let read = Permissions::read();
+        self.permissions.mic = read.mic;
+        self.permissions.screen_allowed = read.screen_allowed;
+        self.sync_audio(cx);
+    }
+
+    fn sync_audio(&mut self, cx: &mut Context<Self>) {
+        let overlay = self.overlay.read(cx);
+        let wanted = audio_check::wanted(self.page == Page::Settings(Tab::Listening), &overlay.store.value, &self.permissions, overlay.live_since.is_some());
+        audio_check::sync(self, wanted, cx);
+    }
+
+    /// Count the saved sessions (their folders) off the UI thread.
+    fn count_sessions(&mut self, cx: &mut Context<Self>) {
+        let Some(root) = self.overlay.read(cx).archive.as_ref().map(|archive| archive.root().to_path_buf()) else { return };
+        cx.spawn(async move |this, cx| {
+            let count = cx.background_executor().spawn(async move {
+                std::fs::read_dir(root).map_or(0, |entries| entries.flatten().filter(|entry| entry.path().is_dir()).count())
+            }).await;
+            let _ = this.update(cx, |this, cx| { this.sessions = Some(count); cx.notify(); });
+        }).detach();
+    }
+
+    /// The title beside the traffic lights, and the tabs centred under it.
+    fn title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut tabs = div().flex().items_center().gap(px(4.0));
         for (index, (page, label, icon)) in PAGES.into_iter().enumerate() {
             let selected = page == self.page;
-            tabs = tabs.child(div().id(("tab", index)).w(px(80.0)).flex().flex_col().items_center().gap(px(3.0)).pt(px(6.0)).pb(px(5.0))
-                .rounded(px(8.0)).cursor_pointer()
-                .when(selected, |tab| tab.bg(rgb(0x26282c)))
+            tabs = tabs.child(div().id(("tab", index)).w(px(80.0)).flex_none().flex().flex_col().items_center().gap(px(5.0)).pt(px(9.0)).pb(px(8.0))
+                .rounded(px(crate::ui_v3::RADII.tile)).cursor_pointer()
+                .when(selected, |tab| tab.bg(theme::selected_fill()))
                 .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| this.select(page, cx)))
-                .child(ui::icon(icon, 22.0, if selected { theme::accent_soft() } else { theme::muted() }))
-                .child(div().text_size(px(11.0)).line_height(px(14.0))
-                    .when(selected, |text| text.font_weight(FontWeight::SEMIBOLD).text_color(theme::text()))
-                    .when(!selected, |text| text.text_color(theme::muted()))
+                .child(ui::icon(icon, 20.0, if selected { theme::accent_soft() } else { theme::muted() }))
+                .child(div().text_size(px(12.0)).line_height(px(14.0))
+                    .font_weight(if selected { FontWeight::SEMIBOLD } else { FontWeight::MEDIUM })
+                    .text_color(if selected { theme::text() } else { theme::muted() })
                     .child(label)));
         }
         // The title row sits beside the traffic lights, in the transparent title bar.
-        div().flex().flex_col().gap(px(6.0)).pt(px(10.0)).pb(px(8.0)).px(px(14.0)).bg(rgb(0x17181b)).border_b_1().border_color(theme::divider())
-            .child(div().h(px(16.0)).flex().justify_center().text_size(px(13.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::body()).child(title))
+        div().flex().flex_col().items_center().gap(px(10.0)).pt(px(10.0)).pb(px(12.0)).px(px(14.0)).bg(theme::title_bar())
+            .border_b_1().border_color(theme::divider())
+            .child(div().w_full().h(px(16.0)).flex().justify_center().text_size(px(13.0)).line_height(px(16.0)).font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme::body()).child(TITLE))
             .child(tabs)
     }
 
-    /// The app's name and version, Updates (`settings_view::about`), Run setup again… and Quit.
+    /// About: Run setup again closes Settings as setup opens; it waits while Live is on.
     fn about(&self, cx: &mut Context<Self>) -> AnyElement {
-        let updates = self.overlay.update(cx, |overlay, cx| overlay.updates_section(cx));
-        let about_button = |id: &'static str, label: &'static str| div().id(id).px(px(14.0)).py(px(7.0)).rounded(px(9.0)).cursor_pointer()
-            .border_1().border_color(theme::hairline()).text_size(px(12.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::body()).child(label);
-        // Setup changes what Live uses, so it waits until Live is off. Settings closes as it opens.
         let live = self.overlay.read(cx).live_since.is_some();
         let overlay = self.overlay.clone();
-        let setup = about_button("run-setup", "Run setup again…").when(live, |button| button.opacity(0.45).cursor_default())
-            .when(!live, |button| button.on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                closed(&overlay, cx);
-                window.remove_window();
-                let own = overlay.read(cx).own_window;
-                let _ = own.update(cx, |_, window, cx| overlay.update(cx, |overlay, cx| overlay.open_onboarding(window, cx)));
-            }));
-        div().flex().flex_col().gap(px(22.0)).pt(px(10.0))
-            .child(div().flex().flex_col().items_center().gap(px(10.0))
-                .child(ui::mark(56.0))
-                .child(div().pt(px(6.0)).text_size(px(20.0)).font_weight(FontWeight::BOLD).text_color(theme::text()).child("CluelyRS"))
-                .child(div().text_size(px(12.0)).text_color(theme::muted()).child(format!("Version {}", env!("CARGO_PKG_VERSION")))))
-            .child(updates)
-            .child(div().flex().justify_center().gap(px(8.0))
-                .child(setup)
-                .child(about_button("quit", "Quit CluelyRS").on_mouse_down(MouseButton::Left, |_, _, cx| cx.quit())))
-            .into_any_element()
+        let run_setup = (!live).then(|| Box::new(move |_: &MouseDownEvent, window: &mut Window, cx: &mut App| {
+            closed(&overlay, cx);
+            window.remove_window();
+            let own = overlay.read(cx).own_window;
+            let _ = own.update(cx, |_, window, cx| overlay.update(cx, |overlay, cx| overlay.open_onboarding(window, cx)));
+        }) as WindowAction);
+        self.overlay.update(cx, |overlay, cx| overlay.in_window(cx, |overlay, cx| overlay.mac_about(run_setup, cx))).into_any_element()
     }
+
 }
 
 /// Settings and setup show accounts and keys, so while the overlay hides from screen capture, so do
@@ -221,36 +246,28 @@ pub(crate) fn sync_capture(native: Option<NativeWindow>, applied: &mut Option<bo
 impl Render for SettingsWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         sync_capture(self.native, &mut self.capture_hidden, &self.overlay.read(cx).store.value);
-        let title = PAGES.iter().find(|(page, ..)| *page == self.page).map(|(_, label, _)| *label).unwrap_or("Settings");
-        window.set_window_title(title);
+        window.set_window_title(TITLE);
+        let state = WindowState { levels: [self.audio[0].shown_level(), self.audio[1].shown_level()], sessions: self.sessions };
         let body = match self.page {
-            Page::Settings(tab) => self.overlay.update(cx, |overlay, cx| overlay.settings_window_body(tab, cx)),
+            Page::Settings(tab) => self.overlay.update(cx, |overlay, cx| overlay.settings_window_body(tab, state, cx)),
             Page::About => self.about(cx),
         };
-        self.fit_to_tab(window, cx);
-        let heights = self.heights.clone();
-        let measure = move |toolbar: bool| {
-            let heights = heights.clone();
-            gpui::canvas(move |bounds, window, _| {
-                let (old_toolbar, old_tab) = heights.get();
-                let height = f32::from(bounds.size.height);
-                let new = if toolbar { (height, old_tab) } else { (old_toolbar, height) };
-                if new != (old_toolbar, old_tab) {
-                    heights.set(new);
-                    window.refresh();
-                }
-            }, |_, _, _, _| {}).absolute().top_0().left_0().size_full()
+        let page = if self.page == Page::Settings(Tab::Modes) {
+            // Modes fills the window with its own sidebar and editor.
+            div().flex_1().min_h_0().flex().child(body)
+        } else {
+            div().relative().flex_1().min_h_0()
+                .child(div().id("settings-page").size_full().overflow_y_scroll().track_scroll(&self.scroll)
+                    .child(div().w(px(COLUMN)).mx_auto().pt(px(28.0)).pb(px(36.0)).child(body)))
+                .children(crate::ui_v3::scroll_thumb(&self.scroll, 4.0))
         };
-        div().size_full().flex().flex_col().bg(rgb(0x0f1012)).font_family(theme::FONT).text_color(theme::text())
+        div().size_full().flex().flex_col().bg(theme::window_bg()).font_family(theme::FONT).text_color(theme::text())
             .key_context("SettingsWindow").track_focus(&self.focus)
             .on_action(cx.listener(|this, _: &CloseSettings, window, cx| {
                 closed(&this.overlay, cx);
                 window.remove_window();
             }))
-            .child(div().relative().child(self.toolbar(title, cx)).child(measure(true)))
-            // Modes fills the window with its own scrolling columns; other pages are a centred column.
-            .child(if self.page == Page::Settings(Tab::Modes) { div().id("settings-page").flex_1().min_h_0().flex().child(body) }
-                else { div().id("settings-page").flex_1().min_h_0().overflow_y_scroll()
-                    .child(div().relative().w(px(600.0)).mx_auto().pt(px(22.0)).pb(px(28.0)).child(body).child(measure(false))) })
+            .child(self.title_bar(cx))
+            .child(page)
     }
 }

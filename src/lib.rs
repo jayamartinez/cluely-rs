@@ -45,4 +45,6 @@ pub mod toggles;
 pub mod transcript;
 pub mod transcript_view;
 pub mod ui;
+#[cfg(target_os = "macos")]
+pub mod ui_v3;
 pub mod update;
