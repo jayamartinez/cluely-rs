@@ -5,9 +5,9 @@
 use gpui::{Rgba, rgba};
 use serde::{Deserialize, Serialize};
 
-/// Background opacity, in percent, unless the user picks another: exactly the card's alpha before
-/// the setting existed (0xcc).
-pub const DEFAULT_OPACITY: u8 = 95;
+/// Background opacity, in percent, unless the user picks another: see-through enough to keep the
+/// app underneath in view, solid enough for the answer to read cleanly.
+pub const DEFAULT_OPACITY: u8 = 75;
 /// The opacity slider moves in steps of this many percent.
 pub const OPACITY_STEP: u8 = 5;
 
@@ -60,8 +60,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_default_opacity_keeps_the_card_nearly_solid() {
-        assert_eq!(fill(0x0f1012, DEFAULT_OPACITY), rgba(0x0f1012f2));
+    fn the_default_opacity_is_three_quarters() {
+        assert_eq!(fill(0x0f1012, DEFAULT_OPACITY), rgba(0x0f1012bf));
         assert_eq!(fill(0x121315, 80), rgba(0x121315cc));
     }
 
