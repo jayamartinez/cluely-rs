@@ -363,8 +363,9 @@ pub fn order_front(window: NativeWindow) {
 /// The app icon, drawn on Apple's icon grid (`assets/app-icon`) at 256 and 512 px.
 const APP_ICON: [&[u8]; 2] = [include_bytes!("../../assets/app-icon/app-icon-256.png"), include_bytes!("../../assets/app-icon/app-icon-512.png")];
 
-/// CluelyRS runs as a bare binary, with no bundle for macOS to take an icon from, so its Dock tile
-/// (with "Show in Dock" on) would show a generic one. Give the app its icon instead.
+/// CluelyRS.app has its icon in the bundle, but a bare binary (a development build) has none for
+/// macOS to take, so its Dock tile (with "Show in Dock" on) would show a generic one. Set the icon
+/// at runtime so both show it.
 pub fn set_app_icon() {
     let Some(mtm) = MainThreadMarker::new() else { return };
     // SAFETY: a valid image, set on the main thread.

@@ -1,7 +1,8 @@
 //! The two macOS privacy permissions Live needs, for setup's Permissions step: the microphone
-//! (AVFoundation) and Screen Recording (CoreGraphics), which desktop audio needs. Without a .app
-//! bundle macOS attributes both to the app that started CluelyRS (the terminal, for a development
-//! build). Screen Recording only takes effect in a new process, hence `relaunch_after_exit`.
+//! (AVFoundation) and Screen Recording (CoreGraphics), which desktop audio needs. macOS grants both
+//! to CluelyRS.app (`scripts/bundle-macos.sh`); a bare binary, such as a development build, gets
+//! them through the app that started it (the terminal). Screen Recording only takes effect in a new
+//! process, hence `relaunch_after_exit`.
 
 use std::ffi::OsString;
 use std::path::Path;

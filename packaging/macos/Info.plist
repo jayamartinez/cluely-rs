@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Template for CluelyRS.app: scripts/bundle-macos.sh replaces @VERSION@ with Cargo.toml's version. -->
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>CluelyRS</string>
+	<key>CFBundleExecutable</key>
+	<string>cluely-rs</string>
+	<key>CFBundleIconFile</key>
+	<string>app-icon</string>
+	<key>CFBundleIdentifier</key>
+	<string>io.github.jayamartinez.cluelyrs</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>CluelyRS</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>@VERSION@</string>
+	<key>CFBundleVersion</key>
+	<string>@VERSION@</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.productivity</string>
+	<key>LSArchitecturePriority</key>
+	<array>
+		<string>arm64</string>
+	</array>
+	<key>LSMinimumSystemVersion</key>
+	<string>13.0</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSHumanReadableCopyright</key>
+	<string>© 2026 jayamartinez. MIT License.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>CluelyRS listens to your microphone during a Live session to transcribe your side of the conversation.</string>
+</dict>
+</plist>
