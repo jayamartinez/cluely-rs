@@ -1,156 +1,304 @@
-# CluelyRS
+# cluely-rs
 
-A native, keyboard-driven assistant overlay for Windows, built in Rust on [GPUI](https://gpui.rs). Press Start, and every
-question you ask is answered with a fresh screenshot of what you're looking at, by the model you choose: your ChatGPT
-subscription, your Claude subscription, or your own API key.
+cluely without electron.
 
-## Requirements
+same idea. one native app. about 95% less ram at idle on my mac.
 
-- Windows 10 2004 or later (hiding from screen capture needs `WDA_EXCLUDEFROMCAPTURE`)
-- Rust stable with the MSVC toolchain (Visual Studio 2022 Build Tools, including its CMake and Ninja components)
-- CMake 3.18 or later and [Git for Windows](https://git-scm.com/download/win) (its bash applies parakeet.cpp's ggml
-  patches during the build)
-- Optional, for subscription answers:
-  - [Codex CLI](https://github.com/openai/codex) signed in with ChatGPT, for **ChatGPT subscription**
-  - [Claude Code](https://claude.com/claude-code) signed in with a Claude plan, for **Claude subscription**
+i wanted an ai overlay, not a bloated browser pretending to be one.
 
-## Run
+so i built one in rust + [gpui](https://gpui.rs). it sees your screen, listens, and answers with your chatgpt subscription, claude subscription, or your own api key.
+
+no new subscription to me. and it stays undetected.
+
+![cluely-rs overlay](assets/previews/00-hero.png)
+
+## what it does
+
+- **native.** rust + gpui. not electron.
+- **sees your screen.** fresh screenshot with every question.
+- **hears both sides.** mic and desktop audio stay separate.
+- **transcribes locally.** nvidia parakeet realtime on your machine. deepgram is an option too.
+- **your models, not mine.** chatgpt, claude, or an api key.
+- **keeps the receipts.** session transcripts, screenshots, answers, summaries, search.
+- **undetected.** capture exclusion on supported systems, click-through overlay, and keyboard controls.
+
+![live assist answering a system design question](assets/previews/08-live-assist.png)
+
+## there when you need it. out of sight when you don't.
+- **hidden from supported captures.** the overlay can be excluded from supported screenshot and screen-sharing capture paths. windows uses `WDA_EXCLUDEFROMCAPTURE` on supported versions.
+- **click-through.** most of the overlay doesn't intercept your mouse. the app underneath still works.
+- **keyboard-first.** open it, ask, move it, scroll, hide it. no window juggling.
+- **on your terms.** turn listening on when you want it, stop it when you're done.
+
+capture exclusion depends on the os and capture method, and doesn't guarantee invisibility to every recorder, monitoring tool, or physical camera. macos behavior still needs platform-specific verification.
+
+
+## benchmarks
+
+measured against cluely 2.1.24.
+
+| idle (average) | cluely | cluely-rs |
+|---|---:|---:|
+| memory | 515.9 MB | **26.1 MB** |
+| cpu | **0.34%** | 0.75% |
+| processes | 10 | **1** |
+
+**26mb vs 516mb.** about **95% less idle memory**. **20x less** to sit there and do nothing.
+
+cluely did use less idle cpu.
+
+### transcription latency
+
+| | median after speech ends |
+|---|---:|
+| cluely-rs, parakeet (local) | **540 ms** |
+| cluely-rs, deepgram | 710 ms |
+| cluely 2.1.24 | 830 ms |
+
+**540ms local. 830ms cluely.** parakeet committed speech about **35% sooner** on this recording, without sending audio to a transcription service.
+
+this measures speech-to-transcript delay, not time to an ai answer. parakeet made more recognition mistakes on the sample. numbers are numbers.
+
+### answer speed
+
+not every model is equally fast. that's why you get to choose.
+
+some **warm** timings from the benchmark tool:
+
+| setup | first text | full answer |
+|---|---:|---:|
+| claude code / opus 5.5 | **0.71 s** | 2.78 s |
+| codex / gpt-6-luna | 1.38 s | **1.95 s** |
+| api key / haiku 5.5 | 1.79 s | 2.47 s |
+| cluely | 1.93 s | 3.30 s |
+
+not calling these a head-to-head win. these were measured through the cluely-rs benchmark tool with a prepared screenshot, not the in-app hotkey. cluely was timed through its actual overlay, with an unknown model.
+
+<details>
+
+<summary>how i measured this</summary>
+
+- apple m1 (8 cores), 8 gb ram, macos 26.3; cluely 2.1.24 free plan vs cluely-rs release build.
+- idle cpu/memory averaged over 62 seconds (cluely) and 60 seconds (cluely-rs), counting the whole app process tree. mac cpu percentages are per core (100% = one busy core).
+- transcription used the same 31-second recording of six interview questions; the comparison was a single run per app/provider, not a multi-day study.
+- answer-time "warm" values are medians of three requests after one cold request per setup. they include screenshot request preparation and measure the benchmark tool, not in-app hotkey-to-text latency.
+- excluded invalid early memory measurements that double-counted processes, polling-contaminated cpu readings, and estimated/halved meeting results. no windows comparison or answer-quality comparison was done.
+
+</details>
+
+## install
+
+### windows
+
+grab `CluelyRS-<version>-setup.exe` from [releases](https://github.com/jayamartinez/cluely-rs/releases) once one is up and run it. that's it. no wizard, no admin prompt. it installs for your account into `%LOCALAPPDATA%\Programs\CluelyRS` and opens cluely-rs when it's done.
+
+needs windows 10 (version 2004+) on a 64-bit pc with avx2 (pretty much any intel or amd cpu from 2013 on). new versions install right over the old one. your settings, sessions, and keys stay.
+
+the installer isn't code-signed, so windows will complain:
+
+- **"windows protected your pc"** (smartscreen): click **more info**, then **run anyway**.
+- **microsoft defender** might flag or remove it. hiding from screen capture + global shortcuts looks a lot like what malware does. restore it from windows security → virus & threat protection → protection history (**allow on device**), and add an exclusion for `%LOCALAPPDATA%\Programs\CluelyRS` if it keeps happening.
+
+uninstall from settings → apps → installed apps. it asks if you also want your settings, sessions, speech models, and saved api keys gone. say no and they're kept for a reinstall.
+
+### macos
+
+installer coming soon. build from source for now.
+
+## build it yourself
+
+windows 10 (version 2004+) or macos 13+ for the supported platform-specific features described below.
+
+for windows builds you'll need:
+
+- rust stable + msvc toolchain (vs 2022 build tools, including cmake and ninja)
+- cmake 3.18+
+- [git for windows](https://git-scm.com/download/win)
 
 ```powershell
+
 git clone git@github.com:jayamartinez/cluely-rs.git
+
 cd cluely-rs
+
 git submodule update --init third_party/parakeet.cpp
+
 git -C third_party/parakeet.cpp submodule update --init third_party/ggml
 
-cargo run            # debug build with a console for logs
-cargo run --release  # windowless release build
+cargo run            # debug + console logs
+
+cargo run --release  # no console window
+
 ```
 
-Only those two submodules are needed; parakeet.cpp's optional CED and voice-detect submodules aren't built. ggml's
-paths are deep, so in a long folder path run `git config --global core.longpaths true` first.
-
-## Using it
-
-| Shortcut | Action |
-|---|---|
-| `Ctrl Shift Space` | Jump into the text box; press again to return to your app, keeping what you typed (Enter sends and returns you to your app; Esc returns without sending) |
-| `Ctrl ↵` | Assist: answer from your screen and the conversation (starts Live if it's off) |
-| `Ctrl \` | Show / hide the overlay |
-| `Ctrl Alt ←↑↓→` | Move the overlay (hold to glide) |
-| `Ctrl Alt Shift ↑↓` | Scroll the answer |
-| `Esc` | Close settings |
-
-Live starts when you click the waveform in the toolbar, type a question, press a quick action or press Assist, and stops
-when you click the waveform again; no shortcut stops it.
-
-Only the pill, the quick actions and the text box take mouse clicks; answers and the space around the overlay are
-click-through. Move and scroll shortcuts are claimed only while the overlay is visible, so other apps keep them. Assist
-(`Ctrl ↵`) is claimed for as long as CluelyRS runs, so other apps don't get that chord.
-
-**Answer with** (Settings → Model):
-
-- **ChatGPT subscription** through the official Codex app-server, with tools, shell, MCP and network disabled, a read-only
-  sandbox and an empty working folder.
-- **Claude subscription** through the official Claude Code CLI with tools disabled.
-- **Your API key**: Anthropic, OpenAI, OpenRouter, Google Gemini, xAI, Groq, DeepSeek, Mistral, Together, local Ollama or
-  LM Studio, or any OpenAI-compatible URL. Keys are stored in Windows Credential Manager or the macOS Keychain.
-
-Answers are short by default (one to three sentences, longer only when the question is genuinely complex) and use
-the least reasoning the provider offers, so the first words stream within a few seconds. When Live starts, the ChatGPT
-subscription opens its thread and the Claude subscription starts a Claude Code process for the next answer, so neither
-pays its start-up when you press Assist. **Smart mode** (Settings → Model) asks for deeper reasoning and allows longer
-answers when speed matters less.
-
-**Listening** (Settings → Listening): a Live session transcribes desktop audio as **Them** and the microphone as **Me**
-on this PC with NVIDIA Parakeet Realtime (English). The Live panel shows the last two lines and what each side is
-saying right now; words the recognizer may still change are muted and italic, and a blue **?** marks a likely question.
-The model (176 MB) downloads from Settings the first time, verified against a pinned checksum. Each source has its own
-toggle and device picker (the system default unless you choose one). On macOS (13 or later), desktop audio is everything
-the system plays, captured with ScreenCaptureKit, so its picker has the single option **System audio**; it needs the
-Screen Recording permission (System Settings → Privacy & Security → Screen & System Audio Recording), and without it the
-Live panel says so while the microphone keeps working. Turn **Transcribe conversations** off to keep Live to the screen
-and typed questions.
-
-**Deepgram** (optional): choose it under *Transcribe with* and save a Deepgram API key (kept in Windows Credential
-Manager or the macOS Keychain). Live audio is then streamed to Deepgram's Nova-3 instead of being transcribed on
-this PC; everything after the recognizer (transcript, endpointing, the overlay) is the same, so the two can be compared
-with the latency report.
-
-**Sessions** (clock button in the pill) is a normal window for reviewing past Live sessions: an AI summary at three
-lengths, timeline, transcript, answers and the screenshots they used, plus search and "Ask about this session".
-
-## Where data lives
-
-| What | Windows | macOS |
-|---|---|---|
-| Settings | `%APPDATA%\CluelyRS\settings.json` | `~/Library/Application Support/CluelyRS/settings.json` |
-| Sessions and screenshots | `%APPDATA%\CluelyRS\sessions\` | `~/Library/Application Support/CluelyRS/sessions/` |
-| API keys | Windows Credential Manager, service `CluelyRS` | login Keychain, service `CluelyRS` |
-| Speech models | `%LOCALAPPDATA%\CluelyRS\models\` | `~/Library/Application Support/CluelyRS/models/` |
-
-Sessions are kept 7 days, 30 days or forever. Speech models download when first needed (~176 MB for Parakeet).
-
-Nothing is uploaded except the requests sent to the provider you choose.
-
-## Development
+yes, the two submodules are needed. if windows complains about long paths:
 
 ```powershell
-cargo test
-cargo clippy --all-targets
 
-# Review the Sessions window with synthetic data
-.\dev\make-demo-sessions.ps1 -Out "$env:TEMP\cluelyrs-demo"
-$env:CLUELYRS_DATA_DIR = "$env:TEMP\cluelyrs-demo"; cargo run
+git config --global core.longpaths true
+
 ```
 
-Latency: set `CLUELYRS_METRICS=1` to export each Live session's pipeline timings as JSON Lines to
-`%LOCALAPPDATA%\CluelyRS\metrics\`, together with what each source captured (`live-<time>-me.wav` and `-them.wav`,
-16 kHz mono). Compare runs with `cargo run --example latency_report -- <file.jsonl>...` (grouped per provider).
-`cargo run --example answer_latency -- [--warm] [--smart]` times one Assist-shaped answer through your selected provider
-(one real request each run, so it uses your subscription or key).
+want to use a subscription instead of an api key? install and sign in to [codex cli](https://github.com/openai/codex) for chatgpt or [claude code](https://claude.com/claude-code) for claude.
 
-Transcription: `cargo run --example parakeet_bench -- download` installs the Parakeet model, and the same example
-benchmarks speed, latency, CPU, memory and long-run reliability (usage at the top of `examples/parakeet_bench.rs`; test
-speech from `dev/make-bench-audio.ps1`). `cargo run --example transcript_replay -- <wav>` replays a recording (the
-bench clip, or a session's exported capture) through the whole pipeline at real-time pace and prints where speech
-starts and stops against every partial, end-of-utterance and commit, which is how endpointing problems from real
-sessions are reproduced. `cargo run --example endpoint_eval` scores endpointing over every capture in the metrics
-folder plus the bench clip: commits, fragments, merged questions, commit latency after speech stops and the reason
-mix, per file. It runs Parakeet once per file (cached) and replays on the audio clock, so it is fast, deterministic
-and makes no paid calls; `--config` compares settings side by side and `--stall` / `--slow` / `--lag` simulate a
-recognizer falling behind a busy CPU (usage at the top of `examples/endpoint_eval.rs`). Changes to third-party code
-and builds are documented in [PATCHES.md](PATCHES.md).
+## controls
 
-`CLUELYRS_ALLOW_CAPTURE=1` lets the overlay appear in screenshots while developing. Live provider tests are ignored by
-default (`cargo test -- --ignored` with the variables documented in `claude_cli.rs` and `codex.rs`).
+it's keyboard-first. the whole point is not having to stop what you're doing.
 
-## Status
+| shortcut | what happens |
+|---|---|
+| `Ctrl Shift Space` | focus the text box; press again to return to your app without losing the draft. enter sends; esc returns without sending |
+| `Ctrl ↵` | assist: answer using your current screen + conversation. starts live if needed |
+| `Ctrl \\` | show/hide the overlay |
+| `Ctrl Alt ←↑↓→` | move the overlay. hold to glide |
+| `Ctrl Alt Shift ↑↓` | scroll the answer |
+| `Esc` | close settings |
 
-Working: overlay, keybinds, click-through, capture hiding, providers, screenshot on send, sessions and AI notes, live
-on-device transcription of Me and Them with the transcript saved per session, and answers that read the conversation
-heard so far (the last 10 minutes or 40 lines, plus what is being said right now). During a Live session the ChatGPT
-provider keeps one restricted Codex thread, so each answer only sends what is new; a newer request cancels the one in
-flight, and nothing from a cancelled request reaches the screen.
-Transcription runs on this PC with Parakeet, or optionally through Deepgram with your own key. Endpointing is
-evaluated on recorded sessions, and a recognizer that falls behind (a busy CPU) is endpointed on its own clock, so
-it neither cuts lines into fragments nor merges questions while it catches up.
-Not yet: speculative answers.
+live turns on when you click the waveform, type something, use a quick action, or press assist. click the waveform again to stop it. there's no stop-live shortcut yet.
 
-## Third-party
+only the pill, quick actions, and text box accept clicks. the rest is click-through. movement/scroll shortcuts are grabbed only while the overlay is visible. `Ctrl ↵` is grabbed for as long as the app runs.
 
-- [parakeet.cpp](https://github.com/mudler/parakeet.cpp) (MIT) and [ggml](https://github.com/ggml-org/ggml) (MIT),
-  built from the pinned submodule; see [PATCHES.md](PATCHES.md).
-- Setup's and Settings' icons and logos in `assets/`: [Lucide](https://lucide.dev) icons (ISC License) in `assets/icons/` (`archive`,
-  `arrow-right`, `chevrons-up-down`, `circle-user`, `cloud`, `download`, `hourglass`, `key-round`, `laptop-minimal`,
-  `link`, `lock`, `message-square`, `mic`, `mic-off`, `monitor`, `move`, `panel-bottom`, `plug`, `radio`, `send`,
-  `server`, `shield`, `sparkles`, `terminal`, `type`, `volume-2`, `zap`); the Anthropic, Claude, Deepgram, Google Gemini, Ollama
-  and OpenRouter logos from [Simple Icons](https://simpleicons.org) (CC0) and the OpenAI, xAI, Groq, DeepSeek,
-  Mistral, Together AI and LM Studio logos from [Lobe Icons](https://github.com/lobehub/lobe-icons) (MIT) in
-  `assets/logos/`. The logos are their owners' trademarks, shown
-  only to name the services CluelyRS connects to.
-- [NVIDIA Parakeet Realtime EOU 120M](https://huggingface.co/nvidia/parakeet_realtime_eou_120m-v1), NVIDIA Open Model
-  License. Downloaded at runtime, not distributed with CluelyRS.
+![model provider settings](assets/previews/02-settings-model.png)
 
-## License
+## pick your model
 
-CluelyRS is released under the [MIT License](LICENSE). The third-party components above keep their own licenses.
+i don't think you should have to pay to use a model you're already paying for.
+
+- **chatgpt subscription:** official codex app-server. tools, shell, mcp, and network disabled; read-only sandbox; empty working folder.
+- **claude subscription:** official claude code cli, tools disabled.
+- **api key:** anthropic, openai, openrouter, gemini, xai, groq, deepseek, mistral, together, ollama, lm studio, or any openai-compatible endpoint.
+
+api keys go in windows credential manager or macos keychain not plaintext.
+
+answers start short (1–3 sentences) and use the lightest reasoning available. waiting ten seconds for a two-word answer isn't a feature. **smart mode** is there when the question deserves more thought.
+
+when live starts, the chatgpt provider warms its thread and claude starts its process, so your first assist doesn't have to pay all that startup cost.
+
+## modes
+
+make different modes for interviews, meetings, whatever. give each its own instructions and files. switch when you need to.
+
+![customizable modes](assets/previews/03-settings-modes.png)
+
+## listening
+
+live transcribes **me** (mic) and **them** (desktop audio) separately using nvidia parakeet realtime. the panel shows the last two lines and what's being said right now. uncertain words appear muted/italic until the recognizer settles. a blue **?** means it probably heard a question.
+
+parakeet downloads through settings on first use (~176mb, checksum verified). mic and desktop audio have separate toggles and device selectors.
+
+on macos 13+, desktop capture uses screencapturekit. it's whatever your system is playing, listed as **system audio**. you'll need screen recording permission. if you don't grant it, the app tells you and mic capture can still work.
+
+turn off **transcribe conversations** if you just want the overlay + screen questions.
+
+prefer cloud transcription? add a deepgram key and choose nova-3 in settings. everything after speech recognition works the same, so you can compare the two using the latency report.
+
+## sessions
+
+sessions include transcripts, screenshots, answers, a timeline, search, ai summaries, and **ask about this session**.
+
+retention is configurable: 7 days, 30 days, or forever.
+
+### where your stuff lives
+
+| | windows | macos |
+|---|---|---|
+| settings | `%APPDATA%\CluelyRS\settings.json` | `~/Library/Application Support/CluelyRS/settings.json` |
+| sessions/screenshots | `%APPDATA%\CluelyRS\sessions\\` | `~/Library/Application Support/CluelyRS/sessions/` |
+| keys | credential manager (`CluelyRS`) | login keychain (`CluelyRS`) |
+| speech models | `%LOCALAPPDATA%\CluelyRS\models\\` | `~/Library/Application Support/CluelyRS/models/` |
+| logs (errors + crash reports) | `%LOCALAPPDATA%\CluelyRS\logs\cluelyrs.log` | `~/Library/Logs/CluelyRS/cluelyrs.log` |
+
+nothing gets uploaded except requests to whichever ai or transcription provider you chose.
+
+## developing
+
+```powershell
+
+cargo test
+
+cargo clippy --all-targets
+
+# make fake sessions to test the history ui
+
+.\dev\make-demo-sessions.ps1 -Out "$env:TEMP\cluelyrs-demo"
+
+$env:CLUELYRS_DATA_DIR = "$env:TEMP\cluelyrs-demo"; cargo run
+
+```
+
+i benchmarked the pipeline instead of guessing why it felt slow.
+
+**latency:** set `CLUELYRS_METRICS=1`. every live session dumps pipeline timings to JSONL under `%LOCALAPPDATA%\CluelyRS\metrics\\`, plus the captured `live-<time>-me.wav` and `-them.wav` (16khz mono).
+
+```powershell
+
+cargo run --example latency_report -- <file.jsonl>...
+
+cargo run --example answer_latency -- [--warm] [--smart]
+
+```
+
+that second command makes one real provider request per run, using your selected key or subscription.
+
+**transcription / endpointing:**
+
+```powershell
+
+cargo run --example parakeet_bench -- download
+
+cargo run --example transcript_replay -- <wav>
+
+cargo run --example endpoint_eval
+
+```
+
+`parakeet_bench` benchmarks speed, cpu, memory, latency, and long-run reliability. generate test speech with `dev/make-bench-audio.ps1`.
+
+`transcript_replay` feeds a recording through the actual pipeline in real time and shows partial transcripts, final commits, and speech boundaries. because real audio breaks in ways clean demos never show.
+
+`endpoint_eval` scores recorded captures plus the bench clip: fragments, merged questions, commit latency, and why each commit happened. it caches recognition and replays on the audio clock, so comparisons are deterministic and don't cost api money. `--config`, `--stall`, `--slow`, and `--lag` let you compare configs and simulate a recognizer falling behind.
+
+see [patches.md](PATCHES.md) for third-party changes and build details.
+
+need the overlay to show up in screenshots during development? `CLUELYRS_ALLOW_CAPTURE=1`.
+
+live provider tests are ignored by default. run `cargo test -- --ignored` with the variables described in `claude_cli.rs` and `codex.rs`.
+
+release builds write their errors and crash reports to the log file instead of a console. want that in a debug build? `CLUELYRS_LOG_FILE=1`.
+
+### releasing (windows)
+
+set `version` in `Cargo.toml`, then push a matching tag (`git tag v0.1.0 && git push origin v0.1.0`). the [release (windows)](.github/workflows/release-windows.yml) workflow builds the exe (static c runtime, so no visual c++ redistributable needed), generates `THIRD_PARTY_LICENSES.txt` with [cargo-about](https://github.com/EmbarkStudios/cargo-about), builds the [inno setup](https://jrsoftware.org/isinfo.php) installer, and attaches it to a draft release. publish the draft once the macos build is on it too. one `.exe` per release: the update check grabs the first one it finds.
+
+same build locally, with inno setup 6.5+ and `cargo install cargo-about --locked --features cli`:
+
+```powershell
+cargo build --release
+.\dev\third-party-licenses.ps1
+.\dev\build-installer.ps1   # target\installer\CluelyRS-<version>-setup.exe
+```
+
+gpui's release build compiles shaders with `fxc.exe` from windows sdk 10.0.26100. on another sdk, point `GPUI_FXC_PATH` at its `fxc.exe` (e.g. `C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621.0\x64\fxc.exe`).
+
+## what's working
+
+- native overlay, keybinds, click-through, screen-capture hiding
+- model providers + fresh screenshots on send
+- local live transcription for me/them, or deepgram if you want
+- session history, saved transcripts, summaries
+- answers that know what was said recently (last 10 minutes or 40 lines, plus what's being said now)
+- persistent restricted codex thread during live sessions: only new context is sent each time
+- new request cancels the old one. cancelled output doesn't leak into the overlay
+- endpointing tested against real recordings, including when recognition falls behind on a busy cpu
+
+## credits / licenses
+
+- [parakeet.cpp](https://github.com/mudler/parakeet.cpp) (mit) + [ggml](https://github.com/ggml-org/ggml) (mit), pinned as submodules. see [PATCHES.md](PATCHES.md).
+
+- [nvidia parakeet realtime eou 120m](https://huggingface.co/nvidia/parakeet_realtime_eou_120m-v1), nvidia open model license. downloaded at runtime, not shipped with the repo.
+
+- icons from [lucide](https://lucide.dev) (isc) and provider logos from [simple icons](https://simpleicons.org) (cc0) and [lobe icons](https://github.com/lobehub/lobe-icons) (mit). the logos are their owners' trademarks, shown only to name the services cluely-rs connects to.
+
+- the installer ships `THIRD_PARTY_LICENSES.txt` with every rust crate's license plus the above.
+
+cluely-rs itself is [mit licensed](LICENSE).
