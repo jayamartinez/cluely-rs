@@ -1,14 +1,13 @@
-# Builds the Windows installer. A pushed `v*` tag attaches it to a draft GitHub release (published
-# by hand once the macOS build is attached too); a manual run only uploads it as a workflow artifact.
+# Builds the Windows installer on demand (Actions → Release (Windows) → Run workflow) and uploads it
+# as a workflow artifact, to attach to the release by hand. Not run on tags: publishing a release
+# creates its tag, and a run then must not touch the release that was just published.
 name: Release (Windows)
 
 on:
-  push:
-    tags: ["v*"]
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   installer:
@@ -80,11 +79,3 @@ jobs:
           path: |
             target/installer/*.exe
             target/release/cluely_rs.pdb
-
-      # Exactly one .exe on the release: the updater offers the first .exe it finds.
-      - name: Draft release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          draft: true
-          files: target/installer/*.exe
