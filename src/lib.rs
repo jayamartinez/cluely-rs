@@ -18,6 +18,7 @@ pub mod input;
 #[cfg(target_os = "macos")]
 pub mod key_check;
 pub mod listening;
+pub mod logging;
 pub mod markdown;
 pub mod metrics;
 pub mod models;
