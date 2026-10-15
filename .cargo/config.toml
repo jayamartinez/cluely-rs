@@ -3,3 +3,8 @@
 # targets it too instead of the build machine's SDK. Ignored for non-Apple targets.
 [env]
 MACOSX_DEPLOYMENT_TARGET = "13.0"
+
+# Link the C runtime statically so the exe runs on PCs without the Visual C++ Redistributable.
+# build.rs builds parakeet.cpp with the matching static runtime.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
