@@ -4,24 +4,7 @@ A native, keyboard-driven assistant overlay for Windows, built in Rust on [GPUI]
 question you ask is answered with a fresh screenshot of what you're looking at, by the model you choose: your ChatGPT
 subscription, your Claude subscription, or your own API key.
 
-## Install (Windows)
-
-Download `CluelyRS-<version>-setup.exe` from [Releases](https://github.com/jayamartinez/cluely-rs/releases) and run
-it. It installs for your account only (no administrator prompt) into `%LOCALAPPDATA%\Programs\CluelyRS`, and needs
-Windows 10 2004 or later on a 64-bit PC with AVX2 (any Intel or AMD CPU from about 2013 on). Install a newer version over
-the old one; your settings, sessions and keys stay.
-
-The installer isn't code-signed, so Windows warns about it:
-
-- **"Windows protected your PC"** (SmartScreen): click **More info**, then **Run anyway**.
-- **Microsoft Defender** may flag or remove CluelyRS, because hiding from screen capture and global shortcuts look like
-  what malware does. Restore it from Windows Security → Virus & threat protection → Protection history (choose
-  **Allow on device**), and add an exclusion for `%LOCALAPPDATA%\Programs\CluelyRS` if it happens again.
-
-Uninstall from Settings → Apps → Installed apps. It asks whether to also delete your settings, sessions, speech models
-and saved API keys; otherwise they're kept for a later reinstall.
-
-## Requirements (building from source)
+## Requirements
 
 - Windows 10 2004 or later (hiding from screen capture needs `WDA_EXCLUDEFROMCAPTURE`)
 - Rust stable with the MSVC toolchain (Visual Studio 2022 Build Tools, including its CMake and Ninja components)
@@ -104,7 +87,6 @@ lengths, timeline, transcript, answers and the screenshots they used, plus searc
 | Sessions and screenshots | `%APPDATA%\CluelyRS\sessions\` | `~/Library/Application Support/CluelyRS/sessions/` |
 | API keys | Windows Credential Manager, service `CluelyRS` | login Keychain, service `CluelyRS` |
 | Speech models | `%LOCALAPPDATA%\CluelyRS\models\` | `~/Library/Application Support/CluelyRS/models/` |
-| Logs (errors and crash reports) | `%LOCALAPPDATA%\CluelyRS\logs\cluelyrs.log` | `~/Library/Logs/CluelyRS/cluelyrs.log` |
 
 Sessions are kept 7 days, 30 days or forever. Speech models download when first needed (~176 MB for Parakeet).
 
@@ -141,25 +123,6 @@ and builds are documented in [PATCHES.md](PATCHES.md).
 
 `CLUELYRS_ALLOW_CAPTURE=1` lets the overlay appear in screenshots while developing. Live provider tests are ignored by
 default (`cargo test -- --ignored` with the variables documented in `claude_cli.rs` and `codex.rs`).
-`CLUELYRS_LOG_FILE=1` makes a debug build write the log file as a release build does, instead of the console.
-
-### Releasing (Windows)
-
-Set `version` in `Cargo.toml`, then push a matching tag (`git tag v0.1.0 && git push origin v0.1.0`). The
-[Release (Windows)](.github/workflows/release-windows.yml) workflow builds the exe (static C runtime, so no Visual C++
-Redistributable is needed), generates `THIRD_PARTY_LICENSES.txt` with [cargo-about](https://github.com/EmbarkStudios/cargo-about),
-builds the [Inno Setup](https://jrsoftware.org/isinfo.php) installer and attaches it to a draft release; publish the
-draft once the macOS build is attached too. Attach exactly one `.exe`: the update check offers the first one it finds.
-The same build locally, with Inno Setup 6.5 or later (for the PNG wizard images in `installer/`) and `cargo install cargo-about --locked --features cli`:
-
-```powershell
-cargo build --release
-.\dev\third-party-licenses.ps1
-.\dev\build-installer.ps1   # target\installer\CluelyRS-<version>-setup.exe
-```
-
-gpui's release build compiles shaders with `fxc.exe` from Windows SDK 10.0.26100; with another SDK, set
-`GPUI_FXC_PATH` to its `fxc.exe` (for example `C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621.0\x64\fxc.exe`).
 
 ## Status
 
