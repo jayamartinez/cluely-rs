@@ -1,0 +1,21 @@
+CluelyRS includes the following third-party software.
+
+Overview
+========
+{{#each overview}}
+{{{name}}} ({{{count}}} crate{{#if (ne count 1)}}s{{/if}})
+{{/each}}
+
+{{#each licenses}}
+================================================================================
+License: {{{name}}}
+================================================================================
+
+Used by:
+{{#each used_by}}
+  - {{{crate.name}}} {{{crate.version}}}
+{{/each}}
+
+{{{text}}}
+
+{{/each}}
