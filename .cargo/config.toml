@@ -1,0 +1,5 @@
+# The oldest macOS CluelyRS supports. Cargo hands [env] to rustc (the binary's LC_BUILD_VERSION)
+# and every build script, so cc/cmake-built native code (parakeet.cpp/ggml, the shim, ring, ...)
+# targets it too instead of the build machine's SDK. Ignored for non-Apple targets.
+[env]
+MACOSX_DEPLOYMENT_TARGET = "13.0"

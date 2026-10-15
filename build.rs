@@ -64,6 +64,11 @@ fn main() {
         config.define("GGML_BLAS", "OFF")
             .define("PARAKEET_GGML_METAL", "ON")
             .define("GGML_METAL_EMBED_LIBRARY", "ON");
+        // Build for the oldest supported macOS (.cargo/config.toml), not the build machine's SDK,
+        // or the objects can need a newer macOS than the binary claims to run on.
+        println!("cargo:rerun-if-env-changed=MACOSX_DEPLOYMENT_TARGET");
+        let deployment_target = env::var("MACOSX_DEPLOYMENT_TARGET").unwrap_or_else(|_| "13.0".into());
+        config.define("CMAKE_OSX_DEPLOYMENT_TARGET", deployment_target);
     }
     config.build_target("parakeet");
     // Upstream applies its in-tree ggml patches (one is a CPU matmul speedup) with bash at
