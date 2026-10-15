@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Builds dist/CluelyRS.app and the drag-to-Applications dist/CluelyRS-<version>.dmg (plus its
-# .sha256) for Apple silicon. Uses only Xcode command line tools and hdiutil.
+# .sha256) for Apple silicon. Uses Xcode command line tools, plus dmgbuild (pinned, installed into a
+# venv under target/ on first use; needs python3) to lay out the DMG window without Finder.
 #
 # The app is signed with a stable identity (by default the free "Apple Development" certificate in
 # the login keychain), not notarized and without the hardened runtime. A stable identity keeps the
@@ -49,6 +50,10 @@ exe_name=cluely-rs # CFBundleExecutable in packaging/macos/Info.plist
 min_macos=13.0
 plist_template=packaging/macos/Info.plist
 icon=assets/app-icon/app-icon.icns
+dmg_settings=packaging/macos/dmg_settings.py
+dmg_background=packaging/macos/dmg-background.tiff # rendered from dmg-background.svg
+dmgbuild_version=1.6.7
+dmgbuild_venv=target/dmgbuild-venv
 
 # The [package] version, without needing cargo metadata or jq.
 version=$(awk '
@@ -59,6 +64,26 @@ version=$(awk '
 
 [[ -f "$plist_template" ]] || die "missing $plist_template"
 [[ -f "$icon" ]] || die "missing $icon"
+[[ -f "$dmg_settings" ]] || die "missing $dmg_settings"
+[[ -f "$dmg_background" ]] || die "missing $dmg_background"
+
+# dmgbuild writes the DMG window's .DS_Store (background, icon positions) directly, which plain
+# hdiutil can't, and avoids scripting Finder. Set it up before building so a failure is quick.
+dmgbuild_installed() {
+    "$dmgbuild_venv/bin/python" -c 'import importlib.metadata as m, sys; sys.exit(m.version("dmgbuild") != sys.argv[1])' \
+        "$dmgbuild_version" 2>/dev/null
+}
+if ! dmgbuild_installed; then
+    echo "==> Installing dmgbuild $dmgbuild_version into $dmgbuild_venv"
+    command -v python3 >/dev/null || die "python3 is required to build the DMG (dmgbuild)"
+    rm -rf "$dmgbuild_venv"
+    python3 -m venv "$dmgbuild_venv" || die "couldn't create a Python venv at $dmgbuild_venv"
+    # ds_store and mac_alias are dmgbuild's only dependencies; pinned too so the layout is reproducible.
+    "$dmgbuild_venv/bin/python" -m pip install --quiet --disable-pip-version-check \
+        "dmgbuild==$dmgbuild_version" "ds_store==1.3.3" "mac_alias==2.2.3" \
+        || die "couldn't install dmgbuild $dmgbuild_version into $dmgbuild_venv"
+    dmgbuild_installed || die "dmgbuild $dmgbuild_version is not importable from $dmgbuild_venv"
+fi
 
 if (( skip_build )); then
     echo "==> Skipping build (--skip-build)"
@@ -125,13 +150,13 @@ codesign --verify --strict --verbose=2 "$app"
 
 echo "==> Building the DMG"
 dmg=$dist/$app_name-$version.dmg
-staging=$(mktemp -d "${TMPDIR:-/tmp}/cluelyrs-dmg.XXXXXX")
-trap 'rm -rf "$staging"' EXIT
-chmod 755 "$staging" # mktemp makes it 0700, which would become the volume root's mode
-# ditto copies the signed bundle exactly; the Applications symlink makes the DMG drag-to-install.
-ditto "$app" "$staging/$app_name.app"
-ln -s /Applications "$staging/Applications"
-hdiutil create -volname "$app_name $version" -srcfolder "$staging" -fs HFS+ -format UDZO -ov "$dmg" >/dev/null
+rm -f "$dmg" "$dmg.sha256"
+# The app is copied with ditto (signature intact) next to an Applications symlink; the window
+# layout (size, background, icon positions, hidden chrome) lives in $dmg_settings.
+"$dmgbuild_venv/bin/python" -m dmgbuild -s "$dmg_settings" \
+    -D app="$app" -D icon="$root/$icon" -D background="$root/$dmg_background" \
+    "$app_name $version" "$dmg" || die "dmgbuild failed"
+[[ -f "$dmg" ]] || die "dmgbuild produced no $dmg"
 hdiutil verify "$dmg" >/dev/null
 # File name only, so `shasum -c` works next to the downloaded DMG.
 (cd "$dist" && shasum -a 256 "$(basename "$dmg")" > "$(basename "$dmg").sha256")
