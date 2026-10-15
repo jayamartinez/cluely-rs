@@ -1,0 +1,90 @@
+# Builds the Windows installer. A pushed `v*` tag attaches it to a draft GitHub release (published
+# by hand once the macOS build is attached too); a manual run only uploads it as a workflow artifact.
+name: Release (Windows)
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  installer:
+    runs-on: windows-2022
+    timeout-minutes: 90
+    steps:
+      # ggml's paths are deep enough to hit MAX_PATH.
+      - run: git config --system core.longpaths true
+
+      - uses: actions/checkout@v4
+
+      # Only the two submodules the build needs (parakeet.cpp's optional ones aren't built).
+      - name: Submodules
+        run: |
+          git submodule update --init third_party/parakeet.cpp
+          git -C third_party/parakeet.cpp submodule update --init third_party/ggml
+
+      - name: Tag matches Cargo.toml
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"' | Select-Object -First 1).Matches.Groups[1].Value
+          if ("v$version" -ne "${{ github.ref_name }}") { throw "Tag ${{ github.ref_name }} doesn't match Cargo.toml version $version" }
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about
+
+      # gpui compiles its shaders with fxc.exe in release builds and only looks in one Windows SDK
+      # version; point it at the newest one installed.
+      - name: Find fxc.exe
+        shell: pwsh
+        run: |
+          $fxc = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\fxc.exe" | Sort-Object FullName | Select-Object -Last 1
+          "GPUI_FXC_PATH=$($fxc.FullName)" >> $env:GITHUB_ENV
+
+      - name: Build
+        run: cargo build --release --locked
+
+      # The CRT is linked statically (.cargo/config.toml, build.rs) so the exe runs without the
+      # Visual C++ Redistributable; fail if it ever needs those DLLs again.
+      - name: No VC++ runtime DLLs
+        shell: pwsh
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath
+          $dumpbin = Get-ChildItem "$vs\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" | Select-Object -Last 1
+          $dependents = & $dumpbin.FullName /dependents target/release/cluely-rs.exe
+          $dependents
+          if ($dependents -match '(?i)vcruntime|msvcp') { throw "cluely-rs.exe depends on the VC++ runtime" }
+
+      - name: Third-party licenses
+        shell: pwsh
+        run: ./dev/third-party-licenses.ps1 -Out target/THIRD_PARTY_LICENSES.txt
+
+      - name: Inno Setup
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
+
+      - name: Installer
+        shell: pwsh
+        run: ./dev/build-installer.ps1 -Exe target/release/cluely-rs.exe -Licenses target/THIRD_PARTY_LICENSES.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CluelyRS-windows
+          path: |
+            target/installer/*.exe
+            target/release/cluely_rs.pdb
+
+      # Exactly one .exe on the release: the updater offers the first .exe it finds.
+      - name: Draft release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          files: target/installer/*.exe

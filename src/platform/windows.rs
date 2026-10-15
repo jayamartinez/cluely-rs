@@ -333,7 +333,7 @@ pub fn open_folder(path: &Path) -> std::io::Result<()> { Command::new("explorer.
 pub fn run_in_console(program: &Path, args: &[&str]) -> std::io::Result<std::process::Child> {
     use std::os::windows::process::CommandExt;
     const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
-    Command::new(program).args(args).creation_flags(CREATE_NEW_CONSOLE).spawn()
+    crate::logging::with_original_stderr(|| Command::new(program).args(args).creation_flags(CREATE_NEW_CONSOLE).spawn())
 }
 
 /// Bring the console window of process `pid` (from [`run_in_console`]) to the front, as far as

@@ -20,7 +20,7 @@ fn main() {
     }
 
     #[cfg(windows)]
-    app_icon();
+    windows_resources();
 
     // ScreenCaptureKit (macOS desktop audio) is weak-linked so CluelyRS still launches on macOS
     // before 12.3, which doesn't have it; desktop audio checks the OS version before touching it.
@@ -30,6 +30,9 @@ fn main() {
 
     let msvc = env::var("CARGO_CFG_TARGET_ENV").is_ok_and(|env| env == "msvc");
     let apple = env::var("CARGO_CFG_TARGET_OS").is_ok_and(|os| os == "macos");
+    // .cargo/config.toml links the C runtime statically on MSVC (no Visual C++ Redistributable
+    // needed on the user's PC); parakeet must use the same runtime or the link fails (LNK2038).
+    let static_crt = msvc && env::var("CARGO_CFG_TARGET_FEATURE").is_ok_and(|f| f.split(',').any(|f| f == "crt-static"));
 
     let mut config = cmake::Config::new(&source);
     // Always optimize: a debug ggml is far too slow for real-time inference, even in dev builds.
@@ -49,7 +52,12 @@ fn main() {
     if msvc {
         // Setting flags replaces CMake's MSVC defaults, so restore them (exceptions and RTTI matter:
         // parakeet.cpp reports load errors with C++ exceptions).
-        config.cflag("/DWIN32 /D_WINDOWS")
+        // CMake picks the runtime from CMAKE_MSVC_RUNTIME_LIBRARY (policy CMP0091), which would
+        // otherwise add /MD after the cmake crate's own /MT.
+        config.static_crt(static_crt)
+            .define("CMAKE_POLICY_DEFAULT_CMP0091", "NEW")
+            .define("CMAKE_MSVC_RUNTIME_LIBRARY", if static_crt { "MultiThreaded" } else { "MultiThreadedDLL" })
+            .cflag("/DWIN32 /D_WINDOWS")
             .cxxflag("/DWIN32 /D_WINDOWS /GR /EHsc")
             // Upstream v0.6.0 uses POSIX fseeko/ftello, which MSVC spells _fseeki64/_ftelli64.
             .cxxflag("/Dfseeko=_fseeki64")
@@ -113,14 +121,21 @@ fn main() {
 }
 
 /// Windows: the app icon as icon resource 1, which GPUI gives its windows (the taskbar and Alt+Tab
-/// show it) and Explorer shows for the exe. Without a resource compiler the build goes on with the
-/// generic icon.
+/// show it) and Explorer shows for the exe, plus the version information Explorer, Task Manager
+/// and the installer show. FileVersion and ProductVersion default to the package version. Without
+/// a resource compiler the build goes on with the generic icon and no version information.
 #[cfg(windows)]
-fn app_icon() {
+fn windows_resources() {
     println!("cargo:rerun-if-changed=assets/app-icon/app-icon.ico");
     let mut resource = winresource::WindowsResource::new();
-    resource.set_icon_with_id("assets/app-icon/app-icon.ico", "1");
-    if let Err(error) = resource.compile() { println!("cargo:warning=app icon not embedded: {error}"); }
+    resource.set_icon_with_id("assets/app-icon/app-icon.ico", "1")
+        .set("ProductName", "CluelyRS")
+        .set("FileDescription", "CluelyRS")
+        .set("CompanyName", "Jay Martinez")
+        .set("LegalCopyright", "Copyright (c) 2026 Jay Martinez")
+        .set("OriginalFilename", "CluelyRS.exe")
+        .set("InternalName", "CluelyRS");
+    if let Err(error) = resource.compile() { println!("cargo:warning=Windows resources not embedded: {error}"); }
 }
 
 fn find_file(dir: &Path, name: &str) -> Option<PathBuf> {

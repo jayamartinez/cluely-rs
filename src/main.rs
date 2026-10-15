@@ -1,6 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use cluely_rs::{assets, cli_path, hotkeys, input, modes, overlay, platform, text_area};
+use cluely_rs::{assets, cli_path, hotkeys, input, logging, modes, overlay, platform, text_area};
 use gpui::{App, AppContext, Application, Bounds, WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, point, px, size};
 
 #[cfg(target_os = "macos")]
@@ -23,6 +23,8 @@ fn app_menu(cx: &mut App) {
 fn main() {
     // Started only to read a file added to a mode (in its own process, so a bad file can't hang the app).
     if let Some(code) = modes::extract::child_main() { std::process::exit(code); }
+    // A release build has no console: stderr and panics go to the log file instead.
+    logging::init();
     // One CluelyRS per user: launching it again shows the running copy's overlay instead (Windows).
     let Some(relaunches) = platform::single_instance() else { return };
     // Read the login shell's PATH (macOS) or the saved PATH (Windows) now, off the UI thread, so

@@ -76,3 +76,10 @@ winresource = "0.1"
 # Only this crate's own code stays unoptimized, so rebuilds while developing remain quick.
 [profile.dev.package."*"]
 opt-level = 3
+
+# Shipped builds: smaller and faster through cross-crate LTO, with line tables so crash traces
+# resolve against the .pdb that stays beside the build (MSVC keeps debug info out of the exe).
+[profile.release]
+lto = "thin"
+codegen-units = 1
+debug = "line-tables-only"
