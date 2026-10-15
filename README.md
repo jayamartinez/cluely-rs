@@ -103,7 +103,24 @@ uninstall from settings → apps → installed apps. it asks if you also want yo
 
 ### macos
 
-installer coming soon. build from source for now.
+grab `CluelyRS-<version>.dmg` from [releases](https://github.com/jayamartinez/cluely-rs/releases) once one is up. open it, drag **CluelyRS** onto **applications**, eject it, and open CluelyRS from your applications folder. run it from there, not from the dmg or downloads: macos runs apps from those from a temporary read-only copy, and that breaks **quit & reopen**.
+
+needs an apple silicon mac (no intel build) on macos 13 ventura or later. want to check the download? run `shasum -a 256 -c CluelyRS-<version>.dmg.sha256` in the folder you saved both files to.
+
+the app isn't notarized by apple (that takes a paid developer account), so the first open gets blocked: **"apple could not verify CluelyRS is free of malware"** (or **"can't be opened"** on older macos). click **done** (or **ok**), then open system settings → privacy & security, scroll down to security, click **open anyway** next to the message about CluelyRS, sign in with your password, and click **open anyway** again. once per download. on macos 13–14, control-click → **open** works too. sequoia (15) and later don't allow that anymore.
+
+the first launch walks you through setup: welcome, permissions, model, transcription. it asks for two permissions:
+
+- **microphone**: transcribes your side (**me**).
+- **screen & system audio recording**: screenshots for your questions and desktop audio (**them**). macos only applies it after a restart, so setup offers **quit & reopen** and picks up where you left off.
+
+change them later in system settings → privacy & security → microphone / screen & system audio recording.
+
+cluely-rs lives in the menu bar, not the dock. turn on **show in dock** in settings if you want it there and in ⌘tab.
+
+cluely-rs tells you when there's a new version. download the new dmg and drag it into applications, choosing **replace**. your settings, sessions, keys, and permissions stay. you might have to do the **open anyway** step again.
+
+to uninstall, quit from the menu bar icon and drag `/Applications/CluelyRS.app` to the trash. that keeps your stuff for a reinstall. to remove it too, delete `~/Library/Application Support/CluelyRS` (settings, sessions, modes, speech models) and `~/Library/Logs/CluelyRS`, and the `CluelyRS` items in keychain access (saved api keys).
 
 ## build it yourself
 
@@ -138,6 +155,8 @@ yes, the two submodules are needed. if windows complains about long paths:
 git config --global core.longpaths true
 
 ```
+
+on macos (apple silicon, 13+) you'll need rust stable, the xcode command line tools (`xcode-select --install`), and cmake. same commands, minus the long paths thing.
 
 want to use a subscription instead of an api key? install and sign in to [codex cli](https://github.com/openai/codex) for chatgpt or [claude code](https://claude.com/claude-code) for claude.
 
@@ -280,6 +299,16 @@ cargo build --release
 
 gpui's release build compiles shaders with `fxc.exe` from windows sdk 10.0.26100. on another sdk, point `GPUI_FXC_PATH` at its `fxc.exe` (e.g. `C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621.0\x64\fxc.exe`).
 
+### releasing (macos)
+
+no workflow for this one yet. on an apple silicon mac, with python3 and `cargo install cargo-about --locked --features cli` for the license notices:
+
+```sh
+scripts/bundle-macos.sh   # dist/CluelyRS-<version>.dmg + .sha256
+```
+
+it builds the release, signs `CluelyRS.app` with the first **apple development** certificate in your login keychain (or `CLUELYRS_SIGN_IDENTITY`), and lays out the dmg with [dmgbuild](https://github.com/dmgbuild/dmgbuild), which it installs into a venv under `target/` on first use. a free apple development certificate is enough. with none it signs ad-hoc, and then every build looks like a new app to macos: permissions and keychain access reset. attach the `.dmg` and its `.sha256` to the draft release. one `.dmg` per release: the update check grabs the first one it finds.
+
 ## what's working
 
 - native overlay, keybinds, click-through, screen-capture hiding
@@ -299,6 +328,6 @@ gpui's release build compiles shaders with `fxc.exe` from windows sdk 10.0.26100
 
 - icons from [lucide](https://lucide.dev) (isc) and provider logos from [simple icons](https://simpleicons.org) (cc0) and [lobe icons](https://github.com/lobehub/lobe-icons) (mit). the logos are their owners' trademarks, shown only to name the services cluely-rs connects to.
 
-- the installer ships `THIRD_PARTY_LICENSES.txt` with every rust crate's license plus the above.
+- the windows installer and the macos app ship `THIRD_PARTY_LICENSES.txt` with every rust crate's license plus the above.
 
 cluely-rs itself is [mit licensed](LICENSE).

@@ -64,6 +64,8 @@ version=$(awk '
 
 [[ -f "$plist_template" ]] || die "missing $plist_template"
 [[ -f "$icon" ]] || die "missing $icon"
+# Checked up front, before the long build: the license notices need it.
+command -v cargo-about >/dev/null || die "cargo-about is needed for the license notices: cargo install cargo-about --locked --features cli"
 [[ -f "$dmg_settings" ]] || die "missing $dmg_settings"
 [[ -f "$dmg_background" ]] || die "missing $dmg_background"
 
@@ -119,6 +121,11 @@ rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$binary" "$app/Contents/MacOS/$exe_name"
 cp "$icon" "$app/Contents/Resources/app-icon.icns"
+# The licenses go with the app, as the Windows installer ships them: CluelyRS's own and the notices
+# of everything built into it.
+cp LICENSE "$app/Contents/Resources/LICENSE.txt"
+dev/third-party-licenses.sh target/THIRD_PARTY_LICENSES.txt >/dev/null
+cp target/THIRD_PARTY_LICENSES.txt "$app/Contents/Resources/THIRD_PARTY_LICENSES.txt"
 sed "s/@VERSION@/$version/g" "$plist_template" > "$app/Contents/Info.plist"
 printf 'APPL????' > "$app/Contents/PkgInfo"
 plutil -lint "$app/Contents/Info.plist" >/dev/null || die "Info.plist is invalid"

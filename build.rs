@@ -109,6 +109,13 @@ fn main() {
     if msvc { println!("cargo:rustc-link-lib=advapi32"); }
     if apple {
         for framework in ["Accelerate", "Foundation", "Metal", "MetalKit"] { println!("cargo:rustc-link-lib=framework={framework}"); }
+        // ggml-metal's `@available` checks call compiler-rt's __isPlatformVersionAtLeast, which clang
+        // links on its own but rustc doesn't. std's weak copy of it is gone under the release
+        // profile's LTO (nothing Rust uses it), so link clang's runtime for it.
+        match clang_runtime() {
+            Some(runtime) => println!("cargo:rustc-link-arg={}", runtime.display()),
+            None => println!("cargo:warning=libclang_rt.osx.a not found; release builds may fail to link"),
+        }
     }
 
     cc::Build::new()
@@ -136,6 +143,13 @@ fn windows_resources() {
         .set("OriginalFilename", "CluelyRS.exe")
         .set("InternalName", "CluelyRS");
     if let Err(error) = resource.compile() { println!("cargo:warning=Windows resources not embedded: {error}"); }
+}
+
+/// macOS: the Xcode toolchain's compiler runtime (`libclang_rt.osx.a`).
+fn clang_runtime() -> Option<PathBuf> {
+    let output = Command::new("xcrun").args(["clang", "-print-file-name=libclang_rt.osx.a"]).output().ok()?;
+    let path = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    path.is_absolute().then_some(path).filter(|path| path.exists())
 }
 
 fn find_file(dir: &Path, name: &str) -> Option<PathBuf> {
