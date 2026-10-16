@@ -36,7 +36,7 @@ impl Overlay {
     /// Background opacity: what it does, a preview on macOS (the overlay itself may be elsewhere on the
     /// screen; on Windows it is right above this panel), then the slider, its value and Reset.
     fn opacity_row(&self, cx: &mut Context<Self>) -> Div {
-        let percent = self.store.value.background_opacity.min(100);
+        let percent = appearance::clamp(self.store.value.background_opacity);
         let reset = div().w(px(RESET_WIDTH)).flex_none().flex().justify_end()
             .when(percent != DEFAULT_OPACITY, |slot| slot.child(button("opacity-reset", "Reset", false)
                 .on_mouse_down(MouseButton::Left, listen(cx, |this, _, window, cx| this.update_settings(|s| s.background_opacity = DEFAULT_OPACITY, window, cx)))));
@@ -61,7 +61,7 @@ impl Overlay {
     /// The track, filled up to the value, with a tick at the default. Pressing jumps to the pointer and
     /// dragging follows it; both show on the overlay at once, and the release saves.
     pub(crate) fn opacity_slider(&self, percent: u8, cx: &mut Context<Self>) -> impl IntoElement {
-        let fraction = f32::from(percent) / 100.0;
+        let fraction = appearance::slider_fraction(percent);
         // Where the track was laid out this frame, so a press or a drag maps to a value.
         let track: Rc<Cell<Option<Bounds<Pixels>>>> = Rc::default();
         let value_at = {
@@ -74,7 +74,7 @@ impl Overlay {
             .child(gpui::canvas(move |bounds, _, _| track.set(Some(bounds)), |_, _, _, _| {}).absolute().top_0().left_0().size_full())
             .child(bar().w_full().bg(theme::hairline()))
             .child(bar().w(relative(fraction)).bg(theme::accent()))
-            .child(div().absolute().top(px(3.0)).left(relative(f32::from(DEFAULT_OPACITY) / 100.0)).ml(px(-1.0)).w(px(2.0)).h(px(14.0))
+            .child(div().absolute().top(px(3.0)).left(relative(appearance::slider_fraction(DEFAULT_OPACITY))).ml(px(-1.0)).w(px(2.0)).h(px(14.0))
                 .rounded(px(1.0)).bg(gpui::rgb(0x4a4d52)))
             .child(div().absolute().top(px(1.0)).left(relative(fraction)).ml(px(-9.0)).size(px(18.0)).rounded_full()
                 .bg(theme::text()).border_1().border_color(gpui::rgb(0x0f1012)))
@@ -93,6 +93,7 @@ impl Overlay {
     pub(super) fn preview_opacity(&mut self, percent: u8, cx: &mut Context<Self>) {
         if self.store.value.background_opacity == percent { return; }
         self.store.value.background_opacity = percent;
+        self.dim_placeholders(cx);
         cx.notify();
     }
 

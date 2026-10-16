@@ -75,7 +75,7 @@ impl Overlay {
             row("icons/setup-pictures.svg", "Attach a screenshot to every message", None, switch("screen-on-send", s.screen_on_send, |s, v| s.screen_on_send = v, cx)).into_any_element(),
             row("icons/setup-power.svg", "Start Live when the app opens", None, switch("live-on-launch", s.start_live_on_launch, |s, v| s.start_live_on_launch = v, cx)).into_any_element(),
         ];
-        let percent = s.background_opacity.min(100);
+        let percent = appearance::clamp(s.background_opacity);
         let opacity = div().flex().flex_none().items_center().gap(px(12.0))
             .child(self.mac_opacity_slider(percent, cx))
             .child(div().w(px(36.0)).flex().justify_end().text_size(px(12.0)).line_height(px(16.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text())
@@ -105,7 +105,7 @@ impl Overlay {
     /// overlay (and the preview) at once; the release saves.
     fn mac_opacity_slider(&self, percent: u8, cx: &mut Context<Self>) -> impl IntoElement {
         const WIDTH: f32 = 162.0;
-        let fraction = f32::from(percent) / 100.0;
+        let fraction = appearance::slider_fraction(percent);
         let track: Rc<Cell<Option<Bounds<Pixels>>>> = Rc::default();
         let value_at = {
             let track = track.clone();

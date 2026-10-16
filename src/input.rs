@@ -11,7 +11,7 @@ use std::time::Duration;
 use gpui::{
     App, Bounds, ClipboardItem, ContentMask, Context, CursorStyle, ElementId, ElementInputHandler, Entity,
     EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, KeyBinding, LayoutId, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, ShapedLine, SharedString, Style, Task, TextRun,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, Rgba, ShapedLine, SharedString, Style, Task, TextRun,
     UTF16Selection, UnderlineStyle, Window, actions, div, fill, point, prelude::*, px, relative, size,
 };
 
@@ -35,6 +35,7 @@ pub struct TextInput {
     focus_handle: FocusHandle,
     content: SharedString,
     placeholder: SharedString,
+    placeholder_color: Rgba,
     masked: bool,
     /// Text size and line height, in pixels.
     text_size: (f32, f32),
@@ -90,6 +91,7 @@ impl TextInput {
             focus_handle: cx.focus_handle(),
             content: SharedString::default(),
             placeholder: placeholder.into(),
+            placeholder_color: theme::placeholder(),
             masked: false,
             text_size: (TEXT_SIZE, LINE_HEIGHT),
             revealed: false,
@@ -131,6 +133,12 @@ impl TextInput {
     /// Render the text as bullets (for API keys). Copy and cut are disabled while masked.
     pub fn set_placeholder(&mut self, placeholder: impl Into<SharedString>, cx: &mut Context<Self>) {
         self.placeholder = placeholder.into();
+        cx.notify();
+    }
+
+    /// The placeholder's colour, for a box on the see-through overlay card.
+    pub fn set_placeholder_color(&mut self, color: Rgba, cx: &mut Context<Self>) {
+        self.placeholder_color = color;
         cx.notify();
     }
 
@@ -502,7 +510,7 @@ impl Element for TextElement {
         let style = window.text_style();
         let showing_placeholder = input.content.is_empty();
         let (display_text, text_color): (SharedString, _) = if showing_placeholder {
-            (input.placeholder.clone(), theme::placeholder().into())
+            (input.placeholder.clone(), input.placeholder_color.into())
         } else if input.shows_bullets() {
             (MASK.repeat(input.content.chars().count()).into(), style.color)
         } else {

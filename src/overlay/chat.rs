@@ -7,7 +7,7 @@
 //! own. Nothing is kept across launches, so the overlay starts empty after a restart.
 
 use chrono::{DateTime, Local};
-use gpui::{Div, FontWeight, IntoElement, ParentElement, SharedString, Styled, div, prelude::*, px};
+use gpui::{Div, FontWeight, IntoElement, ParentElement, Rgba, SharedString, Styled, div, prelude::*, px};
 
 use super::{Status, Turn};
 use crate::answer::Exchange;
@@ -50,19 +50,19 @@ pub(super) fn history(turns: &[Turn], session: u64) -> Vec<Exchange> {
 }
 
 /// The hairline with its centred label between two sessions.
-pub(super) fn divider(label: &str) -> impl IntoElement {
+pub(super) fn divider(label: &str, muted: Rgba) -> impl IntoElement {
     let rule = || div().flex_1().h(px(1.0)).bg(theme::hairline());
     div().flex().items_center().gap(px(10.0)).pt(px(4.0))
         .child(rule())
-        .child(div().flex_none().text_size(px(11.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::muted()).child(label.to_string()))
+        .child(div().flex_none().text_size(px(11.0)).font_weight(FontWeight::SEMIBOLD).text_color(muted).child(label.to_string()))
         .child(rule())
 }
 
 /// Under an answer Live stopped while it was being written.
-pub(super) fn stopped_mark() -> impl IntoElement {
+pub(super) fn stopped_mark(muted: Rgba) -> impl IntoElement {
     div().flex().items_center().gap(px(6.0)).pt(px(6.0))
-        .child(div().size(px(6.0)).flex_none().rounded_full().bg(theme::muted()))
-        .child(div().text_size(px(12.0)).text_color(theme::muted()).child("Stopped when Live ended"))
+        .child(div().size(px(6.0)).flex_none().rounded_full().bg(muted))
+        .child(div().text_size(px(12.0)).text_color(muted).child("Stopped when Live ended"))
 }
 
 /// The icon beside a quick action, in its pill and in the bubble of a turn it asked. Assist has none:
@@ -89,10 +89,10 @@ pub(super) fn bubble(turn: &Turn) -> Div {
 }
 
 /// Above an answer that was given a screenshot.
-pub(super) fn viewed_screen() -> Div {
+pub(super) fn viewed_screen(color: Rgba) -> Div {
     div().flex().items_center().gap(px(6.0))
-        .child(ui::icon("icons/monitor.svg", 12.0, theme::placeholder()))
-        .child(div().text_size(px(11.0)).line_height(px(14.0)).text_color(theme::placeholder()).child("Viewed screen"))
+        .child(ui::icon("icons/monitor.svg", 12.0, color))
+        .child(div().text_size(px(11.0)).line_height(px(14.0)).text_color(color).child("Viewed screen"))
 }
 
 /// An answer as the model wrote it, in the body style. `size` is Settings › Window › Answer text

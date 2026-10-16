@@ -10,19 +10,41 @@ use serde::{Deserialize, Serialize};
 pub const DEFAULT_OPACITY: u8 = 75;
 /// The opacity slider moves in steps of this many percent.
 pub const OPACITY_STEP: u8 = 5;
+/// The most see-through the card gets. Below it, light text over a light window can't be read
+/// whatever its colour: the answer's text clears 3:1 contrast over white at about 48 %.
+pub const MIN_OPACITY: u8 = 50;
 
-/// `rgb` (0xRRGGBB) at `percent` opacity (values above 100 count as 100). Only the card's own fill
+/// `percent` within the slider's range; settings saved before the floor, or edited by hand, may hold
+/// any value.
+pub fn clamp(percent: u8) -> u8 { percent.clamp(MIN_OPACITY, 100) }
+
+/// `rgb` (0xRRGGBB) at `percent` opacity, within the slider's range (`clamp`). Only the card's own fill
 /// takes the setting; text, buttons and the hairline border stay solid at every value.
-pub fn fill(rgb: u32, percent: u8) -> Rgba { rgba((rgb << 8) | alpha(percent)) }
+pub fn fill(rgb: u32, percent: u8) -> Rgba { rgba((rgb << 8) | alpha(clamp(percent))) }
+
+/// A dim text colour (`theme::muted`, `theme::placeholder`) for text on the card at `percent`
+/// opacity. At the default and above it stays as designed; below it, it moves toward
+/// `theme::text` (all the way at `MIN_OPACITY`), so it still reads when a light window shows
+/// through the card.
+pub fn legible(dim: Rgba, percent: u8) -> Rgba {
+    let lift = f32::from(DEFAULT_OPACITY.saturating_sub(clamp(percent))) / f32::from(DEFAULT_OPACITY - MIN_OPACITY);
+    let text = crate::theme::text();
+    let mix = |from: f32, to: f32| from + (to - from) * lift;
+    Rgba { r: mix(dim.r, text.r), g: mix(dim.g, text.g), b: mix(dim.b, text.b), a: dim.a }
+}
 
 /// `percent` as an 8-bit alpha, rounded: 80 % is 0xcc.
 fn alpha(percent: u8) -> u32 { (u32::from(percent.min(100)) * 255 + 50) / 100 }
 
-/// The opacity at `fraction` (0 to 1) of the slider's track, to the nearest step.
+/// The opacity at `fraction` (0 to 1) of the slider's track, to the nearest step. The track runs
+/// from `MIN_OPACITY` to 100 %.
 pub fn opacity_at(fraction: f32) -> u8 {
-    let steps = f32::from(100 / OPACITY_STEP);
-    (fraction.clamp(0.0, 1.0) * steps).round() as u8 * OPACITY_STEP
+    let steps = f32::from((100 - MIN_OPACITY) / OPACITY_STEP);
+    MIN_OPACITY + (fraction.clamp(0.0, 1.0) * steps).round() as u8 * OPACITY_STEP
 }
+
+/// Where `percent` sits along the slider's track, 0 to 1.
+pub fn slider_fraction(percent: u8) -> f32 { f32::from(clamp(percent) - MIN_OPACITY) / f32::from(100 - MIN_OPACITY) }
 
 /// The size of the overlay's reading text: the answers and the transcript strip. The text box and
 /// the toolbar keep theirs.
@@ -66,23 +88,36 @@ mod tests {
     }
 
     #[test]
-    fn opacity_covers_the_whole_range_and_clamps_above_it() {
-        assert_eq!(fill(0x121315, 0), rgba(0x12131500), "0 % leaves only text, buttons and the border");
+    fn opacity_stays_between_the_floor_and_solid() {
+        assert_eq!(fill(0x121315, MIN_OPACITY), rgba(0x12131580));
+        assert_eq!(fill(0x121315, 0), rgba(0x12131580), "a value saved before the floor counts as the floor");
         assert_eq!(fill(0x121315, 100), rgba(0x121315ff));
         assert_eq!(fill(0x121315, 250), rgba(0x121315ff), "a hand-edited value past 100 counts as 100");
         assert_eq!(alpha(50), 128);
     }
 
     #[test]
-    fn the_slider_snaps_to_five_percent_steps() {
-        assert_eq!(opacity_at(0.0), 0);
+    fn dim_text_brightens_only_below_the_default_opacity() {
+        let dim = crate::theme::placeholder();
+        assert_eq!(legible(dim, 100), dim);
+        assert_eq!(legible(dim, DEFAULT_OPACITY), dim);
+        assert_eq!(legible(dim, MIN_OPACITY), crate::theme::text());
+        assert_eq!(legible(dim, 0), crate::theme::text());
+        let halfway = legible(dim, 60);
+        assert!(dim.r < halfway.r && halfway.r < crate::theme::text().r);
+    }
+
+    #[test]
+    fn the_slider_runs_from_the_floor_in_five_percent_steps() {
+        assert_eq!(opacity_at(0.0), MIN_OPACITY);
         assert_eq!(opacity_at(1.0), 100);
-        assert_eq!(opacity_at(0.8), 80);
-        assert_eq!(opacity_at(0.42), 40);
-        assert_eq!(opacity_at(0.43), 45);
-        assert_eq!(opacity_at(-3.0), 0, "dragged past the left end");
+        assert_eq!(opacity_at(0.5), 75);
+        assert_eq!(opacity_at(0.44), 70);
+        assert_eq!(opacity_at(0.46), 75);
+        assert_eq!(opacity_at(-3.0), MIN_OPACITY, "dragged past the left end");
         assert_eq!(opacity_at(7.0), 100, "dragged past the right end");
-        assert!((0..=20).map(|step| opacity_at(step as f32 / 20.0)).all(|value| value % OPACITY_STEP == 0));
+        assert!((0..=10).map(|step| opacity_at(step as f32 / 10.0)).all(|value| value % OPACITY_STEP == 0));
+        assert!((MIN_OPACITY..=100).step_by(5).all(|percent| opacity_at(slider_fraction(percent)) == percent));
     }
 
     #[test]
