@@ -15,6 +15,20 @@ pub const OPACITY_STEP: u8 = 5;
 /// takes the setting; text, buttons and the hairline border stay solid at every value.
 pub fn fill(rgb: u32, percent: u8) -> Rgba { rgba((rgb << 8) | alpha(percent)) }
 
+/// A dim text colour (`theme::muted`, `theme::placeholder`) for text on the card at `percent`
+/// opacity. At the default and above it stays as designed; below it, it moves toward
+/// `theme::text` (all the way at `LEGIBLE_FLOOR`), so it still reads when a light window shows
+/// through the card.
+pub fn legible(dim: Rgba, percent: u8) -> Rgba {
+    let lift = f32::from(DEFAULT_OPACITY.saturating_sub(percent).min(DEFAULT_OPACITY - LEGIBLE_FLOOR)) / f32::from(DEFAULT_OPACITY - LEGIBLE_FLOOR);
+    let text = crate::theme::text();
+    let mix = |from: f32, to: f32| from + (to - from) * lift;
+    Rgba { r: mix(dim.r, text.r), g: mix(dim.g, text.g), b: mix(dim.b, text.b), a: dim.a }
+}
+
+/// The opacity at and below which dim text is as bright as the answer.
+const LEGIBLE_FLOOR: u8 = 30;
+
 /// `percent` as an 8-bit alpha, rounded: 80 % is 0xcc.
 fn alpha(percent: u8) -> u32 { (u32::from(percent.min(100)) * 255 + 50) / 100 }
 
@@ -71,6 +85,17 @@ mod tests {
         assert_eq!(fill(0x121315, 100), rgba(0x121315ff));
         assert_eq!(fill(0x121315, 250), rgba(0x121315ff), "a hand-edited value past 100 counts as 100");
         assert_eq!(alpha(50), 128);
+    }
+
+    #[test]
+    fn dim_text_brightens_only_below_the_default_opacity() {
+        let dim = crate::theme::placeholder();
+        assert_eq!(legible(dim, 100), dim);
+        assert_eq!(legible(dim, DEFAULT_OPACITY), dim);
+        assert_eq!(legible(dim, LEGIBLE_FLOOR), crate::theme::text());
+        assert_eq!(legible(dim, 0), crate::theme::text());
+        let halfway = legible(dim, 50);
+        assert!(dim.r < halfway.r && halfway.r < crate::theme::text().r);
     }
 
     #[test]

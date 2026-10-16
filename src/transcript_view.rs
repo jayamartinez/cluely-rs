@@ -195,15 +195,16 @@ impl Overlay {
     /// speaker ("THEM", "YOU"), or the transcription status while nothing has been heard (or when a
     /// source failed).
     pub(crate) fn transcript_block(&self) -> gpui::Div {
+        let muted = self.dim(theme::muted());
         let (dot, label, color): (gpui::Rgba, SharedString, gpui::Rgba) = match &self.listening_status {
-            None if !self.store.value.transcribe => (theme::muted(), "Transcription off · turn it on in Settings → Listening".into(), theme::muted()),
-            None => (theme::muted(), "Not transcribing".into(), theme::muted()),
-            Some(Status::Starting) => (theme::accent_soft(), "Starting transcription…".into(), theme::muted()),
+            None if !self.store.value.transcribe => (muted, "Transcription off · turn it on in Settings → Listening".into(), muted),
+            None => (muted, "Not transcribing".into(), muted),
+            Some(Status::Starting) => (theme::accent_soft(), "Starting transcription…".into(), muted),
             Some(Status::Listening { sources, failures }) => {
                 let heard = sources.iter().map(|source| source.label()).collect::<Vec<_>>().join(" + ");
                 let mut text = format!("Transcribing {heard}");
                 for (source, error) in failures { text.push_str(&format!(" · {} unavailable: {error}", source.label())); }
-                (theme::ok(), text.into(), theme::muted())
+                (theme::ok(), text.into(), muted)
             }
             Some(Status::Failed(reason)) => (gpui::rgb(0xffb4a8), reason.clone().into(), gpui::rgb(0xffb4a8)),
         };
@@ -219,7 +220,7 @@ impl Overlay {
         let mut lines = div().flex().flex_col().justify_end().gap(px(ROW_GAP)).max_h(px(strip.height())).overflow_hidden();
         let shown = self.transcript.len().saturating_sub(SHOWN_LINES);
         for line in &self.transcript[shown..] {
-            lines = lines.child(transcript_row(strip, line.source, committed_text(&line.text)));
+            lines = lines.child(transcript_row(strip, line.source, committed_text(&line.text, muted)));
         }
         for source in [Source::Them, Source::Me] {
             if let Some(line) = &self.provisional[slot(source)] { lines = lines.child(transcript_row(strip, source, provisional_text(strip, line))); }
@@ -299,8 +300,8 @@ fn transcript_row(strip: Strip, source: Source, text: AnyElement) -> impl IntoEl
 }
 
 /// One row each, so the strip keeps its height; the full text is in the session archive.
-fn committed_text(text: &str) -> AnyElement {
-    div().text_color(theme::muted()).truncate().child(SharedString::from(text.to_string())).into_any_element()
+fn committed_text(text: &str, muted: gpui::Rgba) -> AnyElement {
+    div().text_color(muted).truncate().child(SharedString::from(text.to_string())).into_any_element()
 }
 
 /// Stable words in the body color, the unstable tail muted and italic, plus a question mark

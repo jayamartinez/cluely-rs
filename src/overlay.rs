@@ -319,7 +319,8 @@ impl Overlay {
         }
         // Live on launch waits for setup to finish (Windows `onboarding`, macOS `finish_onboarding`).
         let start_live = store.value.start_live_on_launch && !setup && !onboarding;
-        let composer = cx.new(|cx| TextInput::new(composer_placeholder(&store.value), cx).with_text_size(14.0, 20.0));
+        let composer_hint = crate::appearance::legible(theme::placeholder(), store.value.background_opacity);
+        let composer = cx.new(|cx| { let mut input = TextInput::new(composer_placeholder(&store.value), cx).with_text_size(14.0, 20.0); input.set_placeholder_color(composer_hint, cx); input });
         let key_input = cx.new(|cx| TextInput::new("Paste your API key", cx).masked(true));
         // macOS has the model typed, with an example id for the provider; Windows lists models below.
         #[cfg(target_os = "macos")]
@@ -437,6 +438,11 @@ impl Overlay {
         // Grows and shrinks around the card's centre, keeping its top edge (the height doesn't change).
         if let Some(native) = self.native && previous.card_width != self.store.value.card_width {
             platform::set_width_centred(native, self.store.value.card_width.window());
+        }
+        if previous.background_opacity != self.store.value.background_opacity {
+            let placeholder = self.dim(theme::placeholder());
+            self.composer.update(cx, |input, cx| input.set_placeholder_color(placeholder, cx));
+            if let Some(panel) = &self.sessions_panel { panel.search.update(cx, |input, cx| input.set_placeholder_color(placeholder, cx)); }
         }
         if previous.screen_on_send != self.store.value.screen_on_send {
             let placeholder = composer_placeholder(&self.store.value);
@@ -1382,35 +1388,36 @@ impl Overlay {
     /// actions.
     fn live_parts(&self, cx: &mut Context<Self>) -> (gpui::Div, gpui::Stateful<gpui::Div>, gpui::Div) {
         let heard = self.transcript_block();
+        let muted = self.dim(theme::muted());
         let mut thread = div().id("thread").flex().flex_col().gap(px(12.0)).flex_1().overflow_y_scroll().track_scroll(&self.scroll);
         if self.turns.is_empty() {
-            thread = thread.child(div().text_size(px(13.0)).text_color(theme::muted())
+            thread = thread.child(div().text_size(px(13.0)).text_color(muted)
                 .child(format!("Press {} to answer from your screen and the conversation.", self.hotkeys.label(Action::Assist))));
         }
         for (index, turn) in self.turns.iter().enumerate() {
-            for divider in self.dividers.iter().filter(|divider| divider.before == index) { thread = thread.child(chat::divider(&divider.label)); }
+            for divider in self.dividers.iter().filter(|divider| divider.before == index) { thread = thread.child(chat::divider(&divider.label, muted)); }
             let header: AnyElement = match turn.auto {
                 Some((utterance, shown_ms)) => {
                     // An early start is shown before its line is committed; then the line's time counts.
                     let heard = self.transcript.iter().find(|line| line.id == utterance).map_or(shown_ms, |line| line.at_ms);
-                    auto_header(turn.id, heard, turn.status == Status::Streaming, self.hits.mark(), cx).into_any_element()
+                    auto_header(turn.id, heard, turn.status == Status::Streaming, muted, self.hits.mark(), cx).into_any_element()
                 }
                 None => chat::bubble(turn).into_any_element(),
             };
             let size = self.store.value.text_size.answer();
             let body: AnyElement = match &turn.status {
                 Status::Failed(reason) => div().text_size(px(13.0)).line_height(px(20.0)).text_color(gpui::rgb(0xffb4a8)).child(reason.clone()).into_any_element(),
-                Status::Streaming if turn.text.is_empty() => div().text_size(px(13.0)).text_color(theme::muted()).child("Thinking…").into_any_element(),
+                Status::Streaming if turn.text.is_empty() => div().text_size(px(13.0)).text_color(muted).child("Thinking…").into_any_element(),
                 _ => div().id(("answer", turn.id as usize)).min_w_0().child(chat::answer(&turn.text, size))
-                    .when(turn.status == Status::Stopped, |answer| answer.child(chat::stopped_mark())).into_any_element(),
+                    .when(turn.status == Status::Stopped, |answer| answer.child(chat::stopped_mark(muted))).into_any_element(),
             };
             // "Viewed screen" sits with the answer, above it.
             let viewed = turn.screenshot.is_some() && !matches!(turn.status, Status::Failed(_));
-            let answer = div().flex().flex_col().gap(px(6.0)).min_w_0().when(viewed, |answer| answer.child(chat::viewed_screen())).child(body);
+            let answer = div().flex().flex_col().gap(px(6.0)).min_w_0().when(viewed, |answer| answer.child(chat::viewed_screen(self.dim(theme::placeholder())))).child(body);
             thread = thread.child(header).child(answer);
         }
         // A session that has started but asked nothing yet.
-        for divider in self.dividers.iter().filter(|divider| divider.before == self.turns.len()) { thread = thread.child(chat::divider(&divider.label)); }
+        for divider in self.dividers.iter().filter(|divider| divider.before == self.turns.len()) { thread = thread.child(chat::divider(&divider.label, muted)); }
         let ready = self.answer_ready();
         let mut actions = div().flex().items_center().gap(px(6.0));
         for (index, label) in answer::ACTIONS.into_iter().enumerate() {
@@ -1431,7 +1438,7 @@ impl Overlay {
             actions = actions.child(action.child(label).child(self.hits.mark()));
         }
         if ready.is_some() {
-            actions = actions.child(div().flex_1().min_w_0().flex().justify_end().truncate().text_size(px(12.0)).text_color(theme::muted())
+            actions = actions.child(div().flex_1().min_w_0().flex().justify_end().truncate().text_size(px(12.0)).text_color(muted)
                 .child("Answer ready for their last question"));
         }
         (heard, thread, actions)
@@ -1588,12 +1595,12 @@ pub(crate) fn apply_capture_setting(native: NativeWindow, settings: &Settings) {
 
 /// The header of an answer shown without a press: what it is, which question it answers, and
 /// Stop while it is still being written.
-fn auto_header(id: u64, heard_ms: u64, streaming: bool, hit: impl IntoElement, cx: &mut Context<Overlay>) -> impl IntoElement {
+fn auto_header(id: u64, heard_ms: u64, streaming: bool, muted: gpui::Rgba, hit: impl IntoElement, cx: &mut Context<Overlay>) -> impl IntoElement {
     let label = gpui::rgb(0x7fa8ff);
     div().flex().items_center().gap(px(8.0))
         .child(ui::icon("icons/sparkle.svg", 13.0, label))
         .child(div().text_size(px(11.0)).line_height(px(14.0)).font_weight(FontWeight::SEMIBOLD).text_color(label).child("SHOWN AUTOMATICALLY"))
-        .child(div().flex_1().text_size(px(12.0)).line_height(px(16.0)).text_color(theme::muted()).child(format!("for their question at {}", archive::clock(heard_ms))))
+        .child(div().flex_1().text_size(px(12.0)).line_height(px(16.0)).text_color(muted).child(format!("for their question at {}", archive::clock(heard_ms))))
         .when(streaming, |row| row.child(div().id(("stop-auto", id as usize)).px(px(10.0)).py(px(4.0)).rounded(px(8.0)).border_1().border_color(theme::hairline())
             .cursor_pointer().text_size(px(12.0)).line_height(px(16.0)).font_weight(FontWeight::SEMIBOLD).text_color(gpui::rgb(0xd9d5cc)).relative().child("Stop").child(hit)
             .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| this.stop_turn(id, cx)))))

@@ -26,7 +26,7 @@ pub(super) const PANEL_HEIGHT: f32 = 460.0;
 const DEFAULT_ICON: &str = "icons/tab-sessions.svg";
 
 pub(crate) struct SessionsPanel {
-    search: Entity<TextInput>,
+    pub(super) search: Entity<TextInput>,
     /// Saved sessions, newest first, each with its lower-cased searchable text; `None` while loading.
     sessions: Option<Vec<(Summary, String)>>,
     query: String,
@@ -108,7 +108,8 @@ impl Overlay {
         self.tip = None;
         self.show();
         self.take_keyboard(cx);
-        let search = cx.new(|cx| TextInput::new("Ask or search anything", cx).with_text_size(14.0, 20.0));
+        let hint = self.dim(theme::placeholder());
+        let search = cx.new(|cx| { let mut input = TextInput::new("Ask or search anything", cx).with_text_size(14.0, 20.0); input.set_placeholder_color(hint, cx); input });
         cx.subscribe_in(&search, window, |this, input, event, window, cx| {
             let Some(panel) = &mut this.sessions_panel else { return };
             match event {

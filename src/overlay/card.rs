@@ -156,6 +156,9 @@ impl Overlay {
     /// so the whole card is equally see-through.
     pub(super) fn card_fill(&self, rgb: u32) -> gpui::Rgba { crate::appearance::fill(rgb, self.store.value.background_opacity) }
 
+    /// A dim text colour on the card, brightened as the card gets more see-through.
+    pub(crate) fn dim(&self, color: gpui::Rgba) -> gpui::Rgba { crate::appearance::legible(color, self.store.value.background_opacity) }
+
     /// The waveform icon's five bars (same size and spacing as `tab-listening.svg`), driven by the
     /// last levels: the newest in the middle, older ones outwards, scaled by the icon's diamond so
     /// silence reads as a small, flat version of the icon.
