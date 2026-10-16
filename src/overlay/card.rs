@@ -159,6 +159,13 @@ impl Overlay {
     /// A dim text colour on the card, brightened as the card gets more see-through.
     pub(crate) fn dim(&self, color: gpui::Rgba) -> gpui::Rgba { crate::appearance::legible(color, self.store.value.background_opacity) }
 
+    /// Give the card's text boxes their placeholder colour for the current opacity.
+    pub(crate) fn dim_placeholders(&mut self, cx: &mut Context<Self>) {
+        let placeholder = self.dim(theme::placeholder());
+        self.composer.update(cx, |input, cx| input.set_placeholder_color(placeholder, cx));
+        if let Some(panel) = &self.sessions_panel { panel.search.update(cx, |input, cx| input.set_placeholder_color(placeholder, cx)); }
+    }
+
     /// The waveform icon's five bars (same size and spacing as `tab-listening.svg`), driven by the
     /// last levels: the newest in the middle, older ones outwards, scaled by the icon's diamond so
     /// silence reads as a small, flat version of the icon.

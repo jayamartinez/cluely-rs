@@ -439,11 +439,7 @@ impl Overlay {
         if let Some(native) = self.native && previous.card_width != self.store.value.card_width {
             platform::set_width_centred(native, self.store.value.card_width.window());
         }
-        if previous.background_opacity != self.store.value.background_opacity {
-            let placeholder = self.dim(theme::placeholder());
-            self.composer.update(cx, |input, cx| input.set_placeholder_color(placeholder, cx));
-            if let Some(panel) = &self.sessions_panel { panel.search.update(cx, |input, cx| input.set_placeholder_color(placeholder, cx)); }
-        }
+        if previous.background_opacity != self.store.value.background_opacity { self.dim_placeholders(cx); }
         if previous.screen_on_send != self.store.value.screen_on_send {
             let placeholder = composer_placeholder(&self.store.value);
             self.composer.update(cx, |input, cx| input.set_placeholder(placeholder, cx));

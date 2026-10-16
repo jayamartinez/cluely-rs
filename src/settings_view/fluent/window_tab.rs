@@ -78,7 +78,7 @@ impl Overlay {
     /// The overlay's card at half size over a desktop, following width, text size and opacity live.
     fn fluent_preview_card(&self) -> AnyElement {
         let s = &self.store.value;
-        let opacity = s.background_opacity;
+        let opacity = appearance::clamp(s.background_opacity);
         let ((hint, hint_line), (text, text_line)) = preview_text(s.text_size);
         let block = |w: f32, h: f32, color: u32, radius: f32| div().w(px(w)).h(px(h)).flex_none().rounded(px(radius)).bg(rgb(color));
         let toolbar = div().flex().items_center().gap(px(6.0)).h(px(20.0)).px(px(7.0)).border_t_1().border_color(theme::divider())
@@ -120,8 +120,8 @@ impl Overlay {
     /// "80%" and the slider: a 4 px track filled to the value and a ringed thumb. Pressing jumps to
     /// the pointer and dragging follows it; the overlay shows it at once and the release saves.
     fn fluent_opacity(&self, cx: &mut Context<Self>) -> Div {
-        let percent = self.store.value.background_opacity.min(100);
-        let fraction = f32::from(percent) / 100.0;
+        let percent = appearance::clamp(self.store.value.background_opacity);
+        let fraction = appearance::slider_fraction(percent);
         let track: Rc<Cell<Option<Bounds<Pixels>>>> = Rc::default();
         let value_at = {
             let track = track.clone();
