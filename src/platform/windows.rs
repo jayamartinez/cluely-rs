@@ -37,8 +37,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 /// The overlay's own top-level window.
 pub type NativeWindow = HWND;
-/// The window that had the keyboard before the overlay took it.
-pub type PreviousFocus = HWND;
+/// How the overlay took the keyboard, to hand it back: typed into through the keyboard hook (the
+/// app in front never lost focus), or as the foreground window, taken from `window`.
+#[derive(Clone, Copy, Debug)]
+pub enum PreviousFocus { Typing, Window(HWND) }
 
 pub fn native_window(window: &Window) -> Option<NativeWindow> {
     // Window has an inherent `window_handle()` returning GPUI's own handle type.
@@ -136,7 +138,9 @@ pub fn move_by(hwnd: HWND, dx: i32, dy: i32, content_bottom: Option<i32>) -> win
     }
 }
 
-fn down(key: VIRTUAL_KEY) -> bool { unsafe { GetAsyncKeyState(key.0 as i32) as u16 & 0x8000 != 0 } }
+/// The keyboard hook keeps a shortcut's keys from the system, so `GetAsyncKeyState` misses them;
+/// it doesn't run while an elevated window is in front, so the system's own state still counts.
+fn down(key: VIRTUAL_KEY) -> bool { super::windows_keys::key_held(key.0) || unsafe { GetAsyncKeyState(key.0 as i32) as u16 & 0x8000 != 0 } }
 
 /// Arrow direction currently held with Ctrl+Alt (and Shift exactly when `with_shift`), or
 /// `None` once the chord is released. Global hotkeys fire once per press, so held
@@ -219,16 +223,27 @@ fn foreground() -> Option<HWND> {
 /// Bring a window to the foreground. Allowed here because it follows a hotkey press or a click.
 fn activate(hwnd: HWND) { unsafe { let _ = SetForegroundWindow(hwnd); } }
 
-/// Bring the overlay to the foreground, returning the window that had the keyboard if it was
-/// another one.
+/// Give the overlay the keyboard. The keyboard hook sends it what is typed while the app in front
+/// keeps focus, so that app never sees its window lose focus (`shortcut_keys`). Without the hook, or
+/// when a click already brought the overlay forward, the overlay is the foreground window instead,
+/// returning the window that had the keyboard if it was another one.
 pub fn take_focus(hwnd: HWND) -> Option<PreviousFocus> {
     let previous = foreground().filter(|previous| *previous != hwnd);
+    if previous.is_some() && super::windows_keys::start_typing(hwnd) { return Some(PreviousFocus::Typing); }
     activate(hwnd);
-    previous
+    previous.map(PreviousFocus::Window)
 }
 
-/// Hand the keyboard back to the window `take_focus` returned.
-pub fn return_focus(previous: PreviousFocus) { activate(previous); }
+/// Hand the keyboard back as `take_focus` took it.
+pub fn return_focus(previous: PreviousFocus) {
+    match previous {
+        PreviousFocus::Typing => super::windows_keys::stop_typing(),
+        PreviousFocus::Window(window) => activate(window),
+    }
+}
+
+/// Whether `window` is typed into through the keyboard hook rather than as the foreground window.
+pub fn typing_into(window: &Window) -> bool { native_window(window).is_some_and(super::windows_keys::typing_into) }
 
 /// Whether the overlay was last shown rather than hidden. A hide keeps the window on screen until its
 /// fade ends, so the window's own visibility would lag a quick second toggle (as on macOS).

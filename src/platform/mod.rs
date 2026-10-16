@@ -27,6 +27,10 @@ mod macos;
 #[cfg(target_os = "macos")]
 pub use self::macos::*;
 #[cfg(target_os = "macos")]
+mod macos_keys;
+#[cfg(target_os = "macos")]
+pub use self::macos_keys::{hide_shortcuts, set_shortcut_active, shortcut_key, typing_into};
+#[cfg(target_os = "macos")]
 mod macos_system_audio;
 #[cfg(target_os = "macos")]
 pub use self::macos_system_audio::{SystemAudio, SystemAudioBuffer, SystemAudioEvent};
@@ -39,6 +43,10 @@ pub use self::macos_permissions::{Access, PrivacyPane, microphone_access, open_p
 mod macos_status_item;
 #[cfg(target_os = "macos")]
 pub use self::macos_status_item::{Alert, StatusMenu, confirm, confirm_later};
+#[cfg(windows)]
+mod windows_keys;
+#[cfg(windows)]
+pub use self::windows_keys::{hide_shortcuts, set_shortcut_active, shortcut_key};
 #[cfg(windows)]
 mod windows_tray;
 #[cfg(windows)]

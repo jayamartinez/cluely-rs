@@ -149,7 +149,7 @@ impl TextArea {
         self.blink = None;
     }
 
-    fn has_keyboard(&self, window: &Window) -> bool { self.focus_handle.is_focused(window) && window.is_window_active() }
+    fn has_keyboard(&self, window: &Window) -> bool { self.focus_handle.is_focused(window) && (window.is_window_active() || crate::platform::typing_into(window)) }
 
     fn keep_blinking(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.has_keyboard(window) {

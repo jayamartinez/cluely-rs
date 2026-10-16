@@ -7,6 +7,8 @@ use futures::channel::mpsc::{UnboundedReceiver, unbounded};
 use global_hotkey::hotkey::HotKey;
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 
+use crate::shortcut_keys::{Fired, Shortcut};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Action {
     Assist,
@@ -51,6 +53,14 @@ impl Action {
     /// Claimed for as long as CluelyRS runs. That includes Assist (Ctrl+Enter, ⌘↵ on macOS),
     /// which starts Live when it is off, so it works any time even though other apps lose the chord.
     fn always(self) -> bool { !self.only_while_visible() && !self.only_while_panel() }
+
+    /// A shortcut press or release the keyboard hook completed (`shortcut_keys`), where the
+    /// system's hotkey never sees it.
+    fn fired(self, pressed: bool, sender: &futures::channel::mpsc::UnboundedSender<Action>) {
+        #[cfg(target_os = "macos")]
+        if let Some(arrow) = self.arrow() { crate::platform::set_arrow_held(arrow, pressed); }
+        if pressed { let _ = sender.unbounded_send(self); }
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -95,6 +105,8 @@ pub struct Hotkeys {
     by_id: HashMap<u32, Action>,
     visible_registered: bool,
     panel_registered: bool,
+    /// The action of each shortcut the keyboard hook hides from other apps, in the hook's order.
+    hidden: Vec<Action>,
     /// Shortcuts another application already owns; reported instead of failing startup.
     pub unavailable: Vec<Action>,
 }
@@ -108,6 +120,16 @@ impl Hotkeys {
         }
         let by_id: HashMap<u32, Action> = bindings.iter().map(|(action, key)| (key.id(), *action)).collect();
         let (sender, receiver) = unbounded();
+        // Every shortcut the hook can name is also hidden from the app in front, its modifiers and
+        // release included; the system hotkey stays registered for where the hook doesn't run.
+        let (hidden, shortcuts): (Vec<Action>, Vec<Shortcut>) = bindings.iter()
+            .filter_map(|(action, key)| Some((*action, Shortcut::of(key, crate::platform::shortcut_key)?))).unzip();
+        let (actions, hook_sender) = (hidden.clone(), sender.clone());
+        let fire = move |fired: Fired| match fired {
+            Fired::Pressed(index) => actions[index].fired(true, &hook_sender),
+            Fired::Released(index) => actions[index].fired(false, &hook_sender),
+        };
+        if let Err(error) = crate::platform::hide_shortcuts(shortcuts, fire) { eprintln!("shortcut keys stay visible to other apps: {error}"); }
         let lookup = by_id.clone();
         GlobalHotKeyEvent::set_event_handler(Some(move |event: GlobalHotKeyEvent| {
             // macOS tracks held movement from these events rather than the live keyboard state.
@@ -119,8 +141,9 @@ impl Hotkeys {
                 let _ = sender.unbounded_send(*action);
             }
         }));
-        let mut hotkeys = Self { manager, bindings, by_id, visible_registered: false, panel_registered: false, unavailable: Vec::new() };
+        let mut hotkeys = Self { manager, bindings, by_id, visible_registered: false, panel_registered: false, hidden, unavailable: Vec::new() };
         hotkeys.register(Action::always);
+        hotkeys.claim_hidden();
         Ok((hotkeys, receiver))
     }
 
@@ -136,12 +159,22 @@ impl Hotkeys {
         if visible == self.visible_registered { return; }
         self.visible_registered = visible;
         self.set_group(Action::only_while_visible, visible);
+        self.claim_hidden();
     }
 
     pub fn set_panel_open(&mut self, open: bool) {
         if open == self.panel_registered { return; }
         self.panel_registered = open;
         self.set_group(Action::only_while_panel, open);
+        self.claim_hidden();
+    }
+
+    /// The hook hides exactly the shortcuts that are registered right now.
+    fn claim_hidden(&self) {
+        for (index, action) in self.hidden.iter().enumerate() {
+            let claimed = action.always() || (self.visible_registered && action.only_while_visible()) || (self.panel_registered && action.only_while_panel());
+            crate::platform::set_shortcut_active(index, claimed);
+        }
     }
 
     fn set_group(&mut self, member: fn(Action) -> bool, on: bool) {

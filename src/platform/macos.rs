@@ -28,15 +28,19 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 pub struct NativeWindow { window: NonNull<NSWindow>, view: NonNull<NSView> }
 
 impl NativeWindow {
-    fn get(&self) -> &NSWindow { unsafe { self.window.as_ref() } }
+    pub(super) fn get(&self) -> &NSWindow { unsafe { self.window.as_ref() } }
+
+    /// GPUI's view as a number, which `macos_keys` compares without retaining the window.
+    pub(super) fn view_pointer(&self) -> usize { self.view.as_ptr() as usize }
 
     /// GPUI's view, which must be the first responder for key presses to reach GPUI.
     fn view(&self) -> &NSView { unsafe { self.view.as_ref() } }
 }
 
-/// The app that was frontmost before the overlay took the keyboard, and the overlay itself.
+/// The app that was frontmost before the overlay took the keyboard, and the overlay itself. With
+/// `typing`, the overlay was typed into through the event tap and that app never lost focus.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct PreviousFocus { pid: i32, overlay: NativeWindow }
+pub struct PreviousFocus { pid: i32, overlay: NativeWindow, typing: bool }
 
 /// A rounded rectangle in physical pixels relative to the window: left, top, right, bottom, radius.
 pub type Shape = (i32, i32, i32, i32, i32);
@@ -161,15 +165,23 @@ pub fn set_arrow_held(arrow: Arrow, held: bool) {
 
 /// Arrow direction currently held with Control+Option (and Shift exactly when `with_shift`), or
 /// `None` once the chord is released. Global hotkeys fire once per press, so held movement polls
-/// instead of waiting for repeats: the modifiers from AppKit, the arrows from `set_arrow_held`.
+/// instead of waiting for repeats: the modifiers from the event tap (which may keep them from AppKit)
+/// or else AppKit, the arrows from `set_arrow_held`.
 pub fn held_direction(with_shift: bool) -> Option<(i32, i32)> {
-    let flags = NSEvent::modifierFlags_class();
-    if !flags.contains(NSEventModifierFlags::Control) || !flags.contains(NSEventModifierFlags::Option) {
+    use crate::shortcut_keys::{ALT, CONTROL, SHIFT};
+    let (control, option, shift) = match super::macos_keys::held_mods() {
+        Some(mods) => (mods & CONTROL != 0, mods & ALT != 0, mods & SHIFT != 0),
+        None => {
+            let flags = NSEvent::modifierFlags_class();
+            (flags.contains(NSEventModifierFlags::Control), flags.contains(NSEventModifierFlags::Option), flags.contains(NSEventModifierFlags::Shift))
+        }
+    };
+    if !control || !option {
         // A release that arrives after the modifiers are let go can be lost, so start clean.
         HELD_ARROWS.store(0, Ordering::Relaxed);
         return None;
     }
-    if flags.contains(NSEventModifierFlags::Shift) != with_shift { return None; }
+    if shift != with_shift { return None; }
     let held = |arrow: Arrow| HELD_ARROWS.load(Ordering::Relaxed) & (1 << arrow as u8) != 0;
     let axis = |negative, positive| held(positive) as i32 - held(negative) as i32;
     let direction = (axis(Arrow::Left, Arrow::Right), axis(Arrow::Up, Arrow::Down));
@@ -217,7 +229,14 @@ pub fn cursor_in_window(window: NativeWindow) -> Option<(i32, i32)> {
 /// avoids GPUI's deadlock (see [`activate_then`]). If macOS doesn't activate CluelyRS, or the overlay
 /// was hidden meanwhile, the panel isn't made key: the app that had the keyboard keeps it and `taken`
 /// isn't called.
+///
+/// With the event tap running (`macos_keys`), nothing is activated: the tap sends the overlay what
+/// is typed while the app in front keeps focus, so it never sees its window lose focus.
 pub fn take_focus(window: NativeWindow, cx: &mut App, taken: impl FnOnce(Option<PreviousFocus>, &mut App) + 'static) {
+    if super::macos_keys::start_typing(window) {
+        taken(Some(PreviousFocus { pid: 0, overlay: window, typing: true }), cx);
+        return;
+    }
     // Asked now: once CluelyRS is active, it is the frontmost app itself.
     let own = std::process::id() as i32;
     let previous = NSWorkspace::sharedWorkspace().frontmostApplication().map(|app| app.processIdentifier()).filter(|pid| *pid != own);
@@ -229,7 +248,7 @@ pub fn take_focus(window: NativeWindow, cx: &mut App, taken: impl FnOnce(Option<
         if !is_visible(window) { return; }
         window.get().makeKeyAndOrderFront(None);
         window.get().makeFirstResponder(Some(window.view()));
-        taken(previous.map(|pid| PreviousFocus { pid, overlay: window }), cx);
+        taken(previous.map(|pid| PreviousFocus { pid, overlay: window, typing: false }), cx);
     });
 }
 
@@ -241,6 +260,11 @@ pub fn return_focus(previous: PreviousFocus) {
     if overlay.isKeyWindow() {
         overlay.orderOut(None);
         overlay.orderFrontRegardless();
+    }
+    // Typed into through the event tap: the app the user was in kept the keyboard all along.
+    if previous.typing {
+        super::macos_keys::stop_typing();
+        return;
     }
     if let Some(app) = NSRunningApplication::runningApplicationWithProcessIdentifier(previous.pid) {
         app.activateWithOptions(NSApplicationActivationOptions::empty());
