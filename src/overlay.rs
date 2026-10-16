@@ -27,6 +27,7 @@ use crate::sessions_window::{self, SessionsWindow};
 use crate::hotkeys::{Action, Hotkeys};
 use crate::settings::{Settings, Store};
 use crate::settings_view::Tab;
+use crate::shortcut_keys::{self, Typed};
 use crate::theme;
 use crate::ui;
 use crate::platform::{self, NativeWindow, PreviousFocus};
@@ -264,6 +265,20 @@ impl Overlay {
             let mut presses = presses;
             while let Some(action) = presses.next().await {
                 if this.update_in(cx, |this, window, cx| this.handle(action, window, cx)).is_err() { break; }
+            }
+        }).detach();
+        // What is typed into the overlay while the app in front keeps the keyboard (`take_keyboard`).
+        // Dispatched as the window's own key presses would be, outside any update of the overlay,
+        // whose key handlers update it themselves.
+        let typed = shortcut_keys::typed_keys();
+        cx.spawn_in(window, async move |this, cx| {
+            let mut typed = typed;
+            while let Some(typed) = typed.next().await {
+                let open = match typed {
+                    Typed::Key(keystroke) => cx.update(|window, cx| { window.dispatch_keystroke(keystroke, cx); }).is_ok(),
+                    Typed::Lost => this.update_in(cx, |this, window, cx| this.keyboard_lost(window, cx)).is_ok(),
+                };
+                if !open { break; }
             }
         }).detach();
         cx.spawn_in(window, async move |this, cx| {
@@ -769,6 +784,15 @@ impl Overlay {
         if let Some(previous) = self.return_focus.take() { platform::return_focus(previous); }
     }
 
+    /// Typing here ended in the other app (a click there, Alt+Tab), which has the keyboard already.
+    /// Unless the overlay took it again meanwhile.
+    fn keyboard_lost(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if platform::typing_into(window) { return; }
+        self.return_focus = None;
+        self.dismiss_switcher(window, cx);
+        cx.notify();
+    }
+
     /// Title, overview, topics and follow-ups for a finished session, written off the UI thread.
     fn write_notes(&self, session: archive::Session) {
         let Some(root) = self.archive.as_ref().map(|archive| archive.root().to_path_buf()) else { return };
@@ -1264,7 +1288,8 @@ impl Overlay {
     fn toggle_visible(&mut self) {
         let Some(native) = self.native else { return };
         let visible = !platform::is_visible(native);
-        if !visible { self.key_reveal.hide(); }
+        // Typing into a hidden overlay would swallow keys out of sight.
+        if !visible { self.key_reveal.hide(); self.return_to_previous_app(); }
         platform::set_visible(native, visible);
         self.hotkeys.set_overlay_visible(visible);
     }
@@ -1282,6 +1307,7 @@ impl Overlay {
     pub(crate) fn hide(&mut self) {
         if let Some(native) = self.native.filter(|native| platform::is_visible(*native)) {
             self.key_reveal.hide();
+            self.return_to_previous_app();
             platform::set_visible(native, false);
             self.hotkeys.set_overlay_visible(false);
         }
