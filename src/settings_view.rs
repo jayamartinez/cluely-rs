@@ -38,13 +38,13 @@ mod appearance;
 pub(crate) mod fluent;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Tab { #[default] Model, Listening, Modes, Keys, Window, History, About }
+pub enum Tab { #[default] Model, Listening, Modes, Keys, Window, History, Calendar, About }
 
 impl Tab {
     /// The overlay's Settings panel (Windows). macOS has Modes and About as their own pages in the Settings window.
     const ALL: [Tab; 7] = [Tab::Model, Tab::Listening, Tab::Modes, Tab::Keys, Tab::Window, Tab::History, Tab::About];
     fn label(self) -> &'static str {
-        match self { Tab::Model => "Model", Tab::Listening => "Listening", Tab::Modes => "Modes", Tab::Keys => "Keys", Tab::Window => "Window", Tab::History => "History", Tab::About => "About" }
+        match self { Tab::Model => "Model", Tab::Listening => "Listening", Tab::Modes => "Modes", Tab::Keys => "Keys", Tab::Window => "Window", Tab::History => "History", Tab::Calendar => "Calendar", Tab::About => "About" }
     }
 }
 
@@ -305,6 +305,8 @@ impl Overlay {
             Tab::Keys => self.keys_tab().into_any_element(),
             Tab::Window => self.window_tab(cx).into_any_element(),
             Tab::History => self.history_tab(cx).into_any_element(),
+            // Windows draws Calendar in its Settings window (`fluent`); the macOS page comes later.
+            Tab::Calendar => div().into_any_element(),
             Tab::About => self.about_tab(cx).into_any_element(),
         }
     }

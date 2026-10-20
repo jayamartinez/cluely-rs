@@ -40,8 +40,8 @@ impl Overlay {
         // whole card stays equally see-through. Inner corners are a pixel tighter than the border's.
         let mut card = div().id("card").relative().w(px(self.store.value.card_width.card())).flex().flex_col().rounded(px(theme::radius::CARD))
             .border_1().border_color(theme::keycap_border());
-        // An update notice (never during Live) is the card's top row.
-        let notice = self.update_notice(cx);
+        // An upcoming meeting or else an update notice (never during Live) is the card's top row.
+        let notice = self.upcoming_row(cx).or_else(|| self.update_notice(cx));
         let notice_shown = notice.is_some();
         card = card.children(notice);
         // The conversation sits above the text box, so the question is typed under the answer it follows.

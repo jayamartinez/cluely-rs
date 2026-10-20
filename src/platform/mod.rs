@@ -17,6 +17,15 @@
 pub(crate) const FADE: std::time::Duration = std::time::Duration::from_millis(140);
 pub(crate) const POP_DISTANCE: f64 = 8.0;
 
+/// Why CluelyRS was launched again while it runs (`single_instance`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Relaunch {
+    /// Started again from its shortcut or the exe: show the overlay.
+    Show,
+    /// Opened for a `cluelyrs://` link: show what it asks for (never the overlay).
+    Link(crate::app_link::AppLink),
+}
+
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]

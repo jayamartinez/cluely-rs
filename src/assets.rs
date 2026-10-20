@@ -157,6 +157,10 @@ const ICONS: &[(&str, &[u8])] = &[
     ("logos/mistral.svg", include_bytes!("../assets/logos/mistral.svg")),
     ("logos/together.svg", include_bytes!("../assets/logos/together.svg")),
     ("logos/lmstudio.svg", include_bytes!("../assets/logos/lmstudio.svg")),
+    // Settings › Calendar: Google's own marks, in colour (drawn as images, not tinted icons).
+    ("logos/google-g.svg", include_bytes!("../assets/logos/google-g.svg")),
+    ("logos/google-calendar.svg", include_bytes!("../assets/logos/google-calendar.svg")),
+    ("icons/bell.svg", include_bytes!("../assets/icons/bell.svg")),
     ("app-icon/app-icon.svg", include_bytes!("../assets/app-icon/app-icon.svg")),
     // Redesign v3 (macOS Settings, setup on both platforms): the mark on its own, setup's glow, and the
     // menu bar's mark for Settings › Window.

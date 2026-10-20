@@ -125,9 +125,25 @@ pub fn set_width_centred(native: NativeWindow, width: f32) {
     });
 }
 
+/// Where `open_urls` hands links to the overlay.
+static LINKS: std::sync::OnceLock<futures::channel::mpsc::UnboundedSender<super::Relaunch>> = std::sync::OnceLock::new();
+
 /// Opening CluelyRS.app again brings the running copy forward (Launch Services) instead of starting
-/// a second one, so there is nothing to claim: the channel never yields (see the Windows version).
-pub fn single_instance() -> Option<futures::channel::mpsc::UnboundedReceiver<()>> { Some(futures::channel::mpsc::unbounded().1) }
+/// a second one, so there is nothing to claim. The channel yields the `cluelyrs://` links macOS opens
+/// CluelyRS with (`open_urls`). Unverified: built and run on Windows only so far.
+pub fn single_instance(link: Option<crate::app_link::AppLink>) -> Option<futures::channel::mpsc::UnboundedReceiver<super::Relaunch>> {
+    let (sender, receiver) = futures::channel::mpsc::unbounded();
+    if let Some(link) = link { let _ = sender.unbounded_send(super::Relaunch::Link(link)); }
+    let _ = LINKS.set(sender);
+    Some(receiver)
+}
+
+/// URLs macOS opened CluelyRS with (GPUI's `on_open_urls`, from CFBundleURLTypes): the ones
+/// `app_link` recognises are acted on, the rest ignored. Unverified on a Mac.
+pub fn open_urls(urls: Vec<String>) {
+    let Some(sender) = LINKS.get() else { return };
+    for link in urls.iter().filter_map(|url| crate::app_link::parse(url)) { let _ = sender.unbounded_send(super::Relaunch::Link(link)); }
+}
 
 /// Move by a physical-pixel delta (y down, as on Windows), clamped to the visible frame of the
 /// window's screen (below the menu bar, beside the Dock). Below `content_bottom` (physical pixels

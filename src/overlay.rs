@@ -30,7 +30,7 @@ use crate::settings_view::Tab;
 use crate::shortcut_keys::{self, Typed};
 use crate::theme;
 use crate::ui;
-use crate::platform::{self, NativeWindow, PreviousFocus};
+use crate::platform::{self, NativeWindow, PreviousFocus, Relaunch};
 
 /// The overlay window; the card is 40 px narrower.
 pub const WIDTH: f32 = 640.0;
@@ -217,6 +217,8 @@ pub struct Overlay {
     pub(crate) modes_ui: crate::modes_view::ModesUi,
     /// Update checks: what Settings › About shows and the notice above the text box (`update_notice`).
     pub(crate) updates: crate::update::Tracker,
+    /// Google Calendar: sign-in, sync and the reminders behind the upcoming-meeting row (`calendar`).
+    pub(crate) calendar: calendar::CalendarState,
     /// The mode switcher under the card, while it's open.
     switcher: Option<switcher::Switcher>,
     /// The Sessions panel in place of the card, while it's open.
@@ -240,8 +242,9 @@ pub struct Overlay {
 }
 
 impl Overlay {
-    /// `relaunches` yields each time CluelyRS is launched again while this copy runs (`platform::single_instance`).
-    pub fn new(hotkeys: Hotkeys, presses: UnboundedReceiver<Action>, relaunches: UnboundedReceiver<()>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    /// `relaunches` yields each time CluelyRS is launched again while this copy runs, or opened for a
+    /// `cluelyrs://` link (`platform::single_instance`).
+    pub fn new(hotkeys: Hotkeys, presses: UnboundedReceiver<Action>, relaunches: UnboundedReceiver<Relaunch>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let native = platform::native_window(window);
         let mut store = Store::load();
         // A first run (or one that quit during setup) opens setup with the overlay hidden; main.rs
@@ -283,8 +286,8 @@ impl Overlay {
         }).detach();
         cx.spawn_in(window, async move |this, cx| {
             let mut relaunches = relaunches;
-            while relaunches.next().await.is_some() {
-                if this.update(cx, |this, cx| this.relaunched(cx)).is_err() { break; }
+            while let Some(relaunch) = relaunches.next().await {
+                if this.update_in(cx, |this, window, cx| this.relaunched(relaunch, window, cx)).is_err() { break; }
             }
         }).detach();
         // Text, answers and the transcript line let clicks through; only controls catch them.
@@ -351,6 +354,7 @@ impl Overlay {
             }
         }).detach();
         let modes_ui = crate::modes_view::ModesUi::new(&modes, window, cx);
+        let calendar = calendar::CalendarState::new(&store.value.calendar, window, cx);
         #[cfg(target_os = "macos")]
         let model_ui = crate::settings_view::ModelUi::new(&key_input, window, cx);
         let mut overlay = Self { native, own_window: window.window_handle(), hotkeys, store, sessions_window: None,
@@ -382,7 +386,7 @@ impl Overlay {
             listening: None, listening_status: None, listening_epoch: 0, transcript: Vec::new(), provisional: Default::default(), levels: Default::default(),
             model_installed: false, model_download: None, model_notice: None,
             open_picker: None, reveal_accounts: false, devices: None, devices_loading: false, archive_bytes: None, picker_face: Rc::default(), tip: None,
-            modes_ui, modes, updates: Default::default(), switcher: None, sessions_panel: None,
+            modes_ui, modes, updates: Default::default(), calendar, switcher: None, sessions_panel: None,
             #[cfg(windows)]
             fluent: Default::default(),
             #[cfg(windows)]
@@ -412,6 +416,7 @@ impl Overlay {
             cx.defer_in(window, move |this, window, cx| this.open_onboarding_at(step, window, cx));
         }
         overlay.start_update_checks(window, cx);
+        overlay.start_calendar(window, cx);
         overlay
     }
 
@@ -559,6 +564,7 @@ impl Overlay {
         if tab == Tab::Listening { self.refresh_model_status(); self.load_devices(window, cx); }
         if tab == Tab::History { self.refresh_archive_size(window, cx); }
         if tab == Tab::Modes { self.prepare_modes_tab(cx); }
+        if tab == Tab::Calendar { self.calendar_opened(window, cx); }
     }
 
     /// The active mode or its context or files changed: answers from now on use it. A running
@@ -618,11 +624,11 @@ impl Overlay {
     /// Size the window to its content state; transparent area outside the content still takes clicks.
     fn fit(&self, window: &mut Window) {
         let mut height = if self.live_since.is_some() || !self.turns.is_empty() { LIVE_HEIGHT }
-            else if self.update_notice_shown() { IDLE_HEIGHT + update_notice::NOTICE_HEIGHT } else { IDLE_HEIGHT };
+            else if self.top_row_shown() { IDLE_HEIGHT + update_notice::NOTICE_HEIGHT } else { IDLE_HEIGHT };
         // The Sessions panel replaces the card, taller than it is idle.
         if self.sessions_panel_open() { height = height.max(SESSIONS_PANEL_WINDOW_HEIGHT); }
         // The mode switcher hangs below the card.
-        if self.switcher_open() { height = height.max(switcher::window_height(self.live_since.is_some() || !self.turns.is_empty(), self.update_notice_shown())); }
+        if self.switcher_open() { height = height.max(switcher::window_height(self.live_since.is_some() || !self.turns.is_empty(), self.top_row_shown())); }
         platform::resize(window, self.native, size(px(self.store.value.card_width.window()), px(height)));
     }
 
@@ -688,6 +694,8 @@ impl Overlay {
             // A new session: earlier turns stay on the card under a divider, but the model,
             // speculation and the transcript start empty.
             self.session += 1;
+            // Live started: upcoming-meeting rows go (`upcoming`).
+            self.calendar.reminders.clear_rows();
             if chat::begin(self.turns.len(), &mut self.dividers, chat::divider_label(chrono::Local::now())) { self.scroll.scroll_to_bottom(); }
             self.clear_transcript();
             self.metrics = listening::Metrics::for_session(self.live_since.unwrap_or_else(Instant::now));
@@ -800,7 +808,8 @@ impl Overlay {
         let Some(root) = self.archive.as_ref().map(|archive| archive.root().to_path_buf()) else { return };
         let (settings, codex) = (self.store.value.clone(), self.codex.clone());
         std::thread::spawn(move || match crate::notes::generate(&settings, &codex, &session) {
-            Ok((title, notes)) => { let _ = Archive::at(root).update(&session.id, |s| { s.title = Some(title); s.notes = Some(notes); }); }
+            // A session named after its calendar event keeps that name.
+            Ok((title, notes)) => { let _ = Archive::at(root).update(&session.id, |s| { s.title.get_or_insert(title); s.notes = Some(notes); }); }
             Err(error) => eprintln!("session notes unavailable: {error}"),
         });
     }
@@ -1316,12 +1325,13 @@ impl Overlay {
     }
 
     /// CluelyRS was launched again: show the overlay, kept on screen in case it was left on a screen
-    /// that's gone. Moved before showing, because the pop-in holds the position it starts from.
-    #[cfg_attr(not(windows), allow(unused_variables))]
-    fn relaunched(&mut self, cx: &mut Context<Self>) {
+    /// that's gone. Moved before showing, because the pop-in holds the position it starts from. A
+    /// `cluelyrs://calendar` link shows Settings › Calendar instead, and never the overlay.
+    fn relaunched(&mut self, relaunch: Relaunch, window: &mut Window, cx: &mut Context<Self>) {
         // During first-run setup the overlay stays hidden: bring the setup window forward instead.
         #[cfg(windows)]
         if self.raise_setup(cx) { return; }
+        if let Relaunch::Link(crate::app_link::AppLink::Calendar) = relaunch { self.show_calendar_settings(window, cx); return; }
         if let Some(native) = self.native { let _ = platform::move_by(native, 0, 0, self.content_bottom()); }
         self.show();
     }
@@ -1447,9 +1457,11 @@ fn show_session(handle: Option<gpui::WindowHandle<SessionsWindow>>, id: Option<S
     let _ = handle.update(cx, |window, _, cx| window.select(&id, cx));
 }
 
+mod calendar;
 mod card;
 mod chat;
 mod update_notice;
+mod upcoming;
 mod switcher;
 mod sessions_panel;
 #[cfg(any(target_os = "macos", windows))]

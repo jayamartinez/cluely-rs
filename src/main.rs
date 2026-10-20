@@ -25,12 +25,19 @@ fn main() {
     if let Some(code) = modes::extract::child_main() { std::process::exit(code); }
     // A release build has no console: stderr and panics go to the log file instead.
     logging::init();
-    // One CluelyRS per user: launching it again shows the running copy's overlay instead (Windows).
-    let Some(relaunches) = platform::single_instance() else { return };
+    // One CluelyRS per user: launching it again shows the running copy's overlay instead (Windows),
+    // or for a `cluelyrs://` link ("Back to CluelyRS" after Google sign-in), its Settings › Calendar.
+    let link = cluely_rs::app_link::from_args(std::env::args().skip(1));
+    let Some(relaunches) = platform::single_instance(link) else { return };
+    #[cfg(windows)]
+    std::thread::spawn(platform::register_url_scheme);
     // Read the login shell's PATH (macOS) or the saved PATH (Windows) now, off the UI thread, so
     // the first answer doesn't wait for it.
     cli_path::warm();
-    Application::new().with_assets(assets::Assets).run(|cx: &mut App| {
+    let app = Application::new().with_assets(assets::Assets);
+    #[cfg(target_os = "macos")]
+    app.on_open_urls(platform::open_urls);
+    app.run(|cx: &mut App| {
         input::bind_keys(cx);
         text_area::bind_keys(cx);
         #[cfg(target_os = "macos")]

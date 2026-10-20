@@ -72,6 +72,8 @@ pub(crate) fn close(overlay: &mut Overlay, cx: &mut Context<Overlay>) {
 /// The window is closing: forget what it showed, and hide anything revealed in it.
 fn closed(overlay: &mut Overlay, cx: &mut Context<Overlay>) {
     overlay.fluent.window = None;
+    // A Google sign-in waits only while Settings shows "Signing in…" (`overlay::calendar`).
+    overlay.cancel_calendar_sign_in(cx);
     overlay.fluent.tab = None;
     overlay.fluent.mode_page = None;
     overlay.fluent.meters = None;
