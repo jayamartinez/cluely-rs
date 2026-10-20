@@ -29,6 +29,12 @@ use crate::settings::{Provider, Settings};
 pub const MAX_CONTEXT_CHARS: usize = 4_000;
 /// Longest mode or group name, in characters.
 pub const MAX_NAME_CHARS: usize = 60;
+/// Most note sections a mode can have.
+pub const MAX_SECTIONS: usize = 8;
+/// Longest note section name, in characters.
+pub const MAX_SECTION_NAME_CHARS: usize = 40;
+/// Longest note section description, in characters.
+pub const MAX_SECTION_DESCRIPTION_CHARS: usize = 200;
 /// `modes.json` larger than this is not read.
 const MAX_SAVED_BYTES: u64 = 1024 * 1024;
 const NEW_MODE: &str = "New mode";
@@ -76,6 +82,26 @@ pub struct ModeFile {
     pub tokens: usize,
 }
 
+/// A heading the notes of a session in this mode are written under, and what goes there.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct NoteSection {
+    pub name: String,
+    pub description: String,
+}
+
+impl NoteSection {
+    pub fn new(name: &str, description: &str) -> Self { Self { name: name.into(), description: description.into() } }
+}
+
+/// Sections as they are kept: at most [`MAX_SECTIONS`], names and descriptions cut to length.
+/// Blank rows stay (the editor adds one to type into); the notes skip them (`note_template`).
+fn clamp_sections(sections: &[NoteSection]) -> Vec<NoteSection> {
+    sections.iter().take(MAX_SECTIONS)
+        .map(|section| NoteSection { name: clamp(&section.name, MAX_SECTION_NAME_CHARS), description: clamp(&section.description, MAX_SECTION_DESCRIPTION_CHARS) })
+        .collect()
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Mode {
     pub id: String,
@@ -84,6 +110,9 @@ pub struct Mode {
     pub group: Option<String>,
     pub context: String,
     pub files: Vec<ModeFile>,
+    /// The headings its session notes are written under. Empty: the notes use the general format
+    /// (overview, topics and follow-ups).
+    pub sections: Vec<NoteSection>,
     /// Built-ins can't be renamed, regrouped or deleted, and their context can be reset.
     pub builtin: Option<&'static Builtin>,
 }
@@ -91,15 +120,28 @@ pub struct Mode {
 impl Mode {
     fn from_builtin(builtin: &'static Builtin) -> Self {
         Self { id: builtin.id.into(), name: builtin.name.into(), icon: builtin.icon, group: builtin.group.map(Into::into),
-            context: builtin.context.into(), files: Vec::new(), builtin: Some(builtin) }
+            context: builtin.context.into(), files: Vec::new(), sections: builtin_sections(builtin), builtin: Some(builtin) }
     }
 
     /// A built-in whose context differs from the one it ships with.
     pub fn is_edited(&self) -> bool { self.builtin.is_some_and(|builtin| builtin.context != self.context) }
 
+    /// A built-in whose note sections differ from the ones it ships with.
+    pub fn sections_edited(&self) -> bool { self.builtin.is_some_and(|builtin| builtin_sections(builtin) != self.sections) }
+
+    /// The sections the notes are written under: those with a name.
+    pub fn note_template(&self) -> Vec<NoteSection> {
+        self.sections.iter().filter(|section| !section.name.trim().is_empty())
+            .map(|section| NoteSection { name: section.name.trim().into(), description: section.description.trim().into() }).collect()
+    }
+
     pub fn file_bytes(&self) -> u64 { self.files.iter().map(|file| file.bytes).sum() }
 
     pub fn file_tokens(&self) -> usize { self.files.iter().map(|file| file.tokens).sum() }
+}
+
+fn builtin_sections(builtin: &Builtin) -> Vec<NoteSection> {
+    builtin.sections.iter().map(|(name, description)| NoteSection::new(name, description)).collect()
 }
 
 /// What the active mode adds to the instructions, read from disk when the mode is activated or
@@ -231,6 +273,9 @@ struct BuiltinEdits {
     context: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     files: Vec<ModeFile>,
+    /// Set once the sections were edited, even to none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sections: Option<Vec<NoteSection>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -246,6 +291,8 @@ struct SavedMode {
     context: String,
     #[serde(default)]
     files: Vec<ModeFile>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    sections: Vec<NoteSection>,
 }
 
 pub struct ModeStore {
@@ -281,6 +328,7 @@ impl ModeStore {
             let Some(edits) = saved.builtins.get(&mode.id) else { continue };
             if let Some(context) = &edits.context { mode.context = clamp(context, MAX_CONTEXT_CHARS); }
             mode.files = valid_files(&edits.files);
+            if let Some(sections) = &edits.sections { mode.sections = saved_sections(sections); }
         }
         for custom in saved.custom {
             // Ids name folders on disk: anything but a plain generated id is dropped.
@@ -289,7 +337,7 @@ impl ModeStore {
             self.modes.push(Mode {
                 id: custom.id, name: if name.is_empty() { NEW_MODE.into() } else { name }, icon: custom.icon,
                 group: custom.group.map(|group| clamp(group.trim(), MAX_NAME_CHARS)).filter(|group| !group.is_empty()),
-                context: clamp(&custom.context, MAX_CONTEXT_CHARS), files: valid_files(&custom.files), builtin: None,
+                context: clamp(&custom.context, MAX_CONTEXT_CHARS), files: valid_files(&custom.files), sections: saved_sections(&custom.sections), builtin: None,
             });
         }
         if self.get(&saved.active).is_some() { self.active = saved.active; }
@@ -334,6 +382,12 @@ impl ModeStore {
         groups
     }
 
+    /// The note sections for a session recorded in mode `id`. Sessions saved before modes, or in a
+    /// mode since deleted, use General's.
+    pub fn note_template(&self, id: Option<&str>) -> Vec<NoteSection> {
+        id.and_then(|id| self.get(id)).or_else(|| self.get(GENERAL)).map(Mode::note_template).unwrap_or_default()
+    }
+
     /// Make `id` the active mode. False if there's no such mode or it was already active.
     pub fn set_active(&mut self, id: &str) -> bool {
         if self.active == id || self.get(id).is_none() { return false; }
@@ -358,7 +412,7 @@ impl ModeStore {
     pub fn create(&mut self) -> String {
         let name = self.unused_name(NEW_MODE);
         let id = new_id('m');
-        self.modes.push(Mode { id: id.clone(), name, icon: Icon::Star, group: Some(YOUR_MODES.into()), context: String::new(), files: Vec::new(), builtin: None });
+        self.modes.push(Mode { id: id.clone(), name, icon: Icon::Star, group: Some(YOUR_MODES.into()), context: String::new(), files: Vec::new(), sections: Vec::new(), builtin: None });
         self.save();
         id
     }
@@ -377,7 +431,7 @@ impl ModeStore {
         }
         let name = self.unused_name(&format!("{} copy", source.name));
         let group = if source.builtin.is_some() { Some(YOUR_MODES.into()) } else { source.group };
-        self.modes.push(Mode { id: copy.clone(), name, icon: source.icon, group, context: source.context, files, builtin: None });
+        self.modes.push(Mode { id: copy.clone(), name, icon: source.icon, group, context: source.context, files, sections: source.sections, builtin: None });
         self.save();
         Some(copy)
     }
@@ -433,6 +487,21 @@ impl ModeStore {
         self.set_context(id, default)
     }
 
+    /// Replace a mode's note sections (at most [`MAX_SECTIONS`], cut to length). False if unchanged.
+    pub fn set_sections(&mut self, id: &str, sections: &[NoteSection]) -> bool {
+        let sections = clamp_sections(sections);
+        let Some(mode) = self.get_mut(id).filter(|mode| mode.sections != sections) else { return false };
+        mode.sections = sections;
+        self.save();
+        true
+    }
+
+    /// Put a built-in's note sections back to the ones it ships with.
+    pub fn reset_sections(&mut self, id: &str) -> bool {
+        let Some(default) = self.get(id).and_then(|mode| mode.builtin).map(builtin_sections) else { return false };
+        self.set_sections(id, &default)
+    }
+
     /// Whether a file of `bytes` bytes can be added to `id`, before reading it.
     pub fn room_for(&self, id: &str, bytes: u64) -> Result<(), FileError> {
         let mode = self.get(id).ok_or(FileError::Unreadable)?;
@@ -482,11 +551,12 @@ impl ModeStore {
         for mode in &self.modes {
             match mode.builtin {
                 Some(builtin) => {
-                    let edits = BuiltinEdits { context: (mode.context != builtin.context).then(|| mode.context.clone()), files: mode.files.clone() };
-                    if edits.context.is_some() || !edits.files.is_empty() { saved.builtins.insert(mode.id.clone(), edits); }
+                    let edits = BuiltinEdits { context: (mode.context != builtin.context).then(|| mode.context.clone()), files: mode.files.clone(),
+                        sections: mode.sections_edited().then(|| mode.sections.clone()) };
+                    if edits.context.is_some() || !edits.files.is_empty() || edits.sections.is_some() { saved.builtins.insert(mode.id.clone(), edits); }
                 }
                 None => saved.custom.push(SavedMode { id: mode.id.clone(), name: mode.name.clone(), icon: mode.icon, group: mode.group.clone(),
-                    context: mode.context.clone(), files: mode.files.clone() }),
+                    context: mode.context.clone(), files: mode.files.clone(), sections: mode.sections.clone() }),
             }
         }
         let json = serde_json::to_vec_pretty(&saved).expect("modes serialize");
@@ -515,6 +585,11 @@ fn new_id(prefix: char) -> String {
 
 fn valid_id(id: &str) -> bool {
     id.len() == 17 && id.starts_with(['m', 'f']) && id[1..].bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+}
+
+/// Saved sections without the blank rows an unfinished edit left.
+fn saved_sections(sections: &[NoteSection]) -> Vec<NoteSection> {
+    clamp_sections(&sections.iter().filter(|section| !section.name.trim().is_empty()).cloned().collect::<Vec<_>>())
 }
 
 fn valid_files(files: &[ModeFile]) -> Vec<ModeFile> {
@@ -719,6 +794,68 @@ mod tests {
         assert_eq!(meter(&mode, 20), Meter { used: 30, budget: 20, cut: Some("b.md") });
         mode.files.clear();
         assert_eq!(meter(&mode, 20), Meter { used: 0, budget: 20, cut: None });
+    }
+
+    #[test]
+    fn built_ins_ship_note_sections_that_can_be_edited_reset_and_saved() {
+        let (mut store, dir) = store("note-sections");
+        assert!(BUILTINS.iter().all(|builtin| (1..=MAX_SECTIONS).contains(&builtin.sections.len())), "every built-in has sections");
+        let names = |store: &ModeStore, id: &str| store.get(id).unwrap().sections.iter().map(|s| s.name.clone()).collect::<Vec<_>>();
+        assert_eq!(names(&store, "coding"), ["Problem", "My approach", "Interviewer signals", "Follow-ups"]);
+        assert_eq!(names(&store, GENERAL), ["Summary", "Decisions", "Action items", "Open questions"]);
+        assert!(!store.get("coding").unwrap().sections_edited());
+
+        let mut edited = store.get("coding").unwrap().sections.clone();
+        edited.swap(0, 1);
+        edited.push(NoteSection::new(&"N".repeat(MAX_SECTION_NAME_CHARS + 5), "Long name"));
+        edited.push(NoteSection::default());
+        assert!(store.set_sections("coding", &edited));
+        assert!(!store.set_sections("coding", &edited), "unchanged");
+        let coding = store.get("coding").unwrap();
+        assert!(coding.sections_edited() && !coding.is_edited(), "sections are edited apart from the context");
+        assert_eq!(coding.sections[4].name.chars().count(), MAX_SECTION_NAME_CHARS);
+        assert_eq!(coding.note_template().len(), 5, "the blank row isn't a heading");
+        let custom = store.create();
+        assert!(store.get(&custom).unwrap().sections.is_empty(), "new modes use the general format");
+        store.set_sections(&custom, &[NoteSection::new("Pricing", "What they'd pay")]);
+        let copy = store.duplicate(&custom).unwrap();
+        assert_eq!(names(&store, &copy), ["Pricing"]);
+        assert!(store.set_sections(&custom, &vec![NoteSection::new("x", ""); MAX_SECTIONS + 3]));
+        assert_eq!(store.get(&custom).unwrap().sections.len(), MAX_SECTIONS);
+
+        let reloaded = ModeStore::at(Some(dir.clone()));
+        assert_eq!(names(&reloaded, "coding"), ["My approach", "Problem", "Interviewer signals", "Follow-ups", &"N".repeat(MAX_SECTION_NAME_CHARS)],
+            "saved in order, without the blank row");
+        assert_eq!(reloaded.get(&custom).unwrap().sections.len(), MAX_SECTIONS);
+        assert!(!reloaded.get("interview").unwrap().sections_edited());
+        assert!(store.reset_sections("coding"));
+        assert!(!store.get("coding").unwrap().sections_edited());
+        assert!(!store.reset_sections(&custom), "only built-ins reset");
+        // Removing every section is an edit too: the mode then uses the general format.
+        store.set_sections("lecture", &[]);
+        assert!(ModeStore::at(Some(dir.clone())).get("lecture").unwrap().sections.is_empty());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn saves_from_before_note_sections_get_the_built_in_ones() {
+        let dir = tempdir("sections-legacy");
+        fs::write(dir.join("modes.json"), serde_json::json!({
+            "version": 1, "active": "coding",
+            "builtins": { "coding": { "context": "Use Rust." } },
+            "custom": [{ "id": "m0123456789abcdef", "name": "Acme" }]
+        }).to_string()).unwrap();
+        let store = ModeStore::at(Some(dir.clone()));
+        assert_eq!(store.warning, None);
+        assert_eq!(store.get("coding").unwrap().context, "Use Rust.");
+        assert!(!store.get("coding").unwrap().sections_edited());
+        assert!(store.get("m0123456789abcdef").unwrap().sections.is_empty());
+        // Notes for a session use its mode's sections; without a known mode, General's.
+        assert_eq!(store.note_template(Some("coding"))[0], NoteSection::new("Problem", "The question as they asked it, in one line"));
+        assert_eq!(store.note_template(None)[0].name, "Summary");
+        assert_eq!(store.note_template(Some("deleted"))[0].name, "Summary");
+        assert!(store.note_template(Some("m0123456789abcdef")).is_empty());
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

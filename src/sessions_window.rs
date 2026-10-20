@@ -1,39 +1,68 @@
 //! Sessions: a normal, resizable window for reviewing saved Live sessions. Unlike the
 //! overlay it appears in the taskbar and in screen capture; it's for reading, not live use.
-//! Layout follows the Paper "Sessions" page: list · summary/timeline · questions rail.
+//! Layout follows the Paper "Sessions" page and F5 ("Features Oct 2026"): list · notes, the
+//! follow-up email and the timeline · questions rail. Shared by Windows and macOS.
 
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 
 use chrono::{Datelike, Local, TimeZone};
 use gpui::{
-    AnyElement, App, AppContext, Bounds, Context, Div, Entity, Focusable, FontWeight, IntoElement, MouseButton, ObjectFit,
+    AnyElement, App, AppContext, Bounds, ClipboardItem, Context, Div, Entity, Focusable, FontWeight, IntoElement, MouseButton, ObjectFit,
     ParentElement, PromptLevel, Render, ScrollHandle, SharedString, Stateful, Styled, StyledImage, TitlebarOptions, Window,
-    WindowBounds, WindowHandle, WindowKind, WindowOptions, div, img, prelude::*, px, rgb, size,
+    WindowBounds, WindowHandle, WindowKind, WindowOptions, deferred, div, img, prelude::*, px, rgb, size,
 };
 
-use crate::archive::{Archive, Line, Session, Speaker, Summary, SummaryLength, Turn, clock};
+use crate::archive::{self, Archive, EmailDraft, EmailField, Line, NoteBlock, Notes, Session, Speaker, Summary, SummaryLength, Turn, clock};
 use crate::codex::CodexClient;
 use crate::input::{InputEvent, TextInput};
+use crate::modes::ModeStore;
+use crate::notes;
 use crate::platform;
 use crate::settings::Store;
+use crate::text_area::TextArea;
 use crate::theme;
 use crate::ui;
 
+/// Continue a saved session Live, by id (`Overlay::resume_session`).
+pub type Resume = Rc<dyn Fn(String, &mut App)>;
+
+const DANGER: u32 = 0xffb4a8;
+const WRITING_NOTES: &str = "Writing notes…";
+const WRITING_EMAIL: &str = "Writing the email…";
+
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Tab { Summary, Timeline, Transcript, Answers, Screenshots }
+enum Tab { Notes, Email, Timeline, Transcript, Answers, Screenshots }
+
+/// What is open for editing in place.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Editing { Section(usize), Email(EmailField) }
+
+/// Which Copy button just put something on the clipboard; it reads "Copied" for a moment.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Copied { Notes, Transcript, Email }
 
 pub struct SessionsWindow {
     archive: Archive,
     listings: Vec<Summary>,
     session: Option<Session>,
+    /// The open session's mode name ("Coding Interview"), for the header and the notes.
+    mode_name: Option<String>,
     tab: Tab,
     length: SummaryLength,
     timeline: ScrollHandle,
     notice: Option<SharedString>,
     codex: Arc<CodexClient>,
+    resume: Resume,
     search: Entity<TextInput>,
     ask_input: Entity<TextInput>,
+    /// The text being edited in place (a note section or part of the email).
+    editor: Entity<TextArea>,
+    editing: Option<Editing>,
+    menu_open: bool,
+    copied: Option<Copied>,
     /// Lower-cased searchable text per session id, rebuilt on reload.
     index: Vec<(String, String)>,
     query: String,
@@ -43,10 +72,9 @@ pub struct SessionsWindow {
     working: Option<&'static str>,
 }
 
-/// Open the window, or bring the existing one forward.
 /// Open the window, or reload and raise it. `focus`: whether it may become key (macOS: only while
-/// CluelyRS is the active app, see `platform::activate_then`).
-pub fn open(existing: &mut Option<WindowHandle<SessionsWindow>>, root: PathBuf, codex: Arc<CodexClient>, focus: bool, cx: &mut App) {
+/// CluelyRS is the active app, see `platform::activate_then`). `resume` is what its Resume calls.
+pub fn open(existing: &mut Option<WindowHandle<SessionsWindow>>, root: PathBuf, codex: Arc<CodexClient>, resume: Resume, focus: bool, cx: &mut App) {
     if let Some(handle) = existing && handle.update(cx, |this, window, cx| { this.reload(cx); if focus { window.activate_window(); } }).is_ok() {
         return;
     }
@@ -64,13 +92,18 @@ pub fn open(existing: &mut Option<WindowHandle<SessionsWindow>>, root: PathBuf, 
         window_min_size: Some(size(px(900.0), px(560.0))),
         ..Default::default()
     };
-    *existing = cx.open_window(options, |_, cx| cx.new(|cx| SessionsWindow::new(Archive::at(root), codex, cx))).ok();
+    *existing = cx.open_window(options, |window, cx| cx.new(|cx| SessionsWindow::new(Archive::at(root), codex, resume, window, cx))).ok();
 }
 
 impl SessionsWindow {
-    fn new(archive: Archive, codex: Arc<CodexClient>, cx: &mut Context<Self>) -> Self {
+    fn new(archive: Archive, codex: Arc<CodexClient>, resume: Resume, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let search = cx.new(|cx| TextInput::new("Search transcripts and answers", cx));
         let ask_input = cx.new(|cx| TextInput::new("What did they ask about caching?", cx));
+        let editor = cx.new(|cx| TextArea::new("", cx));
+        // Notes written in the background and a Live session ending in the overlay change the open
+        // session while this window is in the background: coming back to it shows them. Only that
+        // session is read again, not the whole list.
+        cx.observe_window_activation(window, |this, window, cx| if window.is_window_active() { this.refresh_open(cx) }).detach();
         cx.subscribe(&search, |this, input, event, cx| {
             if matches!(event, InputEvent::Changed) { this.query = input.read(cx).text().trim().to_lowercase(); cx.notify(); }
         }).detach();
@@ -82,10 +115,18 @@ impl SessionsWindow {
         }).detach();
         let listings = archive.list();
         let session = listings.first().and_then(|first| archive.load(&first.id));
-        let mut window = Self { archive, listings, session, tab: Tab::Summary, length: SummaryLength::Standard, timeline: ScrollHandle::new(),
-            notice: None, codex, search, ask_input, index: Vec::new(), query: String::new(), asks: Vec::new(), working: None };
-        window.rebuild_index();
-        window
+        let mut this = Self { archive, listings, session: None, mode_name: None, tab: Tab::Notes, length: SummaryLength::Standard, timeline: ScrollHandle::new(),
+            notice: None, codex, resume, search, ask_input, editor, editing: None, menu_open: false, copied: None,
+            index: Vec::new(), query: String::new(), asks: Vec::new(), working: None };
+        this.set_session(session);
+        this.rebuild_index();
+        this
+    }
+
+    /// Show `session`, looking up its mode's name.
+    fn set_session(&mut self, session: Option<Session>) {
+        self.mode_name = session.as_ref().and_then(|s| s.mode.as_deref()).and_then(|id| ModeStore::load().get(id).map(|mode| mode.name.clone()));
+        self.session = session;
     }
 
     fn rebuild_index(&mut self) {
@@ -100,15 +141,30 @@ impl SessionsWindow {
         self.rebuild_index();
         let selected = self.session.as_ref().map(|s| s.id.clone()).filter(|id| self.listings.iter().any(|l| &l.id == id))
             .or_else(|| self.listings.first().map(|l| l.id.clone()));
-        self.session = selected.and_then(|id| self.archive.load(&id));
+        if self.session.as_ref().map(|s| &s.id) != selected.as_ref() { self.editing = None; }
+        self.set_session(selected.and_then(|id| self.archive.load(&id)));
+        cx.notify();
+    }
+
+    /// Read the open session again, unless it is being edited.
+    fn refresh_open(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.session.as_ref().map(|s| s.id.clone()).filter(|_| self.editing.is_none()) else { return };
+        let Some(session) = self.archive.load(&id) else { return };
+        // Its row in the list too: Live becomes its length, and notes bring a title.
+        if let Some(listing) = self.listings.iter_mut().find(|listing| listing.id == id) {
+            (listing.ended_at, listing.title) = (session.ended_at, session.title.clone());
+        }
+        self.set_session(Some(session));
         cx.notify();
     }
 
     /// Show session `id` (also from the overlay's Sessions panel, `Overlay::open_sessions_at`).
     pub(crate) fn select(&mut self, id: &str, cx: &mut Context<Self>) {
-        self.session = self.archive.load(id);
-        self.tab = Tab::Summary;
+        self.set_session(self.archive.load(id));
+        self.tab = Tab::Notes;
         self.notice = None;
+        self.editing = None;
+        self.menu_open = false;
         self.asks.clear();
         cx.notify();
     }
@@ -131,15 +187,55 @@ impl SessionsWindow {
         cx.notify();
     }
 
-    fn generate_notes(&mut self, cx: &mut Context<Self>) {
-        self.with_model("Writing notes…", cx, |settings, codex, session| crate::notes::generate(&settings, &codex, &session),
+    /// Write the notes and the email draft under the mode's current sections. `keep_edits` keeps
+    /// what the user changed.
+    fn generate_notes(&mut self, keep_edits: bool, cx: &mut Context<Self>) {
+        self.editing = None;
+        self.with_model(WRITING_NOTES, cx, |settings, codex, session| {
+            let sections = ModeStore::load().note_template(session.mode.as_deref());
+            notes::generate(&settings, &codex, &session, &sections)
+        }, move |this, id, result, cx| match result {
+            Ok(generated) => match this.archive.update(id, |s| notes::apply(s, generated, keep_edits)) {
+                Ok(_) => { this.length = SummaryLength::Standard; this.reload(cx); }
+                Err(_) => this.notice = Some("The notes couldn't be saved.".into()),
+            },
+            Err(error) => this.notice = Some(error.into()),
+        });
+    }
+
+    /// Regenerate: asks first when that would replace what the user wrote.
+    fn regenerate_notes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(session) = &self.session else { return };
+        if !notes::has_edits(session) { self.generate_notes(false, cx); return; }
+        let answer = window.prompt(PromptLevel::Info, "Regenerate the notes?",
+            Some("You've edited these notes or the email. Keep your edits and rewrite the rest, or replace everything."),
+            &["Keep my edits", "Replace my edits", "Cancel"], cx);
+        cx.spawn(async move |this, cx| {
+            let keep = match answer.await { Ok(0) => true, Ok(1) => false, _ => return };
+            let _ = this.update(cx, |this, cx| this.generate_notes(keep, cx));
+        }).detach();
+    }
+
+    /// Draft the email on its own, from the notes.
+    fn write_email(&mut self, cx: &mut Context<Self>) {
+        self.editing = None;
+        self.with_model(WRITING_EMAIL, cx, |settings, codex, session| notes::email(&settings, &codex, &session),
             |this, id, result, cx| match result {
-                Ok((title, notes)) => match this.archive.update(id, |s| { s.title = Some(title); s.notes = Some(notes); }) {
-                    Ok(_) => { this.length = SummaryLength::Standard; this.reload(cx); }
-                    Err(_) => this.notice = Some("The notes couldn't be saved.".into()),
+                Ok(draft) => match this.archive.update(id, |s| s.email = Some(draft)) {
+                    Ok(_) => this.reload(cx),
+                    Err(_) => this.notice = Some("The email couldn't be saved.".into()),
                 },
                 Err(error) => this.notice = Some(error.into()),
             });
+    }
+
+    fn regenerate_email(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let edited = self.session.as_ref().and_then(|s| s.email.as_ref()).is_some_and(|email| email.edited_at.is_some());
+        if !edited { self.write_email(cx); return; }
+        let answer = window.prompt(PromptLevel::Info, "Rewrite the email?", Some("Your changes to the draft are replaced."), &["Rewrite", "Cancel"], cx);
+        cx.spawn(async move |this, cx| {
+            if answer.await == Ok(0) { let _ = this.update(cx, |this, cx| this.write_email(cx)); }
+        }).detach();
     }
 
     fn write_overview(&mut self, length: SummaryLength, expand: bool, cx: &mut Context<Self>) {
@@ -163,6 +259,58 @@ impl SessionsWindow {
             move |this, id, result, _| {
                 if this.session.as_ref().is_some_and(|s| s.id == id) && let Some(entry) = this.asks.get_mut(index) { entry.1 = Some(result); }
             });
+    }
+
+    /// Open `editing` with `text` in the editor and give it the keyboard.
+    fn start_edit(&mut self, editing: Editing, text: String, window: &mut Window, cx: &mut Context<Self>) {
+        if self.working.is_some() { return; }
+        self.editing = Some(editing);
+        // To and Subject are one line; the body and the sections grow from two.
+        let lines = if matches!(editing, Editing::Email(EmailField::To | EmailField::Subject)) { 1 } else { 2 };
+        self.editor.update(cx, |editor, cx| { editor.set_min_lines(lines, cx); editor.set_text(&text, cx) });
+        window.focus(&self.editor.focus_handle(cx));
+        cx.notify();
+    }
+
+    fn save_edit(&mut self, cx: &mut Context<Self>) {
+        let (Some(editing), Some(id)) = (self.editing.take(), self.session.as_ref().map(|s| s.id.clone())) else { return };
+        let text = self.editor.read(cx).text().to_string();
+        let now = archive::unix_now();
+        let saved = match editing {
+            Editing::Section(index) => self.archive.edit_section(&id, index, &text, now),
+            Editing::Email(field) => self.archive.edit_email(&id, field, &text, now),
+        };
+        match saved {
+            Ok(session) => self.set_session(Some(session)),
+            Err(_) => self.notice = Some("The change couldn't be saved.".into()),
+        }
+        cx.notify();
+    }
+
+    fn cancel_edit(&mut self, cx: &mut Context<Self>) {
+        self.editing = None;
+        cx.notify();
+    }
+
+    fn copy(&mut self, what: Copied, text: String, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        self.copied = Some(what);
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_millis(1500)).await;
+            let _ = this.update(cx, |this, cx| if this.copied == Some(what) { this.copied = None; cx.notify(); });
+        }).detach();
+        cx.notify();
+    }
+
+    /// Continue the open session Live in the overlay, appending to it.
+    fn resume_live(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.session.as_ref().filter(|s| s.ended_at.is_some()).map(|s| s.id.clone()) else { return };
+        self.editing = None;
+        let resume = self.resume.clone();
+        cx.spawn(async move |this, cx| {
+            let _ = cx.update(|cx| resume(id, cx));
+            let _ = this.update(cx, |this, cx| this.reload(cx));
+        }).detach();
     }
 
     /// Jump to the first timeline entry at or after `at_ms`.
@@ -238,23 +386,69 @@ fn minutes(start: u64, end: Option<u64>) -> String {
     }
 }
 
+/// "just now", "2 min ago", "3 h ago", "Oct 5".
+fn ago(then: u64, now: u64) -> String {
+    match now.saturating_sub(then) {
+        0..60 => "just now".into(),
+        seconds @ 60..3_600 => format!("{} min ago", seconds / 60),
+        seconds @ 3_600..86_400 => format!("{} h ago", seconds / 3_600),
+        _ => local(then).map(|t| t.format("%b %-d").to_string()).unwrap_or_default(),
+    }
+}
+
 fn plural(count: usize, word: &str) -> String { format!("{count} {word}{}", if count == 1 { "" } else { "s" }) }
 
 fn label(text: &'static str) -> Div {
     div().text_size(px(11.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::muted()).child(text)
 }
 
-fn outline_button(id: &'static str, text: &'static str) -> Stateful<Div> {
-    div().id(id).cursor_pointer().px(px(12.0)).py(px(7.0)).rounded(px(9.0)).border_1().border_color(theme::hairline())
-        .text_size(px(13.0)).text_color(theme::body()).hover(|b| b.border_color(theme::bubble_border())).child(text)
+fn muted(text: impl Into<SharedString>) -> Div { div().text_size(px(13.0)).text_color(theme::muted()).child(text.into()) }
+
+fn outline(id: &'static str) -> Stateful<Div> {
+    div().id(id).flex().items_center().gap(px(6.0)).cursor_pointer().px(px(12.0)).py(px(7.0)).rounded(px(9.0)).border_1().border_color(theme::hairline())
+        .text_size(px(13.0)).text_color(theme::body()).hover(|b| b.border_color(theme::bubble_border()))
+}
+
+fn outline_button(id: &'static str, text: &'static str) -> Stateful<Div> { outline(id).child(text) }
+
+/// The accent-tinted button of a row (Resume, Regenerate, Copy email).
+fn tinted_button(id: &'static str, icon: Option<&'static str>, text: &'static str) -> Stateful<Div> {
+    div().id(id).flex().items_center().gap(px(6.0)).cursor_pointer().px(px(12.0)).py(px(7.0)).rounded(px(9.0)).bg(theme::bubble())
+        .border_1().border_color(theme::bubble_border()).text_size(px(13.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text())
+        .children(icon.map(|path| ui::icon(path, 13.0, theme::accent_soft()))).child(text)
+}
+
+/// A button with a leading icon and an outline (Copy notes, Regenerate).
+fn icon_button(id: &'static str, icon: &'static str, text: &'static str) -> Stateful<Div> {
+    outline(id).child(ui::icon(icon, 13.0, theme::body())).child(text)
+}
+
+fn primary_button(id: &'static str, text: &'static str) -> Stateful<Div> {
+    div().id(id).cursor_pointer().px(px(12.0)).py(px(7.0)).rounded(px(9.0)).bg(theme::accent())
+        .text_size(px(13.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::accent_ink()).child(text)
 }
 
 fn speaker(speaker: Speaker) -> (&'static str, gpui::Rgba) {
     match speaker { Speaker::You => ("You", theme::accent_soft()), Speaker::Them => ("Them", theme::ok()) }
 }
 
+/// What Copy notes puts on the clipboard: the title, then the notes as Markdown.
+fn notes_clipboard(session: &Session, notes: &Notes) -> String {
+    format!("# {}\n\n{}", session.title.as_deref().unwrap_or("Session"), archive::notes_markdown(notes)).trim_end().to_string()
+}
+
+/// What the rail's email card shows of the body: its first lines, cut at a word.
+fn preview(body: &str, max: usize) -> String {
+    let text = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    if text.chars().count() <= max { return text; }
+    let cut: String = text.chars().take(max).collect();
+    format!("{}…", cut.rsplit_once(' ').map_or(cut.as_str(), |(head, _)| head))
+}
+
 impl SessionsWindow {
     fn screenshot(&self, session: &Session, file: &str) -> Option<PathBuf> { self.archive.screenshot_path(&session.id, file) }
+
+    fn copy_label(&self, what: Copied, text: &'static str) -> &'static str { if self.copied == Some(what) { "Copied" } else { text } }
 
     fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let selected = self.session.as_ref().map(|s| s.id.as_str());
@@ -301,8 +495,7 @@ impl SessionsWindow {
                 .child(div().text_size(px(12.0)).text_color(theme::muted()).child(if cfg!(target_os = "macos") { "Saved on this Mac" } else { "Saved on this PC" })))
     }
 
-    fn header(&self, session: &Session, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let _ = window;
+    fn header(&self, session: &Session, cx: &mut Context<Self>) -> impl IntoElement {
         let start = local(session.started_at);
         let mut meta = vec![
             match day_group(session.started_at) { "Today" => "Today".to_string(), "Yesterday" => "Yesterday".to_string(), _ => start.map(|t| t.format("%a %b %-d").to_string()).unwrap_or_default() },
@@ -313,34 +506,128 @@ impl SessionsWindow {
             },
             minutes(session.started_at, session.ended_at),
         ];
-        if let Some(model) = &session.model { meta.push(model.clone()); }
+        if let Some(name) = self.mode_name.clone().or_else(|| session.model.clone()) { meta.push(name); }
         let title = session.title.clone().unwrap_or_else(|| "Untitled session".into());
         let shots = session.turns.iter().filter(|t| t.screenshot.is_some()).count();
-        let tabs = [(Tab::Summary, "Summary".to_string()), (Tab::Timeline, "Timeline".to_string()), (Tab::Transcript, "Transcript".to_string()),
-            (Tab::Answers, format!("Answers  {}", session.turns.len())), (Tab::Screenshots, format!("Screenshots  {shots}"))];
+        let tabs = [(Tab::Notes, "Notes".to_string()), (Tab::Email, "Follow-up email".to_string()), (Tab::Timeline, "Timeline".to_string()),
+            (Tab::Transcript, "Transcript".to_string()), (Tab::Answers, format!("Answers  {}", session.turns.len())), (Tab::Screenshots, format!("Screenshots  {shots}"))];
         let mut tab_row = div().flex().gap(px(22.0)).border_b_1().border_color(theme::divider());
         for (index, (tab, text)) in tabs.into_iter().enumerate() {
             let selected = tab == self.tab;
             tab_row = tab_row.child(div().id(("tab", index)).cursor_pointer().pb(px(10.0)).text_size(px(13.0))
                 .when(selected, |t| t.font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).border_b_2().border_color(theme::accent()))
                 .when(!selected, |t| t.text_color(theme::muted()).hover(|t| t.text_color(theme::body())))
-                .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| { this.tab = tab; cx.notify(); }))
+                .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| { this.tab = tab; this.editing = None; cx.notify(); }))
                 .child(text));
         }
+        let live = session.ended_at.is_none();
+        let resume = if live {
+            tinted_button("resume", Some("icons/setup-wave.svg"), "Live now").opacity(0.6).cursor_default()
+        } else {
+            tinted_button("resume", Some("icons/setup-wave.svg"), "Resume").on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.resume_live(cx)))
+        };
+        let spoken = notes::spoken_transcript(session);
+        let copy_transcript = outline_button("copy-transcript", self.copy_label(Copied::Transcript, "Copy transcript"))
+            .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| this.copy(Copied::Transcript, spoken.clone(), cx)));
+        let mut more = div().relative().child(div().id("more").size(px(34.0)).flex().items_center().justify_center().cursor_pointer().rounded(px(9.0))
+            .border_1().border_color(if self.menu_open { theme::accent() } else { theme::hairline() }).hover(|b| b.border_color(theme::bubble_border()))
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| { cx.stop_propagation(); this.menu_open = !this.menu_open; cx.notify(); }))
+            .child(ui::icon("icons/more.svg", 14.0, theme::body())));
+        if self.menu_open { more = more.child(deferred(self.more_menu(cx)).with_priority(1)); }
         div().flex().flex_col().gap(px(14.0)).px(px(32.0)).pt(px(26.0))
             .child(div().flex().justify_between().items_start().gap(px(24.0))
                 .child(div().flex().flex_col().gap(px(6.0)).min_w_0()
                     .child(div().text_size(px(12.0)).text_color(theme::muted()).child(meta.into_iter().filter(|m| !m.is_empty()).collect::<Vec<_>>().join(" · ")))
                     .child(div().text_size(px(30.0)).line_height(px(36.0)).font_weight(FontWeight::BOLD).text_color(theme::text()).child(title)))
-                .child(div().flex().gap(px(8.0)).pt(px(4.0)).flex_none()
-                    .child(outline_button("export", "Export").on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.export(cx))))
-                    .child(outline_button("folder", "Open folder").on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, _| this.reveal())))
-                    .child(outline_button("delete", "Delete").text_color(rgb(0xffb4a8))
-                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| this.confirm_delete(window, cx))))))
+                .child(div().flex().items_center().gap(px(8.0)).pt(px(4.0)).flex_none().child(resume).child(copy_transcript).child(more)))
             .when_some(self.notice.clone(), |header, notice| header.child(div().text_size(px(12.0)).text_color(theme::accent_soft()).child(notice)))
             .child(tab_row)
     }
 
+    /// ⋯: Export, Open folder and Delete.
+    fn more_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let close = |this: &mut Self| this.menu_open = false;
+        div().absolute().top(px(40.0)).right_0().w(px(200.0)).child(ui::menu().id("more-menu")
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| { this.menu_open = false; cx.notify(); }))
+            .child(ui::menu_item("menu-export", "Export Markdown", false)
+                .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| { close(this); this.export(cx); })))
+            .child(ui::menu_item("menu-folder", "Open folder", false)
+                .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| { close(this); this.reveal(); cx.notify(); })))
+            .child(div().h(px(1.0)).my(px(4.0)).bg(theme::hairline()))
+            .child(ui::menu_item("menu-delete", "Delete", false).text_color(rgb(DANGER))
+                .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, window, cx| { close(this); this.confirm_delete(window, cx); }))))
+    }
+
+    /// A tab's top row: its label, a note beside it and its buttons.
+    fn toolbar(caption: &'static str, note: String, buttons: Vec<AnyElement>) -> Div {
+        div().flex().items_center().justify_between().gap(px(12.0))
+            .child(div().flex().items_baseline().gap(px(10.0)).min_w_0().child(label(caption)).child(div().min_w_0().truncate().text_size(px(13.0)).text_color(theme::muted()).child(note)))
+            .child(div().flex().flex_none().gap(px(8.0)).children(buttons))
+    }
+
+    /// The editor in its box, as in a section being edited: the field's own text size, a 2 px
+    /// accent edge below.
+    fn editor_box(&self) -> Div {
+        div().relative().w_full().min_w_0().overflow_hidden().px(px(14.0)).py(px(10.0)).rounded(px(10.0)).bg(theme::field()).border_1().border_color(theme::hairline())
+            .cursor_text().text_color(theme::text())
+            .child(self.editor.clone())
+            .child(div().absolute().left_0().right_0().bottom_0().h(px(2.0)).bg(theme::accent()))
+    }
+
+    fn cancel_save(&self, cx: &mut Context<Self>) -> Div {
+        div().flex().items_center().gap(px(8.0))
+            .child(outline_button("edit-cancel", "Cancel").on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.cancel_edit(cx))))
+            .child(primary_button("edit-save", "Save").on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.save_edit(cx))))
+    }
+
+    fn notes_tab(&self, session: &Session, cx: &mut Context<Self>) -> AnyElement {
+        match session.notes.as_ref().filter(|notes| !notes.sections.is_empty()) {
+            Some(notes) if self.working != Some(WRITING_NOTES) => self.sections_view(session, notes, cx),
+            _ => self.summary_tab(session, cx),
+        }
+    }
+
+    /// Notes under the mode's sections, each editable in place.
+    fn sections_view(&self, session: &Session, notes: &Notes, cx: &mut Context<Self>) -> AnyElement {
+        let mut note = format!("{} sections", self.mode_name.as_deref().unwrap_or("Mode"));
+        if let Some(at) = notes.edited_at() { note.push_str(&format!(" · edited by you {}", ago(at, archive::unix_now()))); }
+        let copy_text = notes_clipboard(session, notes);
+        let live = session.ended_at.is_none();
+        let mut buttons = vec![icon_button("copy-notes", "icons/copy.svg", self.copy_label(Copied::Notes, "Copy notes"))
+            .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| this.copy(Copied::Notes, copy_text.clone(), cx))).into_any_element()];
+        if !live {
+            buttons.push(tinted_button("regenerate", Some("icons/setup-refresh.svg"), "Regenerate").when(self.working.is_some(), |b| b.opacity(0.55))
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| this.regenerate_notes(window, cx))).into_any_element());
+        }
+        let mut body = div().id("notes").flex().flex_col().gap(px(26.0)).px(px(32.0)).py(px(22.0)).flex_1().overflow_y_scroll()
+            .child(Self::toolbar("NOTES", note, buttons));
+        if live { body = body.child(muted("Live now. The notes are rewritten when this session ends; your edits are kept.")); }
+        for (index, block) in notes.sections.iter().enumerate() {
+            body = body.child(self.section_block(index, block, live, cx));
+        }
+        body.into_any_element()
+    }
+
+    fn section_block(&self, index: usize, block: &NoteBlock, live: bool, cx: &mut Context<Self>) -> Div {
+        let editing = self.editing == Some(Editing::Section(index));
+        let heading = div().flex().items_center().justify_between().gap(px(12.0)).min_h(px(34.0))
+            .child(div().text_size(px(17.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child(block.name.clone()))
+            .when(editing, |row| row.child(self.cancel_save(cx)));
+        let content: AnyElement = if editing { self.editor_box().text_size(px(15.0)).line_height(px(23.0)).into_any_element() } else {
+            let text = block.text.clone();
+            let shown: AnyElement = if text.trim().is_empty() {
+                muted(if live { "Nothing yet." } else { "Nothing noted. Click to add." }).into_any_element()
+            } else {
+                div().text_size(px(15.0)).line_height(px(23.0)).text_color(theme::body()).child(crate::markdown::render(&text, 15.0)).into_any_element()
+            };
+            div().id(("section", index)).rounded(px(6.0)).when(!live, |area| area.cursor_text().hover(|area| area.bg(theme::raised()))
+                .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, window, cx| this.start_edit(Editing::Section(index), text.clone(), window, cx))))
+                .child(shown).into_any_element()
+        };
+        div().flex().flex_col().gap(px(8.0)).child(heading).child(content)
+    }
+
+    /// Notes in the general format (and sessions saved before note sections).
     fn summary_tab(&self, session: &Session, cx: &mut Context<Self>) -> AnyElement {
         let notes = session.notes.as_ref();
         let mut lengths = ui::segmented();
@@ -349,6 +636,7 @@ impl SessionsWindow {
                 .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| { this.length = length; cx.notify(); })));
         }
         let busy = self.working.is_some();
+        let live = session.ended_at.is_none();
         let expand = div().id("expand").flex().items_center().gap(px(6.0)).px(px(11.0)).py(px(6.0)).rounded(px(8.0)).bg(theme::bubble())
             .border_1().border_color(theme::bubble_border()).cursor_pointer().when(busy, |b| b.opacity(0.55))
             .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| { let length = this.length; this.write_overview(length, true, cx); }))
@@ -358,6 +646,7 @@ impl SessionsWindow {
             .text_size(px(12.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::accent_ink()).child(label);
         let overview: AnyElement = match (self.working, notes.and_then(|n| n.overviews.get(&self.length))) {
             (Some(label), _) => div().text_size(px(14.0)).text_color(theme::muted()).child(label).into_any_element(),
+            (None, _) if live => muted("Live now. Notes are written when this session ends.").into_any_element(),
             (None, Some(text)) => div().text_size(px(17.0)).line_height(px(27.0)).text_color(theme::text())
                 .child(crate::markdown::render(text, 17.0)).into_any_element(),
             (None, None) if notes.is_some() => {
@@ -372,7 +661,7 @@ impl SessionsWindow {
                 .child(div().flex_1().text_size(px(13.0)).text_color(theme::muted())
                     .child("Notes are written by the model you chose in Settings when a session ends."))
                 .child(action("generate-notes", "Generate notes".into())
-                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.generate_notes(cx))))
+                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.generate_notes(false, cx))))
                 .into_any_element(),
         };
         // Talk share by spoken text length, from the labelled transcript.
@@ -408,14 +697,90 @@ impl SessionsWindow {
         if topics.is_empty() {
             covered = covered.child(div().text_size(px(13.0)).text_color(theme::muted()).child("Topics appear here with the summary."));
         }
+        let mut follow = div().flex().flex_col().gap(px(10.0)).child(label("FOLLOW UP"));
+        let items = notes.map(|n| n.follow_ups.as_slice()).unwrap_or(&[]);
+        for item in items {
+            follow = follow.child(div().flex().gap(px(10.0)).items_start()
+                .child(div().size(px(14.0)).mt(px(2.0)).flex_none().rounded(px(4.0)).border(px(1.5)).border_color(rgb(0x4a4d52)))
+                .child(div().flex_1().min_w_0().text_size(px(13.0)).line_height(px(19.0)).text_color(theme::body()).child(item.clone())));
+        }
+        // Copy notes and Regenerate once there are notes; regenerating writes them under the mode's sections.
+        let toolbar = notes.filter(|_| !live).map(|notes| {
+            let copy_text = notes_clipboard(session, notes);
+            Self::toolbar("NOTES", "General format".into(), vec![
+                icon_button("copy-notes", "icons/copy.svg", self.copy_label(Copied::Notes, "Copy notes"))
+                    .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| this.copy(Copied::Notes, copy_text.clone(), cx))).into_any_element(),
+                tinted_button("regenerate", Some("icons/setup-refresh.svg"), "Regenerate").when(busy, |b| b.opacity(0.55))
+                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| this.regenerate_notes(window, cx))).into_any_element(),
+            ])
+        });
         div().id("summary").flex().flex_col().gap(px(24.0)).px(px(32.0)).py(px(22.0)).flex_1().overflow_y_scroll()
+            .children(toolbar)
             .child(div().flex().items_center().justify_between()
                 .child(label("OVERVIEW"))
                 .child(div().flex().items_center().gap(px(10.0))
                     .child(div().text_size(px(12.0)).text_color(theme::muted()).child("Length"))
                     .child(lengths).child(expand)))
             .child(overview).child(stats).child(covered)
+            .when(!items.is_empty(), |summary| summary.child(follow))
             .into_any_element()
+    }
+
+    /// The follow-up email draft: To, Subject and body, each editable in place.
+    fn email_tab(&self, session: &Session, cx: &mut Context<Self>) -> AnyElement {
+        let live = session.ended_at.is_none();
+        let email = session.email.as_ref();
+        let editing = self.editing.is_some_and(|editing| matches!(editing, Editing::Email(_)));
+        let mut buttons = Vec::new();
+        if editing {
+            // While a part is edited, Cancel and Save take the buttons' place, in view above the draft.
+            buttons.push(self.cancel_save(cx).into_any_element());
+        } else if !live && email.is_some() {
+            buttons.push(icon_button("email-regenerate", "icons/setup-refresh.svg", "Regenerate").when(self.working.is_some(), |b| b.opacity(0.55))
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| this.regenerate_email(window, cx))).into_any_element());
+        }
+        if let Some(email) = email.filter(|_| !editing) {
+            let text = email.clipboard_text();
+            buttons.push(tinted_button("copy-email", Some("icons/copy.svg"), self.copy_label(Copied::Email, "Copy email"))
+                .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| this.copy(Copied::Email, text.clone(), cx))).into_any_element());
+        }
+        let note = match email.and_then(|email| email.edited_at) {
+            Some(at) => format!("Edited by you {} · never sent from CluelyRS", ago(at, archive::unix_now())),
+            None => "Written from the notes · never sent from CluelyRS".into(),
+        };
+        let mut body = div().id("email").flex().flex_col().gap(px(18.0)).px(px(32.0)).py(px(22.0)).flex_1().overflow_y_scroll()
+            .child(Self::toolbar("DRAFT", note, buttons));
+        body = match (self.working, email) {
+            (Some(WRITING_EMAIL), _) | (Some(WRITING_NOTES), None) => body.child(muted(self.working.unwrap_or_default())),
+            (_, Some(email)) => body.child(self.email_card(email, live, cx))
+                .child(muted("Click the text to edit it. Copy email puts the subject and body on the clipboard; paste into any mail app.").text_size(px(12.0))),
+            (_, None) if live => body.child(muted("Live now. A draft is written with the notes when this session ends.")),
+            (_, None) => body.child(div().flex().items_center().gap(px(12.0)).p(px(14.0)).rounded(px(12.0)).border_1().border_color(theme::hairline())
+                .child(div().flex_1().text_size(px(13.0)).text_color(theme::muted()).child("No draft yet. It's written from the notes by the model you chose in Settings."))
+                .child(primary_button("write-email", "Write email").when(self.working.is_some(), |b| b.opacity(0.55))
+                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.write_email(cx))))),
+        };
+        body.into_any_element()
+    }
+
+    fn email_card(&self, email: &EmailDraft, live: bool, cx: &mut Context<Self>) -> Div {
+        let field = |this: &Self, field: EmailField, text: String, cx: &mut Context<Self>| -> AnyElement {
+            if this.editing == Some(Editing::Email(field)) { return this.editor_box().into_any_element(); }
+            let id = match field { EmailField::To => "email-to", EmailField::Subject => "email-subject", EmailField::Body => "email-body" };
+            let shown = if text.trim().is_empty() { div().text_color(theme::placeholder()).child(if field == EmailField::To { "Add a name" } else { "Empty" }) }
+                else { div().child(text.clone()) };
+            div().id(id).flex_1().min_w_0().rounded(px(6.0)).when(!live, |area| area.cursor_text().hover(|area| area.bg(theme::raised()))
+                .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, window, cx| this.start_edit(Editing::Email(field), text.clone(), window, cx))))
+                .child(shown).into_any_element()
+        };
+        let row = |caption: &'static str, value: AnyElement| div().flex().items_center().gap(px(16.0)).px(px(20.0)).py(px(14.0)).border_b_1().border_color(theme::divider())
+            .child(div().w(px(80.0)).flex_none().text_size(px(13.0)).text_color(theme::muted()).child(caption))
+            .child(value);
+        div().flex().flex_col().rounded(px(12.0)).bg(theme::field()).border_1().border_color(theme::hairline())
+            .child(row("To", field(self, EmailField::To, email.to.clone(), cx)).text_size(px(14.0)).text_color(theme::text()))
+            .child(row("Subject", field(self, EmailField::Subject, email.subject.clone(), cx)).text_size(px(14.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text()))
+            .child(div().px(px(20.0)).py(px(18.0)).text_size(px(15.0)).line_height(px(24.0)).text_color(theme::body())
+                .child(field(self, EmailField::Body, email.body.clone(), cx)))
     }
 
     fn line_row(line: &Line) -> Div {
@@ -488,6 +853,23 @@ impl SessionsWindow {
         grid.into_any_element()
     }
 
+    /// The rail's follow-up email card: subject, the start of the body, View draft and Copy.
+    fn email_summary(&self, session: &Session, cx: &mut Context<Self>) -> Div {
+        let mut card = div().flex().flex_col().gap(px(10.0)).child(label("FOLLOW-UP EMAIL"));
+        let Some(email) = &session.email else {
+            return card.child(muted(if session.ended_at.is_none() { "Drafted with the notes when the session ends." } else { "No draft yet." }));
+        };
+        let text = email.clipboard_text();
+        card = card.child(div().flex().flex_col().gap(px(8.0)).p(px(14.0)).rounded(px(12.0)).bg(theme::field()).border_1().border_color(theme::hairline())
+            .child(div().text_size(px(14.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child(email.subject.clone()))
+            .child(div().text_size(px(13.0)).line_height(px(19.0)).text_color(theme::muted()).child(preview(&email.body, 120)))
+            .child(div().flex().gap(px(8.0)).pt(px(4.0))
+                .child(outline_button("view-draft", "View draft").on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| { this.tab = Tab::Email; cx.notify(); })))
+                .child(tinted_button("rail-copy-email", None, self.copy_label(Copied::Email, "Copy"))
+                    .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| this.copy(Copied::Email, text.clone(), cx))))));
+        card
+    }
+
     fn rail(&self, session: &Session, cx: &mut Context<Self>) -> impl IntoElement {
         // Questions heard from the other side, straight from the transcript.
         let questions: Vec<&Line> = session.transcript.iter().filter(|l| l.speaker == Speaker::Them && l.text.contains('?')).take(6).collect();
@@ -500,17 +882,9 @@ impl SessionsWindow {
                 .child(div().flex_1().min_w_0().text_size(px(13.0)).line_height(px(19.0)).text_color(theme::body()).child(line.text.clone())));
         }
         if questions.is_empty() { key = key.child(div().text_size(px(13.0)).text_color(theme::muted()).child("No questions were heard.")); }
-        let mut follow = div().flex().flex_col().gap(px(10.0)).child(label("FOLLOW UP"));
-        let items = session.notes.as_ref().map(|n| n.follow_ups.as_slice()).unwrap_or(&[]);
-        for item in items {
-            follow = follow.child(div().flex().gap(px(10.0)).items_start()
-                .child(div().size(px(14.0)).mt(px(2.0)).flex_none().rounded(px(4.0)).border(px(1.5)).border_color(rgb(0x4a4d52)))
-                .child(div().flex_1().min_w_0().text_size(px(13.0)).line_height(px(19.0)).text_color(theme::body()).child(item.clone())));
-        }
-        if items.is_empty() { follow = follow.child(div().text_size(px(13.0)).text_color(theme::muted()).child("Written with the summary.")); }
         div().id("rail").w(px(300.0)).flex_none().h_full().flex().flex_col().gap(px(22.0)).px(px(22.0)).py(px(26.0)).overflow_y_scroll()
             .bg(rgb(0x131417)).border_l_1().border_color(theme::divider())
-            .child(key).child(follow)
+            .child(key).child(self.email_summary(session, cx))
             .child(div().flex().flex_col().gap(px(8.0)).pt(px(14.0)).border_t_1().border_color(theme::divider())
                 .child(div().text_size(px(12.0)).text_color(theme::muted()).child("Ask about this session"))
                 .child(div().id("ask").flex().items_center().gap(px(8.0)).px(px(10.0)).py(px(9.0)).rounded(px(10.0)).bg(theme::field())
@@ -528,7 +902,7 @@ impl SessionsWindow {
                     let reply: AnyElement = match answer {
                         None => div().text_size(px(13.0)).text_color(theme::muted()).child("Answering…").into_any_element(),
                         Some(Ok(text)) => div().id(("ask-answer", index)).min_w_0().text_color(theme::body()).child(crate::markdown::render(text, 13.0)).into_any_element(),
-                        Some(Err(error)) => div().text_size(px(13.0)).text_color(rgb(0xffb4a8)).child(error.clone()).into_any_element(),
+                        Some(Err(error)) => div().text_size(px(13.0)).text_color(rgb(DANGER)).child(error.clone()).into_any_element(),
                     };
                     div().flex().flex_col().gap(px(6.0)).pt(px(6.0))
                         .child(div().text_size(px(13.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child(question.clone()))
@@ -545,13 +919,14 @@ impl Render for SessionsWindow {
                 .child("Select a session to review it.")),
             Some(session) => {
                 let body = match self.tab {
-                    Tab::Summary => self.summary_tab(&session, cx),
+                    Tab::Notes => self.notes_tab(&session, cx),
+                    Tab::Email => self.email_tab(&session, cx),
                     Tab::Timeline => self.timeline_tab(&session, cx),
                     Tab::Transcript => self.transcript_tab(&session),
                     Tab::Answers => self.answers_tab(&session),
                     Tab::Screenshots => self.screenshots_tab(&session, cx),
                 };
-                content.child(div().flex_1().min_w_0().h_full().flex().flex_col().child(self.header(&session, window, cx)).child(body))
+                content.child(div().flex_1().min_w_0().h_full().flex().flex_col().child(self.header(&session, cx)).child(body))
                     .child(self.rail(&session, cx))
             }
         };
@@ -603,4 +978,16 @@ pub(crate) fn title_bar(title: &'static str, window: &Window) -> impl IntoElemen
             .child(crate::ui::mark(16.0))
             .child(div().text_size(px(12.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::body()).child(title)))
         .child(div().flex().h_full().child(minimize).child(maximize).child(close))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn edit_times_read_as_recent_and_previews_cut_at_a_word() {
+        assert_eq!((ago(100, 130), ago(100, 100 + 120), ago(100, 100 + 7_200)), ("just now".into(), "2 min ago".into(), "2 h ago".into()));
+        assert_eq!(preview("Hi Priya,\n\nthanks for the time today.", 200), "Hi Priya, thanks for the time today.");
+        assert_eq!(preview("one two three four", 9), "one two…");
+    }
 }
