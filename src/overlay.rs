@@ -16,6 +16,7 @@ use gpui::{
 
 use crate::answer::{self, Exchange};
 use crate::archive::{self, Archive, Recorder};
+use crate::attachments::{self, Attachment, Content};
 use crate::input::{InputEvent, TextInput};
 use crate::listening::{self, Listening};
 use crate::reasoning::{self, ReasoningSession};
@@ -80,6 +81,9 @@ struct Turn {
     /// The Live session it belongs to (`Overlay::session`). Earlier sessions stay on the card,
     /// but only the current one's turns go to the model.
     session: u64,
+    /// Files attached to the question (`attach`), and those of them cut to fit the prompt budget.
+    attachments: Arc<[Attachment]>,
+    cut: Vec<String>,
 }
 
 /// Add an answer to the session's History record, when one is being saved. A `stopped` answer
@@ -88,9 +92,16 @@ fn save_turn(recorder: &mut Option<Recorder>, screenshots: bool, turn: &Turn, st
     let Some(recorder) = recorder else { return };
     if stopped && turn.text.trim().is_empty() && turn.question.trim().is_empty() { return; }
     let shot = if screenshots { turn.screenshot.as_deref() } else { None };
+    // Attached files are kept by name and type, with what the model read from each: a document's
+    // text, and an image when screenshots are saved too.
+    let attachments = turn.attachments.iter().map(|file| archive::Attached { name: file.name.clone(), kind: file.kind.tag().into(), bytes: file.bytes, file: None }).collect();
+    let kept: Vec<Option<archive::Kept>> = turn.attachments.iter().map(|file| match &file.content {
+        Content::Text(text) => Some(archive::Kept::Text(text)),
+        Content::Jpeg(jpeg) => screenshots.then_some(archive::Kept::Jpeg(jpeg)),
+    }).collect();
     let saved = archive::Turn { at_ms: turn.at_ms, action: turn.action.to_string(), question: turn.question.clone(),
-        answer: turn.text.clone(), screenshot: None, stopped };
-    if let Err(error) = recorder.add_turn(saved, shot) { eprintln!("answer could not be saved: {error}"); }
+        answer: turn.text.clone(), screenshot: None, stopped, attachments };
+    if let Err(error) = recorder.add_turn(saved, shot, &kept) { eprintln!("answer could not be saved: {error}"); }
 }
 
 pub struct Overlay {
@@ -181,6 +192,8 @@ pub struct Overlay {
     session: u64,
     /// Where each later session starts in `turns`, with its "New session" label.
     dividers: Vec<chat::Divider>,
+    /// Files attached to the question being typed (`attach`).
+    attached: attach::Attached,
     scroll: ScrollHandle,
     /// The capture + transcription pipeline while Live is transcribing.
     pub(crate) listening: Option<Listening>,
@@ -378,7 +391,7 @@ impl Overlay {
             #[cfg(target_os = "macos")]
             sign_in_attempt: 0,
             cli_error: None,
-            motion: None, live_since: None, turns: Vec::new(), session: 0, dividers: Vec::new(), scroll: ScrollHandle::new(),
+            motion: None, live_since: None, turns: Vec::new(), session: 0, dividers: Vec::new(), attached: Default::default(), scroll: ScrollHandle::new(),
             listening: None, listening_status: None, listening_epoch: 0, transcript: Vec::new(), provisional: Default::default(), levels: Default::default(),
             model_installed: false, model_download: None, model_notice: None,
             open_picker: None, reveal_accounts: false, devices: None, devices_loading: false, archive_bytes: None, picker_face: Rc::default(), tip: None,
@@ -623,6 +636,8 @@ impl Overlay {
         if self.sessions_panel_open() { height = height.max(SESSIONS_PANEL_WINDOW_HEIGHT); }
         // The mode switcher hangs below the card.
         if self.switcher_open() { height = height.max(switcher::window_height(self.live_since.is_some() || !self.turns.is_empty(), self.update_notice_shown())); }
+        // Chips above the text box make the card taller.
+        if !self.attached.is_empty() { height += attach::ROOM; }
         platform::resize(window, self.native, size(px(self.store.value.card_width.window()), px(height)));
     }
 
@@ -751,6 +766,7 @@ impl Overlay {
             self.tip = None;
             cx.notify();
         }
+        self.drag_ended(cx);
     }
 
     /// Start Live if needed, take the foreground and put the caret in the composer.
@@ -902,17 +918,25 @@ impl Overlay {
         }).detach();
     }
 
+    /// Send what is typed, with the files attached to it. A file still being read is waited for
+    /// (the return button stays grey); refused files are cleared, never sent.
     pub(crate) fn send_composer(&mut self, input: Entity<TextInput>, window: &mut Window, cx: &mut Context<Self>) {
         let question = input.read(cx).text().trim().to_string();
-        if question.is_empty() { return; }
+        if (question.is_empty() && !self.attached.has_ready()) || self.attached.reading() { return; }
         input.update(cx, |input, cx| input.clear(cx));
-        self.send("Ask", question, window, cx);
+        let attachments = self.attached.take();
+        self.send_with("Ask", question, attachments, window, cx);
         self.return_to_previous_app();
     }
 
     /// Ask the selected provider: optional screenshot, recent exchanges as context, streamed reply.
     /// A speculative answer prepared for exactly this context is shown at once instead.
     fn send(&mut self, action: &str, question: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.send_with(action, question, Arc::default(), window, cx);
+    }
+
+    /// `send`, with files attached to the question.
+    fn send_with(&mut self, action: &str, question: String, attachments: Arc<[Attachment]>, window: &mut Window, cx: &mut Context<Self>) {
         self.show();
         // The answer shows on the card, which the Sessions panel replaces.
         self.close_sessions_panel(false, window, cx);
@@ -925,8 +949,11 @@ impl Overlay {
         self.next_turn += 1;
         let id = self.next_turn;
         let at_ms = self.live_since.map(|start| start.elapsed().as_millis() as u64).unwrap_or(0);
-        self.turns.push(Turn { id, action: action.to_string().into(), question: question.clone(), text: String::new(), status: Status::Streaming, at_ms, screenshot: None, auto: None, session: self.session });
+        let cut = attachments::parts(&attachments, attachments::budget(&self.store.value), false).cut;
+        self.turns.push(Turn { id, action: action.to_string().into(), question: question.clone(), text: String::new(), status: Status::Streaming, at_ms, screenshot: None, auto: None,
+            session: self.session, attachments: attachments.clone(), cut });
         self.scroll.scroll_to_bottom();
+        self.fit(window);
         cx.notify();
         if let Some(claimed) = self.claim_prepared(action, &question, history.len()) {
             if let Some(turn) = self.turns.iter_mut().find(|t| t.id == id) { turn.text = claimed.text; }
@@ -948,7 +975,7 @@ impl Overlay {
                 (true, None, Some((x, y))) => cx.background_executor().spawn(async move { crate::capture::screen_jpeg(x, y).ok() }).await,
             };
             let conversation = conversation.render(screenshot.is_some());
-            let request = reasoning::Request { action, question, history, conversation, screenshot: screenshot.clone(), utterance };
+            let request = reasoning::Request { action, question, history, conversation, screenshot: screenshot.clone(), attachments, utterance };
             let started = this.update(cx, |this, cx| {
                 if let Some(turn) = this.turns.iter_mut().find(|t| t.id == id) { turn.screenshot = screenshot; }
                 // Live ended while the screenshot was taken: nothing to answer any more.
@@ -1022,7 +1049,7 @@ impl Overlay {
         let id = self.next_turn;
         let at_ms = self.live_since.map(|start| start.elapsed().as_millis() as u64).unwrap_or(0);
         self.turns.push(Turn { id, action: self.answer_action.into(), question: String::new(), text: claimed.text, status: Status::Streaming,
-            at_ms, screenshot: None, auto: Some((utterance, at_ms)), session: self.session });
+            at_ms, screenshot: None, auto: Some((utterance, at_ms)), session: self.session, attachments: Arc::default(), cut: Vec::new() });
         self.scroll.scroll_to_bottom();
         match claimed.done {
             Some(result) => self.finish_turn(id, result, cx),
@@ -1102,7 +1129,7 @@ impl Overlay {
                 (None, None) => None,
             };
             let conversation = conversation.render(screenshot.is_some());
-            let request = reasoning::Request { action: action.into(), question: String::new(), history, conversation, screenshot, utterance: Some(utterance) };
+            let request = reasoning::Request { action: action.into(), question: String::new(), history, conversation, screenshot, attachments: Arc::default(), utterance: Some(utterance) };
             let _ = this.update(cx, |this, cx| {
                 // Cancelled or replaced while the screenshot was taken. Otherwise the context is
                 // read now: its question may have been committed meanwhile.
@@ -1407,9 +1434,14 @@ impl Overlay {
                 _ => div().id(("answer", turn.id as usize)).min_w_0().child(chat::answer(&turn.text, size))
                     .when(turn.status == Status::Stopped, |answer| answer.child(chat::stopped_mark(muted))).into_any_element(),
             };
-            // "Viewed screen" sits with the answer, above it.
-            let viewed = turn.screenshot.is_some() && !matches!(turn.status, Status::Failed(_));
-            let answer = div().flex().flex_col().gap(px(6.0)).min_w_0().when(viewed, |answer| answer.child(chat::viewed_screen(self.dim(theme::placeholder())))).child(body);
+            // "Viewed screen" and "Read 2 attachments" sit with the answer, above it.
+            let failed = matches!(turn.status, Status::Failed(_));
+            let (viewed, read) = (turn.screenshot.is_some() && !failed, !turn.attachments.is_empty() && !failed);
+            let note = self.dim(theme::placeholder());
+            let answer = div().flex().flex_col().gap(px(6.0)).min_w_0()
+                .when(viewed, |answer| answer.child(chat::viewed_screen(note)))
+                .when(read, |answer| answer.child(attach::read_line(turn.attachments.len(), &turn.cut, note)))
+                .child(body);
             thread = thread.child(header).child(answer);
         }
         // A session that has started but asked nothing yet.
@@ -1447,6 +1479,7 @@ fn show_session(handle: Option<gpui::WindowHandle<SessionsWindow>>, id: Option<S
     let _ = handle.update(cx, |window, _, cx| window.select(&id, cx));
 }
 
+mod attach;
 mod card;
 mod chat;
 mod update_notice;
@@ -1637,7 +1670,7 @@ mod tests {
         let archive = Archive::at(root.clone());
         let mut recorder = Some(archive.start(100, "ended".into()).unwrap());
         let turn = |action: &str, question: &str, text: &str| Turn { id: 1, action: action.to_string().into(), question: question.into(), text: text.into(),
-            status: Status::Streaming, at_ms: 4_000, screenshot: Some(b"jpeg".to_vec()), auto: None, session: 1 };
+            status: Status::Streaming, at_ms: 4_000, screenshot: Some(b"jpeg".to_vec()), auto: None, session: 1, attachments: std::sync::Arc::default(), cut: Vec::new() };
         save_turn(&mut recorder, true, &turn("Assist", "", "Done answer"), false);
         save_turn(&mut recorder, true, &turn("Ask", "How do I scale it?", "Shard by tenant and"), true);
         save_turn(&mut recorder, true, &turn("Assist", "", " "), true);

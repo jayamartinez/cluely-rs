@@ -439,6 +439,13 @@ impl SessionsWindow {
                 .child(div().text_size(px(12.0)).px(px(8.0)).py(px(2.0)).rounded(px(8.0)).border_1().border_color(theme::bubble_border())
                     .bg(theme::bubble()).text_color(theme::text()).child(turn.action.clone())))
             .when(!turn.question.is_empty(), |c| c.child(div().text_size(px(13.0)).text_color(theme::muted()).child(turn.question.clone())))
+            // The files attached to the question, by name.
+            .when(!turn.attachments.is_empty(), |c| c.child(div().flex().flex_wrap().gap(px(6.0)).children(turn.attachments.iter().map(|file| {
+                div().h(px(24.0)).flex().items_center().gap(px(6.0)).px(px(8.0)).rounded(px(6.0)).border_1().border_color(theme::hairline()).bg(theme::raised())
+                    .child(crate::ui::icon("icons/file.svg", 11.0, theme::muted()))
+                    .child(div().text_size(px(11.0)).text_color(theme::body()).child(file.name.clone()))
+                    .child(div().text_size(px(11.0)).text_color(theme::muted()).child(file.kind.clone()))
+            }))))
             .child(div().min_w_0().text_color(theme::text()).child(crate::markdown::render(&turn.answer, 14.0))))
     }
 

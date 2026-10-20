@@ -70,7 +70,7 @@ fn main() {
     };
     let request = Request {
         action: "Assist".into(), question: String::new(), history: Vec::new(),
-        conversation: conversation.render(true), screenshot: Some(screenshot()), utterance: None,
+        conversation: conversation.render(true), screenshot: Some(screenshot()), attachments: Default::default(), utterance: None,
     };
     let speculate = args.iter().position(|a| a == "--speculate").and_then(|i| args.get(i + 1)).map(|ms| ms.parse::<u64>().expect("--speculate <ms>"));
     let (started, mut replies, mut first, mut text) = match speculate {
@@ -146,7 +146,7 @@ fn prewarm(session: &ReasoningSession, settings: &cluely_rs::settings::Settings)
 /// One answer on the session's own thread, as a Live session would have had before.
 fn answer_first(session: &mut ReasoningSession, settings: &cluely_rs::settings::Settings, request: &Request) {
     let earlier = Request { action: request.action.clone(), question: request.question.clone(), history: Vec::new(),
-        conversation: request.conversation.clone(), screenshot: request.screenshot.clone(), utterance: None };
+        conversation: request.conversation.clone(), screenshot: request.screenshot.clone(), attachments: Default::default(), utterance: None };
     let started = Instant::now();
     let (_, mut replies) = session.ask(settings, earlier).unwrap_or_else(|error| panic!("couldn't start: {error}"));
     let mut first = None;

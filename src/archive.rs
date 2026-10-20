@@ -4,6 +4,7 @@
 //! sessions/2026-10-05_14-03-22/
 //!   session.json        transcript lines, questions and answers
 //!   screenshots/001.jpg screenshots attached to turns
+//!   attachments/002-1.txt what the model was given from a file attached to a question
 //! ```
 //!
 //! Everything stays on this machine. The live pipeline appends as it goes and `finish`
@@ -49,7 +50,27 @@ pub struct Turn {
     /// Live stopped while the answer was still being written: `answer` is what it had so far.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub stopped: bool,
+    /// Files attached to the question, in order (`attachments`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<Attached>,
 }
+
+/// A file attached to a question, as the session keeps it: its name and type, and what the model
+/// was given from it when that was saved (the text read from a document, an image as sent).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Attached {
+    pub name: String,
+    /// "PDF", "PNG"…
+    pub kind: String,
+    pub bytes: u64,
+    /// File name inside `attachments/`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+}
+
+/// What `Recorder::add_turn` keeps of an attached file.
+pub enum Kept<'a> { Text(&'a str), Jpeg(&'a [u8]) }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -203,9 +224,15 @@ impl Archive {
         serde_json::from_slice::<Session>(&bytes).ok().filter(|session| session.id == id)
     }
 
-    pub fn screenshot_path(&self, id: &str, file: &str) -> Option<PathBuf> {
+    pub fn screenshot_path(&self, id: &str, file: &str) -> Option<PathBuf> { self.file_path(id, "screenshots", file) }
+
+    /// What was kept of a file attached to a question (`Attached::file`).
+    pub fn attachment_path(&self, id: &str, file: &str) -> Option<PathBuf> { self.file_path(id, "attachments", file) }
+
+    /// File names come from session.json, so they are checked before any filesystem use.
+    fn file_path(&self, id: &str, folder: &str, file: &str) -> Option<PathBuf> {
         let safe = !file.is_empty() && file.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-' || b == b'_') && !file.contains("..");
-        safe.then(|| self.dir(id).map(|dir| dir.join("screenshots").join(file))).flatten()
+        safe.then(|| self.dir(id).map(|dir| dir.join(folder).join(file))).flatten()
     }
 
     /// Load, change and atomically rewrite a saved session (title and notes from the model).
@@ -229,7 +256,9 @@ impl Archive {
             (line.at_ms, format!("**{who}** ({}) {}", clock(line.at_ms), line.text))
         }).chain(session.turns.iter().map(|turn| {
             let shot = turn.screenshot.as_ref().map(|file| format!("\n\n![screenshot](screenshots/{file})")).unwrap_or_default();
-            (turn.at_ms, format!("> **{}** ({}){shot}\n>\n> {}", turn.action, clock(turn.at_ms), turn.answer.replace('\n', "\n> ")))
+            let attached = if turn.attachments.is_empty() { String::new() }
+                else { format!("\n>\n> Attached: {}", turn.attachments.iter().map(|file| file.name.as_str()).collect::<Vec<_>>().join(", ")) };
+            (turn.at_ms, format!("> **{}** ({}){shot}{attached}\n>\n> {}", turn.action, clock(turn.at_ms), turn.answer.replace('\n', "\n> ")))
         })).collect();
         entries.sort_by_key(|(at, _)| *at);
         out.push_str("## Timeline\n\n");
@@ -294,15 +323,28 @@ impl Recorder {
         self.flush()
     }
 
-    /// Store a turn; `jpeg` is written to `screenshots/` only when provided.
-    pub fn add_turn(&mut self, mut turn: Turn, jpeg: Option<&[u8]>) -> std::io::Result<()> {
+    /// Store a turn; `jpeg` is written to `screenshots/` only when provided. `files` go with
+    /// `turn.attachments` in order: what to keep of each, as an image (`Kept::Jpeg`) or text.
+    pub fn add_turn(&mut self, mut turn: Turn, jpeg: Option<&[u8]>, files: &[Option<Kept>]) -> std::io::Result<()> {
+        let number = self.session.turns.len() + 1;
         turn.screenshot = None;
         if let Some(bytes) = jpeg {
             let shots = self.dir.join("screenshots");
             fs::create_dir_all(&shots)?;
-            let name = format!("{:03}.jpg", self.session.turns.len() + 1);
+            let name = format!("{number:03}.jpg");
             write_atomic(&shots.join(&name), bytes)?;
             turn.screenshot = Some(name);
+        }
+        for (index, attached) in turn.attachments.iter_mut().enumerate() {
+            attached.file = None;
+            let Some(Some(kept)) = files.get(index) else { continue };
+            let folder = self.dir.join("attachments");
+            fs::create_dir_all(&folder)?;
+            // Named by position only: nothing of the attached file's own name reaches the path.
+            let (extension, bytes) = match kept { Kept::Jpeg(bytes) => ("jpg", *bytes), Kept::Text(text) => ("txt", text.as_bytes()) };
+            let name = format!("{number:03}-{}.{extension}", index + 1);
+            write_atomic(&folder.join(&name), bytes)?;
+            attached.file = Some(name);
         }
         self.session.turns.push(turn);
         self.flush()
@@ -360,7 +402,8 @@ mod tests {
         older.add_line(Line { at_ms: 0, speaker: Speaker::Them, text: "Tell me about rate limiting.".into() }).unwrap();
         older.finish(1_100).unwrap();
         let mut newer = archive.start(2_000, "newer".into()).unwrap();
-        newer.add_turn(Turn { at_ms: 5, action: "Assist".into(), question: "".into(), answer: "Use a token bucket.".into(), screenshot: None, stopped: false }, Some(b"jpeg")).unwrap();
+        newer.add_turn(Turn { at_ms: 5, action: "Assist".into(), question: "".into(), answer: "Use a token bucket.".into(), screenshot: None, stopped: false,
+            attachments: Vec::new() }, Some(b"jpeg"), &[]).unwrap();
         newer.finish(2_060).unwrap();
 
         let list = archive.list();
@@ -369,6 +412,31 @@ mod tests {
         assert_eq!(list[1].preview, "Tell me about rate limiting.");
         let shot = archive.screenshot_path("newer", "001.jpg").unwrap();
         assert_eq!(fs::read(shot).unwrap(), b"jpeg");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A question's attachments are kept with the session: names and types always, and what the
+    /// model was given from each when the caller passes it, under names the archive picks.
+    #[test]
+    fn attachments_are_kept_with_their_turn_and_shown_in_the_export() {
+        let (archive, root) = temp();
+        let mut recorder = archive.start(3_000, "attached".into()).unwrap();
+        let attached = |name: &str, kind: &str| Attached { name: name.into(), kind: kind.into(), bytes: 10, file: Some("../../evil".into()) };
+        let turn = Turn { at_ms: 9_000, action: "Ask".into(), question: "Compare the Team tier".into(), answer: "$18 a seat.".into(), screenshot: None,
+            stopped: false, attachments: vec![attached("pricing.pdf", "PDF"), attached("Pasted image", "PNG"), attached("../notes.md", "MD")] };
+        recorder.add_turn(turn, None, &[Some(Kept::Text("Team $18")), Some(Kept::Jpeg(&[0xFF, 0xD8])), None]).unwrap();
+        recorder.finish(3_100).unwrap();
+        let saved = archive.load("attached").unwrap();
+        let files: Vec<(&str, Option<&str>)> = saved.turns[0].attachments.iter().map(|a| (a.name.as_str(), a.file.as_deref())).collect();
+        assert_eq!(files, [("pricing.pdf", Some("001-1.txt")), ("Pasted image", Some("001-2.jpg")), ("../notes.md", None)]);
+        assert_eq!(fs::read(archive.attachment_path("attached", "001-1.txt").unwrap()).unwrap(), b"Team $18");
+        assert_eq!(fs::read(archive.attachment_path("attached", "001-2.jpg").unwrap()).unwrap(), [0xFF, 0xD8]);
+        assert!(archive.attachment_path("attached", "../session.json").is_none());
+        let markdown = fs::read_to_string(archive.export_markdown("attached").unwrap()).unwrap();
+        assert!(markdown.contains("> Attached: pricing.pdf, Pasted image, ../notes.md"), "{markdown}");
+        // A turn without attachments is saved as before, without the field.
+        let json = fs::read_to_string(root.join("attached").join("session.json")).unwrap();
+        assert_eq!(json.matches("\"attachments\"").count(), 1);
         fs::remove_dir_all(root).unwrap();
     }
 

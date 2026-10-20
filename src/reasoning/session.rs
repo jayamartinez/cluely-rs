@@ -39,6 +39,8 @@ pub struct Request {
     /// The conversation heard so far, already rendered (see `reasoning::context`).
     pub conversation: String,
     pub screenshot: Option<Vec<u8>>,
+    /// Files attached to this question (typed questions only).
+    pub attachments: Arc<[crate::attachments::Attachment]>,
     /// The utterance this request answers (the latest committed line from the other side),
     /// so latency marks can be paired with its transcript marks.
     pub utterance: Option<UtteranceId>,
@@ -173,7 +175,7 @@ impl ReasoningSession {
     /// the returned channel from a worker thread; the provider blocks, the UI never does.
     pub fn ask(&mut self, settings: &Settings, request: Request) -> Result<(Generation, UnboundedReceiver<Reply>), String> {
         self.cancel();
-        let target = answer::build(settings, &self.codex, &request.action, &request.question, &request.history, &request.conversation, request.screenshot)?;
+        let target = answer::build(settings, &self.codex, &request.action, &request.question, &request.history, &request.conversation, request.screenshot, &request.attachments)?;
         let generation = self.issue();
         self.generation = generation;
         let cancel = Arc::new(AtomicBool::new(false));
@@ -191,7 +193,7 @@ impl ReasoningSession {
     /// `key` is the [`super::speculation::context_key`] it answers.
     pub fn speculate(&mut self, settings: &Settings, request: Request, key: u64) -> Result<(), String> {
         self.cancel_speculation();
-        let target = answer::build(settings, &self.codex, &request.action, &request.question, &request.history, &request.conversation, request.screenshot)?;
+        let target = answer::build(settings, &self.codex, &request.action, &request.question, &request.history, &request.conversation, request.screenshot, &request.attachments)?;
         let generation = self.issue();
         let cancel = Arc::new(AtomicBool::new(false));
         let visibility = Arc::new(Visibility::default());
@@ -356,7 +358,7 @@ mod tests {
     use super::*;
 
     fn request() -> Request {
-        Request { action: "Ask".into(), question: "hello".into(), history: Vec::new(), conversation: String::new(), screenshot: None, utterance: Some(3) }
+        Request { action: "Ask".into(), question: "hello".into(), history: Vec::new(), conversation: String::new(), screenshot: None, attachments: Arc::default(), utterance: Some(3) }
     }
 
     /// The custom OpenAI-compatible preset pointed at loopback port 9 (discard; nothing ever

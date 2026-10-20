@@ -17,12 +17,15 @@ pub fn screen_jpeg(x: i32, y: i32) -> anyhow::Result<Vec<u8>> {
     encode(monitor.capture_image()?)
 }
 
-fn encode(image: RgbaImage) -> anyhow::Result<Vec<u8>> {
-    let (width, height) = image.dimensions();
+fn encode(image: RgbaImage) -> anyhow::Result<Vec<u8>> { jpeg(DynamicImage::ImageRgba8(image)) }
+
+/// A picture as the JPEG sent to the model: its long edge at most `MAX_EDGE`. Screenshots and
+/// attached images go the same way.
+pub(crate) fn jpeg(mut picture: DynamicImage) -> anyhow::Result<Vec<u8>> {
+    let (width, height) = (picture.width(), picture.height());
     let scale = (MAX_EDGE as f32 / width.max(height) as f32).min(1.0);
-    let mut picture = DynamicImage::ImageRgba8(image);
     if scale < 1.0 {
-        picture = picture.resize((width as f32 * scale) as u32, (height as f32 * scale) as u32, FilterType::Triangle);
+        picture = picture.resize(((width as f32 * scale) as u32).max(1), ((height as f32 * scale) as u32).max(1), FilterType::Triangle);
     }
     let mut bytes = Vec::new();
     JpegEncoder::new_with_quality(&mut bytes, QUALITY).encode_image(&picture.to_rgb8())?;

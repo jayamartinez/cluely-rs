@@ -58,6 +58,9 @@ const ICONS: &[(&str, &[u8])] = &[
     ("icons/update.svg", include_bytes!("../assets/icons/update.svg")),
     ("icons/check-circle.svg", include_bytes!("../assets/icons/check-circle.svg")),
     ("icons/alert-circle.svg", include_bytes!("../assets/icons/alert-circle.svg")),
+    ("icons/paperclip.svg", include_bytes!("../assets/icons/paperclip.svg")),
+    ("icons/file.svg", include_bytes!("../assets/icons/file.svg")),
+    ("icons/drop.svg", include_bytes!("../assets/icons/drop.svg")),
     // Windows first-run setup (`onboarding`).
     ("icons/setup-arrow.svg", include_bytes!("../assets/icons/setup-arrow.svg")),
     ("icons/setup-bolt.svg", include_bytes!("../assets/icons/setup-bolt.svg")),
