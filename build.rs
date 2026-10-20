@@ -11,6 +11,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=CLUELYRS_NINJA");
 
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+    google_client(&manifest);
     let source = manifest.join("third_party/parakeet.cpp");
     if !source.join("CMakeLists.txt").exists() || !source.join("third_party/ggml/CMakeLists.txt").exists() {
         panic!(
@@ -131,6 +132,31 @@ fn main() {
 /// show it) and Explorer shows for the exe, plus the version information Explorer, Task Manager
 /// and the installer show. FileVersion and ProductVersion default to the package version. Without
 /// a resource compiler the build goes on with the generic icon and no version information.
+/// The Google OAuth client built into CluelyRS (`calendar::oauth::built_in` reads it with
+/// `option_env!`). Release builds get it from the environment (the workflow passes repository
+/// secrets); a local build can put it in a git-ignored `.env` in the repository root instead, as
+/// `CLUELYRS_GOOGLE_CLIENT_ID=…` and `CLUELYRS_GOOGLE_CLIENT_SECRET=…` lines. A variable set in the
+/// environment wins over `.env`, and nothing else in `.env` is read. The values are never printed.
+fn google_client(manifest: &Path) {
+    const KEYS: [&str; 2] = ["CLUELYRS_GOOGLE_CLIENT_ID", "CLUELYRS_GOOGLE_CLIENT_SECRET"];
+    for key in KEYS { println!("cargo:rerun-if-env-changed={key}"); }
+    // Cargo counts a watched file that doesn't exist as changed on every build, which would rebuild
+    // CluelyRS each time, so `.env` is watched only once it's there: touch build.rs after first creating it.
+    let Ok(text) = std::fs::read_to_string(manifest.join(".env")) else { return };
+    println!("cargo:rerun-if-changed=.env");
+    for line in text.lines() {
+        let line = line.trim();
+        let Some((key, value)) = line.strip_prefix("export ").unwrap_or(line).split_once('=') else { continue };
+        let key = key.trim();
+        if !KEYS.contains(&key) || env::var_os(key).is_some_and(|set| !set.is_empty()) { continue; }
+        let value = value.trim();
+        let value = value.strip_prefix('"').and_then(|v| v.strip_suffix('"'))
+            .or_else(|| value.strip_prefix('\'').and_then(|v| v.strip_suffix('\''))).unwrap_or(value);
+        // Handed to rustc only (Cargo keeps it out of the build's console output).
+        if !value.is_empty() { println!("cargo:rustc-env={key}={value}"); }
+    }
+}
+
 #[cfg(windows)]
 fn windows_resources() {
     println!("cargo:rerun-if-changed=assets/app-icon/app-icon.ico");
