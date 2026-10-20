@@ -74,8 +74,38 @@ pub fn set_topmost(hwnd: HWND) -> windows::core::Result<()> {
     unsafe { SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE | windows::Win32::UI::WindowsAndMessaging::SWP_NOMOVE) }
 }
 
-/// Resize the window to `size`, keeping its top-left corner.
-pub fn resize(window: &mut Window, _hwnd: Option<HWND>, size: Size<Pixels>) { window.resize(size); }
+/// Resize the window to `size` (its client area, in logical pixels), keeping its top-left corner and
+/// its place in the z-order. GPUI's own resize calls SetWindowPos without SWP_NOACTIVATE, which
+/// activates the overlay: the card growing for a row above the text box (the update notice) or for
+/// Live took the keyboard from the window in front. Like GPUI's, it doesn't run inside the
+/// current update; one worker applies the resizes in the order they were asked for.
+pub fn resize(window: &mut Window, hwnd: Option<HWND>, size: Size<Pixels>) {
+    static RESIZES: std::sync::OnceLock<std::sync::mpsc::Sender<(isize, f32, f32)>> = std::sync::OnceLock::new();
+    let Some(hwnd) = hwnd else { window.resize(size); return };
+    let worker = RESIZES.get_or_init(|| {
+        let (sender, resizes) = std::sync::mpsc::channel::<(isize, f32, f32)>();
+        let _ = std::thread::Builder::new().name("cluelyrs-resize".into()).spawn(move || {
+            // HWND isn't Send; the handle stays valid for the app's lifetime.
+            for (raw, width, height) in resizes { resize_without_activating(HWND(raw as *mut _), width, height); }
+        });
+        sender
+    });
+    if worker.send((hwnd.0 as isize, f32::from(size.width), f32::from(size.height))).is_err() { window.resize(size); }
+}
+
+fn resize_without_activating(hwnd: HWND, width: f32, height: f32) {
+    use windows::Win32::UI::WindowsAndMessaging::{SWP_NOMOVE, SWP_NOZORDER};
+    let (mut outer, mut client) = (RECT::default(), RECT::default());
+    // SAFETY: `hwnd` is the overlay's window; this only reads its rectangles and sets its size.
+    unsafe {
+        if GetWindowRect(hwnd, &mut outer).is_err() || GetClientRect(hwnd, &mut client).is_err() { return; }
+        let scale = f64::from(GetDpiForWindow(hwnd)) / 96.0;
+        // The outer frame keeps its invisible borders around the client area.
+        let extra = ((outer.right - outer.left) - (client.right - client.left), (outer.bottom - outer.top) - (client.bottom - client.top));
+        let (width, height) = ((f64::from(width) * scale).round() as i32 + extra.0, (f64::from(height) * scale).round() as i32 + extra.1);
+        let _ = SetWindowPos(hwnd, None, 0, 0, width, height, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+}
 
 /// Change the width to `width` (logical pixels) keeping the top edge and the horizontal centre of the
 /// client area, within the work area of the window's monitor (`super::centred_left`). Like GPUI's
