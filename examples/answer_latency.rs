@@ -14,6 +14,10 @@
 //!       and the speculative answer's own start → first words
 //!   cargo run --example answer_latency -- --speculate 1500 --after-answer   # as in the app: one answer
 //!       on the session's thread first, then the speculative one on its own thread (TWO requests)
+//!   cargo run --example answer_latency -- --long   # a 55-minute meeting whose budget was said at
+//!       03:20: asks about it while the rolling summary is being written, then again once it is in
+//!       (THREE requests: two answers and the summary)
+//!   cargo run --example answer_latency -- --long --no-summary   # the same question without the summary
 //!
 //! Every run makes ONE real request through your ChatGPT/Claude subscription or API key and
 //! counts against its usage. Never run it automatically.
@@ -60,6 +64,10 @@ fn main() {
     if args.iter().any(|a| a == "--warm") {
         prewarm(&session, &settings);
     }
+    if args.iter().any(|a| a == "--long") {
+        long_meeting(&mut session, &settings, !args.iter().any(|a| a == "--no-summary"));
+        return;
+    }
     let conversation = Conversation {
         lines: vec![
             Line { source: Source::Them, at_ms: 61_000, text: "thanks for joining, so let's get into the system design part".into() },
@@ -67,6 +75,7 @@ fn main() {
             Line { source: Source::Them, at_ms: 70_200, text: "so how would you design a rate limiter for a public api that gets bursty traffic".into() },
         ],
         now: vec![Now { source: Source::Them, text: "and where would you keep the counters".into() }],
+        earlier: None,
     };
     let request = Request {
         action: "Assist".into(), question: String::new(), history: Vec::new(),
@@ -124,6 +133,59 @@ fn main() {
                     println!("codex model: {}", if settings.codex_model.is_empty() { "default" } else { &settings.codex_model });
                 }
                 break;
+            }
+        }
+    }
+}
+
+/// A line every 20 s for 55 minutes, filler but for the budget at 03:20.
+fn meeting() -> Vec<Line> {
+    (0..165u64).map(|i| {
+        let source = if i.is_multiple_of(2) { Source::Them } else { Source::Me };
+        let text = match i {
+            10 => "before we start, the budget for the pilot is 42,000 dollars, and it can't go over that".to_string(),
+            _ if source == Source::Them => format!("okay, next point on the agenda, item {i}, let's keep moving"),
+            _ => format!("sure, item {i} sounds fine"),
+        };
+        Line { source, at_ms: i * 20_000, text }
+    }).collect()
+}
+
+/// The budget question at minute 55, first while the rolling summary is being written (the
+/// answer doesn't wait for it), then once it is in. Without the summary: the question once, with
+/// the recent lines only (as before the rolling summary existed).
+fn long_meeting(session: &mut ReasoningSession, settings: &cluely_rs::settings::Settings, summarize: bool) {
+    let settings = &cluely_rs::settings::Settings { rolling_summary: summarize, ..settings.clone() };
+    let lines = meeting();
+    session.roll(settings, &lines);
+    let summary_started = Instant::now();
+    ask_timed(session, settings, &lines, if summarize { "while the summary is written" } else { "without the summary" });
+    if !summarize { return; }
+    while session.earlier(settings).is_some_and(|earlier| earlier.through_ms.is_none()) {
+        assert!(summary_started.elapsed() < Duration::from_secs(180), "no summary after 3 minutes");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let earlier = session.earlier(settings).unwrap_or_default();
+    println!("summary in after {:.2} s ({} bytes, through {} ms)\n---\n{}\n---", summary_started.elapsed().as_secs_f64(), earlier.summary.len(),
+        earlier.through_ms.unwrap_or(0), earlier.summary);
+    ask_timed(session, settings, &lines, "with the summary");
+}
+
+fn ask_timed(session: &mut ReasoningSession, settings: &cluely_rs::settings::Settings, lines: &[Line], label: &str) {
+    let conversation = Conversation { lines: lines.to_vec(), now: Vec::new(), earlier: session.earlier(settings) }.render(true);
+    let request = Request { action: "Ask".into(), question: "What budget did they mention for the pilot?".into(), history: Vec::new(),
+        conversation: conversation.clone(), query: Vec::new(), screenshot: Some(screenshot()), attachments: Default::default(), utterance: None };
+    let started = Instant::now();
+    let (_, mut replies) = session.ask(settings, request).unwrap_or_else(|error| panic!("couldn't start: {error}"));
+    let mut first = None;
+    while let Some(reply) = futures::executor::block_on(replies.next()) {
+        match reply.event {
+            Event::Delta(_) => { first.get_or_insert(started.elapsed()); }
+            Event::Done(result) => {
+                let total = started.elapsed();
+                println!("{label}: conversation {} bytes, first words {:.2} s, full answer {:.2} s\n---\n{}\n---", conversation.len(),
+                    first.unwrap_or(total).as_secs_f64(), total.as_secs_f64(), result.unwrap_or_else(|error| format!("failed: {error}")).trim());
+                return;
             }
         }
     }

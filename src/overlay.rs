@@ -1002,7 +1002,7 @@ impl Overlay {
         let point = self.native.and_then(platform::center);
         let prepared = self.prepared_shot.fresh(Instant::now());
         let action = action.to_string();
-        let conversation = self.conversation();
+        let conversation = self.answer_conversation();
         cx.spawn_in(window, async move |this, cx| {
             let screenshot = match (settings.screen_on_send, prepared, point) {
                 (false, ..) | (true, None, None) => None,
@@ -1102,6 +1102,20 @@ impl Overlay {
         cx.notify();
     }
 
+    /// The conversation an answer is sent: the transcript, with the rolling summary when it is on.
+    fn answer_conversation(&self) -> reasoning::Conversation {
+        let earlier = self.reasoning.as_ref().and_then(|session| session.earlier(&self.store.value));
+        reasoning::Conversation { earlier, ..self.conversation() }
+    }
+
+    /// A line was committed: condense what has left the recent window, when enough has (`reasoning::summary`).
+    pub(crate) fn roll_summary(&self) {
+        if let Some(session) = &self.reasoning { session.roll(&self.store.value, &self.conversation().lines); }
+    }
+
+    /// What a speculative answer is matched against. The rolling summary is left out on purpose:
+    /// until it covers a line, requests carry that line verbatim, so a speculative answer built
+    /// before the summary changed still has everything the new summary says.
     fn context_key(&self, action: &str, exchanges: usize) -> u64 {
         speculation::context_key(&self.conversation().lines, self.latest_heard_utterance(), action, exchanges, &self.store.value)
     }
@@ -1155,7 +1169,7 @@ impl Overlay {
         let (action, settings) = (self.answer_action, self.store.value.clone());
         self.speculation_attempt += 1;
         let attempt = self.speculation_attempt;
-        let conversation = self.conversation();
+        let conversation = self.answer_conversation();
         let point = if settings.screen_on_send { self.native.and_then(platform::center) } else { None };
         let prepared = if settings.screen_on_send { self.prepared_shot.fresh(Instant::now()) } else { None };
         cx.spawn(async move |this, cx| {

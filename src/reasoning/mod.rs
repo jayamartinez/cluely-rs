@@ -17,10 +17,14 @@
 //! requests) for every question heard, and, when Settings turns it on, a speculative answer: a
 //! real request to the selected model that runs on its own thread or process and is shown the
 //! moment Assist is pressed if the conversation still matches.
+//!
+//! In a long session, what has left the recent window is condensed in the background into a
+//! rolling summary (`summary`) that answers carry ahead of the recent lines.
 
 pub mod context;
 pub mod session;
 pub mod speculation;
+pub mod summary;
 
-pub use context::{Conversation, Line, Now};
+pub use context::{Conversation, Earlier, Line, Now};
 pub use session::{Claimed, Generation, Reply, ReasoningSession, Request};
