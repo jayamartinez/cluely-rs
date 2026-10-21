@@ -40,6 +40,8 @@ impl Overlay {
         // whole card stays equally see-through. Inner corners are a pixel tighter than the border's.
         let mut card = div().id("card").relative().w(px(self.store.value.card_width.card())).flex().flex_col().rounded(px(theme::radius::CARD))
             .border_1().border_color(theme::keycap_border());
+        // Files dropped anywhere on the card are attached to the question (`attach`).
+        card = self.drop_target(card, cx);
         // An upcoming meeting or else an update notice (never during Live) is the card's top row.
         let notice = self.upcoming_row(cx).or_else(|| self.update_notice(cx));
         let notice_shown = notice.is_some();
@@ -59,23 +61,30 @@ impl Overlay {
         card.child(self.input_row(notice_shown || conversation_shown, cx)).child(self.toolbar(live, cx)).into_any_element()
     }
 
-    /// The text box and the return button, which turns blue once there is something to send.
+    /// The text box, the paperclip and the return button, which turns blue once there is something
+    /// to send. Attached files' chips sit above the text in the same field, and while files are
+    /// dragged over the card the text row is the drop target (`attach`).
     fn input_row(&self, below: bool, cx: &mut Context<Self>) -> impl IntoElement {
-        let ready = !self.composer.read(cx).text().is_empty();
+        let ready = (!self.composer.read(cx).text().is_empty() || self.attached.has_ready()) && !self.attached.reading();
         let send = div().id("send").size(px(28.0)).flex_none().rounded(px(theme::radius::BUTTON)).flex().items_center().justify_center().cursor_pointer()
             .border_1().border_color(if ready { theme::accent() } else if MAC { theme::pressed() } else { theme::keycap_border() })
             .bg(if ready { theme::accent() } else { theme::pressed() })
             .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| { let input = this.composer.clone(); this.send_composer(input, window, cx); }))
             .child(ui::icon("icons/return.svg", 14.0, if ready { theme::accent_ink() } else { theme::body() }));
-        // The card's top row, unless the update notice or the conversation is above it.
-        div().relative().flex().flex_none().items_center().gap(px(10.0)).h(px(INPUT_ROW_HEIGHT)).pl(px(16.0)).pr(px(10.0)).bg(self.card_fill(theme::CARD_FIELD))
-            .when(!below, |row| row.rounded_t(px(theme::radius::CARD - 1.0)))
-            .when(below, |row| row.border_t_1().border_color(theme::divider()))
-            .child(div().id("composer-input").flex_1().min_w_0().cursor_text()
-                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| this.focus_text_box(window, cx)))
-                .child(self.composer.clone()))
-            .child(send)
-            .child(self.hits.mark())
+        let chips = self.chips(cx);
+        let dropping = self.attached.drop_over.as_deref().map(|dragged| self.drop_zone(dragged));
+        let field = div().relative().flex().flex_none().pl(px(16.0)).pr(px(10.0)).bg(self.card_fill(theme::CARD_FIELD))
+            // The card's top row, unless the update notice or the conversation is above it.
+            .when(!below, |field| field.rounded_t(px(theme::radius::CARD - 1.0)))
+            .when(below, |field| field.border_t_1().border_color(theme::divider()));
+        let field = if chips.is_none() && dropping.is_none() {
+            field.items_center().h(px(INPUT_ROW_HEIGHT)).child(self.text_row(send, cx))
+        } else {
+            // The text box keeps its place while it is the drop target, so what was typed stays.
+            let text = self.text_row(send, cx).when(dropping.is_some(), |row| row.h(px(0.0)).overflow_hidden());
+            field.flex_col().gap(px(10.0)).py(px(10.0)).children(chips).children(dropping).child(text)
+        };
+        field.child(self.hits.mark())
     }
 
     /// The Type shortcut toggles: it puts the caret in the text box, or, pressed while the box has
@@ -90,7 +99,7 @@ impl Overlay {
     /// A click in the text box gives it the keyboard. The overlay doesn't activate on a click (a
     /// non-activating panel on macOS), so take it as the Type shortcut does; Esc, the shortcut again
     /// or sending hands it back.
-    fn focus_text_box(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) {
+    pub(super) fn focus_text_box(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) {
         self.take_keyboard(cx);
         window.focus(&self.composer.focus_handle(cx));
     }

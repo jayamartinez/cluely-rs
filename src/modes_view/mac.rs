@@ -3,9 +3,9 @@
 //! files beside it, with Switch mode's keys and Set active in the footer. The state and every
 //! action are `modes_view`'s; the Windows Modes window keeps its own layout.
 
-use gpui::{AnyElement, Context, Div, ExternalPaths, Focusable, FontWeight, IntoElement, KeyDownEvent, MouseButton, ParentElement, Stateful, Styled, deferred, div, prelude::*, px, relative};
+use gpui::{AnyElement, Context, Div, ExternalPaths, Focusable, FontWeight, IntoElement, KeyDownEvent, MouseButton, ParentElement, Stateful, Styled, deferred, div, prelude::*, px};
 
-use super::{FileError, Mode, Popover, extract, modes, on_click, tokens_label};
+use super::{FileError, Mode, Popover, extract, modes, on_click};
 use crate::hotkeys::Action;
 use crate::overlay::Overlay;
 use crate::ui_v3::{self, Kind, RADII};
@@ -156,17 +156,13 @@ impl Overlay {
     }
 
     fn mac_mode_files(&self, mode: &Mode, cx: &mut Context<Self>) -> impl IntoElement {
-        let meter = modes::meter(mode, modes::file_budget(&self.store.value));
-        let over = meter.used > meter.budget;
+        // Unverified: written on Windows, to be checked (and laid out as designed) on the Mac.
+        let states = self.file_states(mode);
         let mut header = div().flex().items_center().gap(px(12.0))
             .child(div().flex_1().text_size(px(13.0)).line_height(px(18.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child("Files"));
         if !mode.files.is_empty() {
-            let fill = (meter.used as f32 / meter.budget.max(1) as f32).min(1.0);
-            header = header.child(div().flex().items_center().gap(px(8.0))
-                .child(div().w(px(96.0)).h(px(4.0)).rounded(px(2.0)).bg(theme::divider())
-                    .child(div().h_full().rounded(px(2.0)).w(relative(fill)).bg(if over { theme::danger() } else { theme::accent() })))
-                .child(div().text_size(px(12.0)).line_height(px(16.0)).text_color(if over { theme::danger() } else { theme::muted() })
-                    .child(format!("{} of {} tokens", tokens_label(meter.used), tokens_label(meter.budget)))));
+            header = header.child(div().text_size(px(12.0)).line_height(px(16.0)).text_color(theme::muted())
+                .child(super::files_summary(&states, self.modes_ui.notices.len())));
         }
         let row = |id: (&'static str, usize)| div().id(id).flex().items_center().gap(px(10.0)).px(px(10.0)).py(px(8.0)).rounded(px(RADII.card))
             .bg(theme::field()).border_1().border_color(theme::hairline());
@@ -174,12 +170,12 @@ impl Overlay {
         let meta = |text: String, color| div().flex_none().text_size(px(12.0)).line_height(px(16.0)).text_color(color).child(text);
         let close = |id: (&'static str, usize)| div().id(id).flex_none().cursor_pointer().child(ui::icon("icons/close.svg", 14.0, theme::muted()));
         let mut list = div().flex().flex_col().gap(px(6.0));
-        for (index, file) in mode.files.iter().enumerate() {
+        for (index, (file, state)) in mode.files.iter().zip(&states).enumerate() {
             let file_id = file.id.clone();
             list = list.child(row(("file", index))
                 .child(ui_v3::tile(28.0, false).child(ui::icon("icons/mode-document.svg", 15.0, theme::body())))
                 .child(name(file.name.clone(), theme::text()))
-                .child(meta(format!("{} tokens", tokens_label(file.tokens)), theme::muted()))
+                .child(meta(state.label(file.tokens), if *state == super::FileState::Failed { theme::danger() } else { theme::muted() }))
                 .child(close(("remove-file", index)).on_mouse_down(MouseButton::Left, on_click(cx, None, move |this, cx| this.remove_file(&file_id, cx)))));
         }
         for (index, (_, _, file)) in self.modes_ui.reading.iter().filter(|(_, owner, _)| *owner == mode.id).enumerate() {

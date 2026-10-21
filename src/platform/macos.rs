@@ -60,6 +60,21 @@ pub fn set_capture_hidden(window: NativeWindow, hidden: bool) -> std::io::Result
     Ok(())
 }
 
+/// The number `capture` tells a window apart by.
+pub fn window_key(window: NativeWindow) -> usize { window.window.as_ptr() as usize }
+
+/// Set the capture exclusion of each of this app's windows to what `decide` returns for its key and
+/// whether it is excluded now. Main thread only, like the rest of AppKit.
+pub fn set_own_windows_capture_hidden(mut decide: impl FnMut(usize, bool) -> bool) {
+    let Some(mtm) = MainThreadMarker::new() else { return };
+    for window in NSApplication::sharedApplication(mtm).windows().iter() {
+        let hidden = window.sharingType() == NSWindowSharingType::None;
+        if decide(Retained::as_ptr(&window) as usize, hidden) != hidden {
+            window.setSharingType(if hidden { NSWindowSharingType::ReadOnly } else { NSWindowSharingType::None });
+        }
+    }
+}
+
 /// GPUI's panel is titled, so macOS draws a hairline border and a shadow around its transparent
 /// rectangle. Make it borderless (still non-activating) and drop the shadow. GPUI also gives the
 /// panel AppKit's utility-window animation, which fades it whenever it is ordered out or in, so

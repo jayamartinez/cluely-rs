@@ -13,17 +13,23 @@
 //! threads swap: the one that now holds the shown exchange carries the session on, and the
 //! other is discarded and replaced by a fresh one. A speculation that ends any other way
 //! discards its thread the same way.
+//!
+//! The session also keeps the conversation's rolling summary (`super::summary`), written by
+//! one-shot requests of their own that never touch either thread or process.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use futures::channel::mpsc::{UnboundedReceiver, unbounded};
 
+use super::context::{Earlier, Line};
+use super::summary::{self, Rollup};
 use crate::answer::{self, Exchange, Target};
 use crate::chat::Effort;
 use crate::claude_cli::{ClaudeCli, Spare};
 use crate::codex::{CodexClient, CodexThread};
 use crate::metrics::{Context, LatencyRecorder, Stage};
+use crate::providers::{Message, Part, Role};
 use crate::settings::{Provider, Settings};
 use crate::transcript::state::UtteranceId;
 
@@ -38,7 +44,11 @@ pub struct Request {
     pub history: Vec<Exchange>,
     /// The conversation heard so far, already rendered (see `reasoning::context`).
     pub conversation: String,
+    /// The latest of it, to search the mode's long files with (`Conversation::query`).
+    pub query: Vec<(String, f32)>,
     pub screenshot: Option<Vec<u8>>,
+    /// Files attached to this question (typed questions only).
+    pub attachments: Arc<[crate::attachments::Attachment]>,
     /// The utterance this request answers (the latest committed line from the other side),
     /// so latency marks can be paired with its transcript marks.
     pub utterance: Option<UtteranceId>,
@@ -102,12 +112,14 @@ pub struct ReasoningSession {
     issued: u64,
     cancel: Option<Arc<AtomicBool>>,
     speculation: Option<Speculation>,
+    /// What has left the recent window, condensed; dropped (and its batch cancelled) with the session.
+    rollup: Rollup,
 }
 
 impl ReasoningSession {
     pub fn new(codex: Arc<CodexClient>, recorder: Option<LatencyRecorder>) -> Self {
         Self { codex, thread: Arc::default(), claude: Arc::default(), spec_thread: Arc::default(), spec_claude: Arc::default(),
-            recorder, generation: Generation::default(), issued: 0, cancel: None, speculation: None }
+            recorder, generation: Generation::default(), issued: 0, cancel: None, speculation: None, rollup: Rollup::default() }
     }
 
     pub fn generation(&self) -> Generation { self.generation }
@@ -173,7 +185,7 @@ impl ReasoningSession {
     /// the returned channel from a worker thread; the provider blocks, the UI never does.
     pub fn ask(&mut self, settings: &Settings, request: Request) -> Result<(Generation, UnboundedReceiver<Reply>), String> {
         self.cancel();
-        let target = answer::build(settings, &self.codex, &request.action, &request.question, &request.history, &request.conversation, request.screenshot)?;
+        let target = answer::build(settings, &self.codex, &request.action, &request.question, &request.history, &request.conversation, &request.query, request.screenshot, &request.attachments)?;
         let generation = self.issue();
         self.generation = generation;
         let cancel = Arc::new(AtomicBool::new(false));
@@ -191,7 +203,7 @@ impl ReasoningSession {
     /// `key` is the [`super::speculation::context_key`] it answers.
     pub fn speculate(&mut self, settings: &Settings, request: Request, key: u64) -> Result<(), String> {
         self.cancel_speculation();
-        let target = answer::build(settings, &self.codex, &request.action, &request.question, &request.history, &request.conversation, request.screenshot)?;
+        let target = answer::build(settings, &self.codex, &request.action, &request.question, &request.history, &request.conversation, &request.query, request.screenshot, &request.attachments)?;
         let generation = self.issue();
         let cancel = Arc::new(AtomicBool::new(false));
         let visibility = Arc::new(Visibility::default());
@@ -287,6 +299,25 @@ impl ReasoningSession {
         if let Some(system) = replace.filter(|_| speculation.provider == "codex") { self.prepare_thread(&self.spec_thread, system, true); }
     }
 
+    /// The rolling summary for an answer being built, when Settings has it on (`None` sends the
+    /// recent lines only). Never waits for one being written.
+    pub fn earlier(&self, settings: &Settings) -> Option<Earlier> { settings.rolling_summary.then(|| self.rollup.earlier()) }
+
+    /// A line was committed: when enough of `lines` (the session's transcript, in spoken order)
+    /// has left the recent window, condense it into the summary in the background, with the
+    /// selected provider and the least reasoning it offers.
+    pub fn roll(&self, settings: &Settings, lines: &[Line]) {
+        if !settings.rolling_summary { return; }
+        let Some(batch) = self.rollup.next_batch(lines) else { return };
+        let (settings, codex) = (Settings { smart_mode: false, ..settings.clone() }, self.codex.clone());
+        self.rollup.spawn(batch, move |prompt, cancel| {
+            let messages = vec![Message { role: Role::User, parts: vec![Part::Text(prompt)] }];
+            // One-shot: a fresh Codex thread or Claude Code process, never the session's.
+            let target = answer::target(&settings, &codex, summary::SYSTEM.to_string(), messages, summary::MAX_TOKENS)?;
+            answer::run(&target, cancel, &mut |_| {})
+        });
+    }
+
     fn issue(&mut self) -> Generation {
         self.issued += 1;
         Generation(self.issued)
@@ -356,7 +387,7 @@ mod tests {
     use super::*;
 
     fn request() -> Request {
-        Request { action: "Ask".into(), question: "hello".into(), history: Vec::new(), conversation: String::new(), screenshot: None, utterance: Some(3) }
+        Request { action: "Ask".into(), question: "hello".into(), history: Vec::new(), conversation: String::new(), query: Vec::new(), screenshot: None, attachments: Arc::default(), utterance: Some(3) }
     }
 
     /// The custom OpenAI-compatible preset pointed at loopback port 9 (discard; nothing ever
@@ -531,6 +562,43 @@ mod tests {
         finish(replies).unwrap();
         assert_eq!(turns(&received), [("thr_1".into(), 1), ("thr_1".into(), 1), ("thr_2".into(), 1)]);
         wait_for(&received, "thread/unsubscribe", 1);
+    }
+
+    /// The rolling summary (ChatGPT subscription, mocked app-server) is written on a thread of
+    /// its own, under its own instructions, and that thread is let go: the thread answers
+    /// continue on never holds it, and the next answer is read the summary.
+    #[test]
+    fn the_rolling_summary_is_written_on_its_own_thread_never_the_sessions() {
+        let (codex, received) = crate::codex::tests::scripted_client();
+        let mut session = ReasoningSession::new(codex, None);
+        let settings = Settings { provider: Provider::Codex, ..Settings::default() };
+        assert!(settings.rolling_summary, "on by default");
+        let (_, replies) = session.ask(&settings, request()).unwrap();
+        finish(replies).unwrap();
+        // 20 minutes, a line every 20 s: the oldest have been out of the window long enough.
+        let lines: Vec<Line> = (0..60).map(|i| Line { source: crate::audio::Source::Them, at_ms: i * 20_000, text: format!("line {i}") }).collect();
+        session.roll(&settings, &lines);
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        while session.earlier(&settings).unwrap().through_ms.is_none() {
+            assert!(Instant::now() < deadline, "the summary was never taken in");
+            std::thread::yield_now();
+        }
+        assert_eq!(session.earlier(&settings).unwrap(), Earlier { summary: "answer 2".into(), through_ms: Some(lines[28].at_ms) });
+        let (_, replies) = session.ask(&settings, request()).unwrap();
+        finish(replies).unwrap();
+        assert_eq!(turns(&received), [("thr_1".into(), 1), ("thr_2".into(), 1), ("thr_1".into(), 1)]);
+        let messages = lock(&received).clone();
+        let started: Vec<&serde_json::Value> = messages.iter().filter(|m| m["method"] == "thread/start").collect();
+        assert_eq!(started[1]["params"]["baseInstructions"], summary::SYSTEM);
+        let prompt = messages.iter().find(|m| m["method"] == "turn/start" && m["params"]["threadId"] == "thr_2").unwrap()["params"]["input"][0]["text"].clone();
+        assert!(prompt.as_str().unwrap().contains("[00:00] Them: line 0\n"), "{prompt}");
+        wait_for(&received, "thread/unsubscribe", 1);
+        assert!(lock(&received).iter().filter(|m| m["method"] == "thread/unsubscribe").all(|m| m["params"]["threadId"] == "thr_2"));
+        // Off in Settings: nothing is read or written.
+        let off = Settings { rolling_summary: false, ..settings };
+        assert!(session.earlier(&off).is_none());
+        session.roll(&off, &lines);
+        assert_eq!(turns(&received).len(), 3);
     }
 
     #[test]

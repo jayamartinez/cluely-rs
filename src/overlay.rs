@@ -16,6 +16,7 @@ use gpui::{
 
 use crate::answer::{self, Exchange};
 use crate::archive::{self, Archive, Recorder};
+use crate::attachments::{self, Attachment, Content};
 use crate::input::{InputEvent, TextInput};
 use crate::listening::{self, Listening};
 use crate::reasoning::{self, ReasoningSession};
@@ -80,6 +81,9 @@ struct Turn {
     /// The Live session it belongs to (`Overlay::session`). Earlier sessions stay on the card,
     /// but only the current one's turns go to the model.
     session: u64,
+    /// Files attached to the question (`attach`), and those of them cut to fit the prompt budget.
+    attachments: Arc<[Attachment]>,
+    cut: Vec<String>,
 }
 
 /// Add an answer to the session's History record, when one is being saved. A `stopped` answer
@@ -88,9 +92,16 @@ fn save_turn(recorder: &mut Option<Recorder>, screenshots: bool, turn: &Turn, st
     let Some(recorder) = recorder else { return };
     if stopped && turn.text.trim().is_empty() && turn.question.trim().is_empty() { return; }
     let shot = if screenshots { turn.screenshot.as_deref() } else { None };
+    // Attached files are kept by name and type, with what the model read from each: a document's
+    // text, and an image when screenshots are saved too.
+    let attachments = turn.attachments.iter().map(|file| archive::Attached { name: file.name.clone(), kind: file.kind.tag().into(), bytes: file.bytes, file: None }).collect();
+    let kept: Vec<Option<archive::Kept>> = turn.attachments.iter().map(|file| match &file.content {
+        Content::Text(text) => Some(archive::Kept::Text(text)),
+        Content::Jpeg(jpeg) => screenshots.then_some(archive::Kept::Jpeg(jpeg)),
+    }).collect();
     let saved = archive::Turn { at_ms: turn.at_ms, action: turn.action.to_string(), question: turn.question.clone(),
-        answer: turn.text.clone(), screenshot: None, stopped };
-    if let Err(error) = recorder.add_turn(saved, shot) { eprintln!("answer could not be saved: {error}"); }
+        answer: turn.text.clone(), screenshot: None, stopped, attachments };
+    if let Err(error) = recorder.add_turn(saved, shot, &kept) { eprintln!("answer could not be saved: {error}"); }
 }
 
 pub struct Overlay {
@@ -172,6 +183,9 @@ pub struct Overlay {
     pub(crate) cli_error: Option<(Provider, SharedString)>,
     /// The Live session being saved to History, when saving is on.
     pub(crate) recorder: Option<Recorder>,
+    /// The saved session the next Live start continues, instead of starting a new one
+    /// (`resume_session`).
+    resume_next: Option<String>,
     /// The held-key loop that is currently running, if any.
     motion: Option<Motion>,
     pub(crate) live_since: Option<Instant>,
@@ -181,6 +195,8 @@ pub struct Overlay {
     session: u64,
     /// Where each later session starts in `turns`, with its "New session" label.
     dividers: Vec<chat::Divider>,
+    /// Files attached to the question being typed (`attach`).
+    attached: attach::Attached,
     scroll: ScrollHandle,
     /// The capture + transcription pipeline while Live is transcribing.
     pub(crate) listening: Option<Listening>,
@@ -369,7 +385,7 @@ impl Overlay {
             #[cfg(target_os = "macos")]
             assist_practiced: None,
             archive, focus: cx.focus_handle(),
-            recorder: None, shape: Rc::default(), hits: Hits::default(), composer, key_input, model_input, base_url_input,
+            recorder: None, resume_next: None, shape: Rc::default(), hits: Hits::default(), composer, key_input, model_input, base_url_input,
             #[cfg(target_os = "macos")]
             model_ui,
             key_reveal: Default::default(), opacity_drag: false,
@@ -382,7 +398,7 @@ impl Overlay {
             #[cfg(target_os = "macos")]
             sign_in_attempt: 0,
             cli_error: None,
-            motion: None, live_since: None, turns: Vec::new(), session: 0, dividers: Vec::new(), scroll: ScrollHandle::new(),
+            motion: None, live_since: None, turns: Vec::new(), session: 0, dividers: Vec::new(), attached: Default::default(), scroll: ScrollHandle::new(),
             listening: None, listening_status: None, listening_epoch: 0, transcript: Vec::new(), provisional: Default::default(), levels: Default::default(),
             model_installed: false, model_download: None, model_notice: None,
             open_picker: None, reveal_accounts: false, devices: None, devices_loading: false, archive_bytes: None, picker_face: Rc::default(), tip: None,
@@ -590,19 +606,28 @@ impl Overlay {
         // its app isn't. Done after this click, as for Settings.
         #[cfg(target_os = "macos")]
         {
-            let (overlay, codex) = (cx.entity(), self.codex.clone());
+            let (overlay, codex, resume) = (cx.entity(), self.codex.clone(), self.resume_handler(cx));
             cx.defer(move |cx| platform::activate_then(cx, move |active, cx| {
                 let mut handle = overlay.read(cx).sessions_window;
-                sessions_window::open(&mut handle, root, codex, active, cx);
+                sessions_window::open(&mut handle, root, codex, resume, active, cx);
                 show_session(handle, id, cx);
                 overlay.update(cx, |overlay, _| overlay.sessions_window = handle);
             }));
         }
         #[cfg(not(target_os = "macos"))]
         {
-            sessions_window::open(&mut self.sessions_window, root, self.codex.clone(), true, cx);
+            let resume = self.resume_handler(cx);
+            sessions_window::open(&mut self.sessions_window, root, self.codex.clone(), resume, true, cx);
             show_session(self.sessions_window, id, cx);
         }
+    }
+
+    /// What the Sessions window's Resume calls: `resume_session` in the overlay's own window.
+    fn resume_handler(&self, cx: &mut Context<Self>) -> sessions_window::Resume {
+        let (overlay, own) = (cx.weak_entity(), self.own_window);
+        std::rc::Rc::new(move |id, cx| {
+            let _ = own.update(cx, |_, window, cx| overlay.update(cx, |this, cx| this.resume_session(id, window, cx)));
+        })
     }
 
     /// Close any open dropdown and hide what Settings revealed (accounts, a saved key), as when
@@ -629,6 +654,8 @@ impl Overlay {
         if self.sessions_panel_open() { height = height.max(SESSIONS_PANEL_WINDOW_HEIGHT); }
         // The mode switcher hangs below the card.
         if self.switcher_open() { height = height.max(switcher::window_height(self.live_since.is_some() || !self.turns.is_empty(), self.top_row_shown())); }
+        // Chips above the text box make the card taller.
+        if !self.attached.is_empty() { height += attach::ROOM; }
         platform::resize(window, self.native, size(px(self.store.value.card_width.window()), px(height)));
     }
 
@@ -724,7 +751,8 @@ impl Overlay {
         cx.quit();
     }
 
-    /// Open a History record when Live starts and close it when Live stops.
+    /// Open a History record when Live starts and close it when Live stops. A start after
+    /// `resume_session` reopens that saved session instead of starting a new one.
     fn record(&mut self, live: bool) {
         if let Some(recorder) = self.recorder.take() {
             match recorder.finish(archive::unix_now()) {
@@ -733,13 +761,33 @@ impl Overlay {
                 Err(error) => eprintln!("session could not be saved: {error}"),
             }
         }
+        let resume = self.resume_next.take();
         if live && self.store.value.save_sessions && let Some(archive) = &self.archive {
-            match archive.start_now() {
-                // The mode gives the session its icon in the Sessions panel.
-                Ok(mut recorder) => { recorder.set_mode(&self.modes.active().id); self.recorder = Some(recorder) }
+            let started = match &resume {
+                Some(id) => archive.resume(id, archive::unix_now()),
+                None => archive.start_now().map(|mut recorder| {
+                    // The mode gives the session its icon in the Sessions panel.
+                    recorder.set_mode(&self.modes.active().id);
+                    recorder
+                }),
+            };
+            match started {
+                Ok(recorder) => self.recorder = Some(recorder),
                 Err(error) => eprintln!("session recording unavailable: {error}"),
             }
         }
+    }
+
+    /// Continue saved session `id` Live: what is heard and asked from now on is appended to it,
+    /// in its own mode (`archive::Archive::resume`). A Live session already running ends first and
+    /// is saved as usual.
+    pub(crate) fn resume_session(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(session) = self.archive.as_ref().and_then(|archive| archive.load(&id)).filter(|session| session.ended_at.is_some()) else { return };
+        if self.live_since.is_some() { self.set_live(false, window, cx); }
+        if let Some(mode) = session.mode && self.modes.set_active(&mode) { self.apply_mode(); }
+        self.resume_next = Some(id);
+        self.show();
+        self.set_live(true, window, cx);
     }
 
     fn update_passthrough(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -759,6 +807,7 @@ impl Overlay {
             self.tip = None;
             cx.notify();
         }
+        self.drag_ended(cx);
     }
 
     /// Start Live if needed, take the foreground and put the caret in the composer.
@@ -803,13 +852,19 @@ impl Overlay {
         cx.notify();
     }
 
-    /// Title, overview, topics and follow-ups for a finished session, written off the UI thread.
+    /// Title, notes and the email draft for a finished session, under its mode's note sections,
+    /// written off the UI thread. A resumed session's notes are rewritten, keeping the user's edits.
     fn write_notes(&self, session: archive::Session) {
         let Some(root) = self.archive.as_ref().map(|archive| archive.root().to_path_buf()) else { return };
         let (settings, codex) = (self.store.value.clone(), self.codex.clone());
-        std::thread::spawn(move || match crate::notes::generate(&settings, &codex, &session) {
+        let sections = self.modes.note_template(session.mode.as_deref());
+        std::thread::spawn(move || match crate::notes::generate(&settings, &codex, &session, &sections) {
             // A session named after its calendar event keeps that name.
-            Ok((title, notes)) => { let _ = Archive::at(root).update(&session.id, |s| { s.title.get_or_insert(title); s.notes = Some(notes); }); }
+            Ok(generated) => { let _ = Archive::at(root).update(&session.id, |s| {
+                let title = s.title.take();
+                crate::notes::apply(s, generated, true);
+                if title.is_some() { s.title = title; }
+            }); }
             Err(error) => eprintln!("session notes unavailable: {error}"),
         });
     }
@@ -911,17 +966,25 @@ impl Overlay {
         }).detach();
     }
 
+    /// Send what is typed, with the files attached to it. A file still being read is waited for
+    /// (the return button stays grey); refused files are cleared, never sent.
     pub(crate) fn send_composer(&mut self, input: Entity<TextInput>, window: &mut Window, cx: &mut Context<Self>) {
         let question = input.read(cx).text().trim().to_string();
-        if question.is_empty() { return; }
+        if (question.is_empty() && !self.attached.has_ready()) || self.attached.reading() { return; }
         input.update(cx, |input, cx| input.clear(cx));
-        self.send("Ask", question, window, cx);
+        let attachments = self.attached.take();
+        self.send_with("Ask", question, attachments, window, cx);
         self.return_to_previous_app();
     }
 
     /// Ask the selected provider: optional screenshot, recent exchanges as context, streamed reply.
     /// A speculative answer prepared for exactly this context is shown at once instead.
     fn send(&mut self, action: &str, question: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.send_with(action, question, Arc::default(), window, cx);
+    }
+
+    /// `send`, with files attached to the question.
+    fn send_with(&mut self, action: &str, question: String, attachments: Arc<[Attachment]>, window: &mut Window, cx: &mut Context<Self>) {
         self.show();
         // The answer shows on the card, which the Sessions panel replaces.
         self.close_sessions_panel(false, window, cx);
@@ -934,8 +997,11 @@ impl Overlay {
         self.next_turn += 1;
         let id = self.next_turn;
         let at_ms = self.live_since.map(|start| start.elapsed().as_millis() as u64).unwrap_or(0);
-        self.turns.push(Turn { id, action: action.to_string().into(), question: question.clone(), text: String::new(), status: Status::Streaming, at_ms, screenshot: None, auto: None, session: self.session });
+        let cut = attachments::parts(&attachments, attachments::budget(&self.store.value), false).cut;
+        self.turns.push(Turn { id, action: action.to_string().into(), question: question.clone(), text: String::new(), status: Status::Streaming, at_ms, screenshot: None, auto: None,
+            session: self.session, attachments: attachments.clone(), cut });
         self.scroll.scroll_to_bottom();
+        self.fit(window);
         cx.notify();
         if let Some(claimed) = self.claim_prepared(action, &question, history.len()) {
             if let Some(turn) = self.turns.iter_mut().find(|t| t.id == id) { turn.text = claimed.text; }
@@ -949,15 +1015,16 @@ impl Overlay {
         let point = self.native.and_then(platform::center);
         let prepared = self.prepared_shot.fresh(Instant::now());
         let action = action.to_string();
-        let conversation = self.conversation();
+        let conversation = self.answer_conversation();
         cx.spawn_in(window, async move |this, cx| {
             let screenshot = match (settings.screen_on_send, prepared, point) {
                 (false, ..) | (true, None, None) => None,
                 (true, Some(jpeg), _) => Some(jpeg),
-                (true, None, Some((x, y))) => cx.background_executor().spawn(async move { crate::capture::screen_jpeg(x, y).ok() }).await,
+                (true, None, Some(point)) => crate::capture::screenshot(cx.background_executor(), point).await,
             };
+            let query = conversation.query();
             let conversation = conversation.render(screenshot.is_some());
-            let request = reasoning::Request { action, question, history, conversation, screenshot: screenshot.clone(), utterance };
+            let request = reasoning::Request { action, question, history, conversation, query, screenshot: screenshot.clone(), attachments, utterance };
             let started = this.update(cx, |this, cx| {
                 if let Some(turn) = this.turns.iter_mut().find(|t| t.id == id) { turn.screenshot = screenshot; }
                 // Live ended while the screenshot was taken: nothing to answer any more.
@@ -1031,7 +1098,7 @@ impl Overlay {
         let id = self.next_turn;
         let at_ms = self.live_since.map(|start| start.elapsed().as_millis() as u64).unwrap_or(0);
         self.turns.push(Turn { id, action: self.answer_action.into(), question: String::new(), text: claimed.text, status: Status::Streaming,
-            at_ms, screenshot: None, auto: Some((utterance, at_ms)), session: self.session });
+            at_ms, screenshot: None, auto: Some((utterance, at_ms)), session: self.session, attachments: Arc::default(), cut: Vec::new() });
         self.scroll.scroll_to_bottom();
         match claimed.done {
             Some(result) => self.finish_turn(id, result, cx),
@@ -1048,6 +1115,20 @@ impl Overlay {
         cx.notify();
     }
 
+    /// The conversation an answer is sent: the transcript, with the rolling summary when it is on.
+    fn answer_conversation(&self) -> reasoning::Conversation {
+        let earlier = self.reasoning.as_ref().and_then(|session| session.earlier(&self.store.value));
+        reasoning::Conversation { earlier, ..self.conversation() }
+    }
+
+    /// A line was committed: condense what has left the recent window, when enough has (`reasoning::summary`).
+    pub(crate) fn roll_summary(&self) {
+        if let Some(session) = &self.reasoning { session.roll(&self.store.value, &self.conversation().lines); }
+    }
+
+    /// What a speculative answer is matched against. The rolling summary is left out on purpose:
+    /// until it covers a line, requests carry that line verbatim, so a speculative answer built
+    /// before the summary changed still has everything the new summary says.
     fn context_key(&self, action: &str, exchanges: usize) -> u64 {
         speculation::context_key(&self.conversation().lines, self.latest_heard_utterance(), action, exchanges, &self.store.value)
     }
@@ -1073,10 +1154,10 @@ impl Overlay {
                 Step::Prepare { .. } => {
                     // Preparation, no model requests: a screenshot now, so the answer doesn't
                     // wait for one, and a warm thread or process for a speculative answer.
-                    if self.store.value.screen_on_send && let Some((x, y)) = self.native.and_then(platform::center) {
+                    if self.store.value.screen_on_send && let Some(point) = self.native.and_then(platform::center) {
                         cx.spawn(async move |this, cx| {
                             let taken = Instant::now();
-                            let jpeg = cx.background_executor().spawn(async move { crate::capture::screen_jpeg(x, y).ok() }).await;
+                            let jpeg = crate::capture::screenshot(cx.background_executor(), point).await;
                             if let Some(jpeg) = jpeg { let _ = this.update(cx, |this, _| this.prepared_shot.store(taken, jpeg)); }
                         }).detach();
                     }
@@ -1101,17 +1182,18 @@ impl Overlay {
         let (action, settings) = (self.answer_action, self.store.value.clone());
         self.speculation_attempt += 1;
         let attempt = self.speculation_attempt;
-        let conversation = self.conversation();
+        let conversation = self.answer_conversation();
         let point = if settings.screen_on_send { self.native.and_then(platform::center) } else { None };
         let prepared = if settings.screen_on_send { self.prepared_shot.fresh(Instant::now()) } else { None };
         cx.spawn(async move |this, cx| {
             let screenshot = match (prepared, point) {
                 (Some(jpeg), _) => Some(jpeg),
-                (None, Some((x, y))) => cx.background_executor().spawn(async move { crate::capture::screen_jpeg(x, y).ok() }).await,
+                (None, Some(point)) => crate::capture::screenshot(cx.background_executor(), point).await,
                 (None, None) => None,
             };
+            let query = conversation.query();
             let conversation = conversation.render(screenshot.is_some());
-            let request = reasoning::Request { action: action.into(), question: String::new(), history, conversation, screenshot, utterance: Some(utterance) };
+            let request = reasoning::Request { action: action.into(), question: String::new(), history, conversation, query, screenshot, attachments: Arc::default(), utterance: Some(utterance) };
             let _ = this.update(cx, |this, cx| {
                 // Cancelled or replaced while the screenshot was taken. Otherwise the context is
                 // read now: its question may have been committed meanwhile.
@@ -1417,9 +1499,14 @@ impl Overlay {
                 _ => div().id(("answer", turn.id as usize)).min_w_0().child(chat::answer(&turn.text, size))
                     .when(turn.status == Status::Stopped, |answer| answer.child(chat::stopped_mark(muted))).into_any_element(),
             };
-            // "Viewed screen" sits with the answer, above it.
-            let viewed = turn.screenshot.is_some() && !matches!(turn.status, Status::Failed(_));
-            let answer = div().flex().flex_col().gap(px(6.0)).min_w_0().when(viewed, |answer| answer.child(chat::viewed_screen(self.dim(theme::placeholder())))).child(body);
+            // "Viewed screen" and "Read 2 attachments" sit with the answer, above it.
+            let failed = matches!(turn.status, Status::Failed(_));
+            let (viewed, read) = (turn.screenshot.is_some() && !failed, !turn.attachments.is_empty() && !failed);
+            let note = self.dim(theme::placeholder());
+            let answer = div().flex().flex_col().gap(px(6.0)).min_w_0()
+                .when(viewed, |answer| answer.child(chat::viewed_screen(note)))
+                .when(read, |answer| answer.child(attach::read_line(turn.attachments.len(), &turn.cut, note)))
+                .child(body);
             thread = thread.child(header).child(answer);
         }
         // A session that has started but asked nothing yet.
@@ -1457,6 +1544,7 @@ fn show_session(handle: Option<gpui::WindowHandle<SessionsWindow>>, id: Option<S
     let _ = handle.update(cx, |window, _, cx| window.select(&id, cx));
 }
 
+mod attach;
 mod calendar;
 mod card;
 mod chat;
@@ -1596,9 +1684,7 @@ pub(crate) fn capture_excluded(settings: &Settings) -> bool {
 }
 
 pub(crate) fn apply_capture_setting(native: NativeWindow, settings: &Settings) {
-    if let Err(error) = platform::set_capture_hidden(native, capture_excluded(settings)) {
-        eprintln!("capture exclusion unavailable: {error}");
-    }
+    crate::capture::set_window_hidden(native, capture_excluded(settings));
 }
 
 /// The header of an answer shown without a press: what it is, which question it answers, and
@@ -1649,7 +1735,7 @@ mod tests {
         let archive = Archive::at(root.clone());
         let mut recorder = Some(archive.start(100, "ended".into()).unwrap());
         let turn = |action: &str, question: &str, text: &str| Turn { id: 1, action: action.to_string().into(), question: question.into(), text: text.into(),
-            status: Status::Streaming, at_ms: 4_000, screenshot: Some(b"jpeg".to_vec()), auto: None, session: 1 };
+            status: Status::Streaming, at_ms: 4_000, screenshot: Some(b"jpeg".to_vec()), auto: None, session: 1, attachments: std::sync::Arc::default(), cut: Vec::new() };
         save_turn(&mut recorder, true, &turn("Assist", "", "Done answer"), false);
         save_turn(&mut recorder, true, &turn("Ask", "How do I scale it?", "Shard by tenant and"), true);
         save_turn(&mut recorder, true, &turn("Assist", "", " "), true);
