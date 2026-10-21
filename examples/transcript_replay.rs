@@ -4,6 +4,11 @@
 //! signals arrive relative to that, and when each utterance is committed and why.
 //!
 //!   cargo run --example transcript_replay -- <wav> [--source me|them] [--provider parakeet|deepgram]
+//!       [--reference <them.wav>]
+//!
+//! `--reference` replays a mic recording (`--source me`) with echo cancellation, the desktop audio
+//! of the same session as the far end: a Live session's `live-<time>-me.wav` and `-them.wav`, or
+//! `echo_eval --out`'s `mic.wav` and `them.wav`.
 //!
 //! Parakeet uses the installed model (`cargo run --example parakeet_bench -- download`). Deepgram
 //! (paid) uses the key saved in Settings → Listening, or DEEPGRAM_API_KEY. Writes nothing.
@@ -62,6 +67,11 @@ fn run() -> anyhow::Result<()> {
     };
     if let Some(reason) = listening::not_ready(&provider.availability()) { bail!("{reason}"); }
     let pcm = read_wav(wav)?;
+    let reference = match args.iter().position(|a| a == "--reference").and_then(|i| args.get(i + 1)) {
+        Some(path) if source == Source::Me => Some(read_wav(path)?),
+        Some(_) => bail!("--reference is the far end for a mic recording: add --source me"),
+        None => None,
+    };
     println!("audio: {:.1}s as {} via {}", pcm.len() as f64 / 16000.0, source.label(), provider.capabilities().label);
     println!("\nspeech in the audio (RMS over 20 ms blocks above 0.01, gaps under 300 ms joined):");
     for (start, end) in speech_segments(&pcm) { println!("  {start:7.0} – {end:7.0} ms"); }
@@ -70,13 +80,18 @@ fn run() -> anyhow::Result<()> {
     let (_commands, inbox) = channel::<listening::Command>();
     let (out, mut messages) = futures::channel::mpsc::unbounded();
     let live = LiveTranscript::new(EndpointConfig::default(), None);
-    let worker = std::thread::spawn(move || listening::run(provider, audio, &[source], Vec::new(), live, &inbox, &out, None));
+    let cancel_echo = reference.is_some();
+    let worker = std::thread::spawn(move || listening::run(provider, audio, &[source], Vec::new(), live, &inbox, &out, None, cancel_echo));
     let feeder = std::thread::spawn(move || {
         let start = Instant::now();
         for (b, block) in pcm.chunks(BLOCK).enumerate() {
             let due = start + Duration::from_secs_f64((b + 1) as f64 * BLOCK as f64 / 16000.0);
             if let Some(wait) = due.checked_duration_since(Instant::now()) { std::thread::sleep(wait); }
-            if chunks.send(AudioChunk { source, start_ms: (b * BLOCK) as f64 / 16.0, samples: block.to_vec() }).is_err() { break; }
+            let start_ms = (b * BLOCK) as f64 / 16.0;
+            // The far end first, as loopback hands it over before its echo reaches the mic.
+            if let Some(far) = reference.as_ref().and_then(|far| far.get(b * BLOCK..((b + 1) * BLOCK).min(far.len())))
+                && chunks.send(AudioChunk { source: Source::Them, start_ms, samples: far.to_vec() }).is_err() { break; }
+            if chunks.send(AudioChunk { source, start_ms, samples: block.to_vec() }).is_err() { break; }
         }
         // Two seconds of silence so the last utterance can endpoint, then the channel closes.
         for b in 0..100 {
