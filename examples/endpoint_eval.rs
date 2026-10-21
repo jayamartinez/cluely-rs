@@ -235,7 +235,7 @@ fn read_wav(path: &Path) -> anyhow::Result<Vec<f32>> {
             // A capture cut short (the app closed mid-session) has a zero size; read what's there.
             b"data" if format_ok => {
                 let body = if size == 0 { &bytes[at + 8..] } else { body };
-                return Ok(body.chunks_exact(2).map(|s| i16::from_le_bytes([s[0], s[1]]) as f32 / 32768.0).collect());
+                return Ok(body.as_chunks::<2>().0.iter().map(|&pair| i16::from_le_bytes(pair) as f32 / 32768.0).collect());
             }
             _ => {}
         }
