@@ -63,6 +63,8 @@ pub struct TextArea {
     goal_x: Option<Pixels>,
     cursor_visible: bool,
     blink: Option<Task<()>>,
+    /// The area is at least this many lines tall.
+    min_lines: usize,
 }
 
 /// The text as last painted.
@@ -117,7 +119,7 @@ impl TextArea {
         Self {
             focus_handle: cx.focus_handle(), content: String::new(), placeholder: placeholder.into(), max_chars: usize::MAX,
             selected_range: 0..0, selection_reversed: false, marked_range: None, layout: None, is_selecting: false, goal_x: None,
-            cursor_visible: true, blink: None,
+            cursor_visible: true, blink: None, min_lines: 4,
         }
     }
 
@@ -128,6 +130,12 @@ impl TextArea {
     }
 
     pub fn text(&self) -> &str { &self.content }
+
+    /// How many lines tall the area is at least (4 unless set).
+    pub fn set_min_lines(&mut self, lines: usize, cx: &mut Context<Self>) {
+        self.min_lines = lines.max(1);
+        cx.notify();
+    }
 
     pub fn set_placeholder(&mut self, placeholder: impl Into<SharedString>, cx: &mut Context<Self>) {
         self.placeholder = placeholder.into();
@@ -525,7 +533,7 @@ impl Render for TextArea {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
-            .child(TextAreaElement { area: cx.entity(), min_lines: 4 })
+            .child(TextAreaElement { area: cx.entity(), min_lines: self.min_lines })
     }
 }
 

@@ -20,21 +20,23 @@ pub struct Builtin {
     pub group: Option<&'static str>,
     /// The default meeting context.
     pub context: &'static str,
+    /// The default note sections: (name, what goes there).
+    pub sections: &'static [(&'static str, &'static str)],
 }
 
 /// In the order the Settings list and the switcher show them.
 pub const BUILTINS: [Builtin; 11] = [
-    Builtin { id: GENERAL, name: "General", icon: Icon::Document, group: None, context: "" },
-    Builtin { id: "interview", name: "Interview", icon: Icon::Briefcase, group: Some(LOOKING_FOR_WORK), context: INTERVIEW },
-    Builtin { id: "behavioral", name: "Behavioral Interview", icon: Icon::Conversation, group: Some(LOOKING_FOR_WORK), context: BEHAVIORAL },
-    Builtin { id: "coding", name: "Coding Interview", icon: Icon::Code, group: Some(LOOKING_FOR_WORK), context: CODING },
-    Builtin { id: "system-design", name: "System Design", icon: Icon::Diagram, group: Some(LOOKING_FOR_WORK), context: SYSTEM_DESIGN },
-    Builtin { id: "case", name: "Case Interview", icon: Icon::Chart, group: Some(LOOKING_FOR_WORK), context: CASE },
-    Builtin { id: "recruiter", name: "Recruiter Screen", icon: Icon::Phone, group: Some(LOOKING_FOR_WORK), context: RECRUITER },
-    Builtin { id: "lecture", name: "Lecture", icon: Icon::GraduationCap, group: Some(LEARNING), context: LECTURE },
-    Builtin { id: "team-meeting", name: "Team meeting", icon: Icon::People, group: Some(WORK), context: TEAM_MEETING },
-    Builtin { id: "sales", name: "Sales call", icon: Icon::Tag, group: Some(WORK), context: SALES },
-    Builtin { id: "customer", name: "Customer demo / support", icon: Icon::Headset, group: Some(WORK), context: CUSTOMER },
+    Builtin { id: GENERAL, name: "General", icon: Icon::Document, group: None, context: "", sections: GENERAL_NOTES },
+    Builtin { id: "interview", name: "Interview", icon: Icon::Briefcase, group: Some(LOOKING_FOR_WORK), context: INTERVIEW, sections: INTERVIEW_NOTES },
+    Builtin { id: "behavioral", name: "Behavioral Interview", icon: Icon::Conversation, group: Some(LOOKING_FOR_WORK), context: BEHAVIORAL, sections: BEHAVIORAL_NOTES },
+    Builtin { id: "coding", name: "Coding Interview", icon: Icon::Code, group: Some(LOOKING_FOR_WORK), context: CODING, sections: CODING_NOTES },
+    Builtin { id: "system-design", name: "System Design", icon: Icon::Diagram, group: Some(LOOKING_FOR_WORK), context: SYSTEM_DESIGN, sections: SYSTEM_DESIGN_NOTES },
+    Builtin { id: "case", name: "Case Interview", icon: Icon::Chart, group: Some(LOOKING_FOR_WORK), context: CASE, sections: CASE_NOTES },
+    Builtin { id: "recruiter", name: "Recruiter Screen", icon: Icon::Phone, group: Some(LOOKING_FOR_WORK), context: RECRUITER, sections: RECRUITER_NOTES },
+    Builtin { id: "lecture", name: "Lecture", icon: Icon::GraduationCap, group: Some(LEARNING), context: LECTURE, sections: LECTURE_NOTES },
+    Builtin { id: "team-meeting", name: "Team meeting", icon: Icon::People, group: Some(WORK), context: TEAM_MEETING, sections: TEAM_MEETING_NOTES },
+    Builtin { id: "sales", name: "Sales call", icon: Icon::Tag, group: Some(WORK), context: SALES, sections: SALES_NOTES },
+    Builtin { id: "customer", name: "Customer demo / support", icon: Icon::Headset, group: Some(WORK), context: CUSTOMER, sections: CUSTOMER_NOTES },
 ];
 
 pub fn builtin(id: &str) -> Option<&'static Builtin> { BUILTINS.iter().find(|builtin| builtin.id == id) }
@@ -130,3 +132,80 @@ For \"can it do X?\", answer yes, no or partly in the first words, then how, wit
 For troubleshooting, ask for the one piece of information that narrows it down most (version, error message, what changed), then give numbered steps starting from the most likely cause. If it needs escalating, say what to collect for the ticket.
 
 During a demo, suggest what to show next based on what the customer cares about, and a short way to explain each screen. Keep it friendly, clear and free of jargon.";
+
+const GENERAL_NOTES: &[(&str, &str)] = &[
+    ("Summary", "What the conversation was about and where it ended up, in a few sentences"),
+    ("Decisions", "What was agreed or settled"),
+    ("Action items", "Who does what next, with any date that was said"),
+    ("Open questions", "What is still unanswered or unclear"),
+];
+
+const INTERVIEW_NOTES: &[(&str, &str)] = &[
+    ("Questions asked", "Each question as they asked it, in one line"),
+    ("How I answered", "The examples and points I gave"),
+    ("Interviewer signals", "Hints, pushback and anything they liked"),
+    ("Follow-ups", "What to send, prepare or practise before the next round"),
+];
+
+const BEHAVIORAL_NOTES: &[(&str, &str)] = &[
+    ("Questions and traits", "Each question and the trait it was testing"),
+    ("Stories I told", "The example I used for each, in a line"),
+    ("What landed", "Follow-up questions, pushback and what they responded to"),
+    ("Follow-ups", "Stories to sharpen and anything to send"),
+];
+
+const CODING_NOTES: &[(&str, &str)] = &[
+    ("Problem", "The question as they asked it, in one line"),
+    ("My approach", "What I proposed, with time and space"),
+    ("Interviewer signals", "Hints, pushback and anything they liked"),
+    ("Follow-ups", "What to send or practise before the next round"),
+];
+
+const SYSTEM_DESIGN_NOTES: &[(&str, &str)] = &[
+    ("Requirements", "The features, scale and constraints we settled on"),
+    ("Design", "The components and the main trade-offs I chose"),
+    ("Deep dives", "What they drilled into and how I handled it"),
+    ("Follow-ups", "Gaps to read up on and anything to send"),
+];
+
+const CASE_NOTES: &[(&str, &str)] = &[
+    ("Case", "The client, the objective and the key facts given"),
+    ("Structure and maths", "My framework and the numbers worked out"),
+    ("Recommendation", "What I recommended, with the main risk"),
+    ("Follow-ups", "What to practise or send"),
+];
+
+const RECRUITER_NOTES: &[(&str, &str)] = &[
+    ("Role", "The role, team and level as described"),
+    ("Process", "The interview stages and timeline"),
+    ("What I shared", "Salary, notice period, location and anything else I said"),
+    ("Next steps", "What happens next and who does it"),
+];
+
+const LECTURE_NOTES: &[(&str, &str)] = &[
+    ("Key ideas", "The main points, in order"),
+    ("Definitions and examples", "Terms, formulas and worked examples"),
+    ("Likely exam topics", "Anything stressed or said to be examined"),
+    ("Open questions", "What to look up or ask about"),
+];
+
+const TEAM_MEETING_NOTES: &[(&str, &str)] = &[
+    ("Decisions", "What was decided"),
+    ("Action items", "Who does what, with a date if one was said"),
+    ("Open questions", "What is still undecided"),
+    ("Risks and blockers", "Anything that could slip or is stuck"),
+];
+
+const SALES_NOTES: &[(&str, &str)] = &[
+    ("Their situation", "Current setup, problem, decision makers, budget and timeline"),
+    ("Objections", "What they pushed back on and how I answered"),
+    ("Commitments", "What either side promised"),
+    ("Next steps", "The agreed next step, with date and people"),
+];
+
+const CUSTOMER_NOTES: &[(&str, &str)] = &[
+    ("Their problem", "What they wanted to do or what was broken"),
+    ("What I showed or fixed", "Features shown, steps given and what worked"),
+    ("Open issues", "What is unresolved or needs escalating"),
+    ("Follow-ups", "What I promised to check or send"),
+];

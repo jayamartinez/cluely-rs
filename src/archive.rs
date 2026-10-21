@@ -4,6 +4,7 @@
 //! sessions/2026-10-05_14-03-22/
 //!   session.json        transcript lines, questions and answers
 //!   screenshots/001.jpg screenshots attached to turns
+//!   attachments/002-1.txt what the model was given from a file attached to a question
 //! ```
 //!
 //! Everything stays on this machine. The live pipeline appends as it goes and `finish`
@@ -49,7 +50,27 @@ pub struct Turn {
     /// Live stopped while the answer was still being written: `answer` is what it had so far.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub stopped: bool,
+    /// Files attached to the question, in order (`attachments`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<Attached>,
 }
+
+/// A file attached to a question, as the session keeps it: its name and type, and what the model
+/// was given from it when that was saved (the text read from a document, an image as sent).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Attached {
+    pub name: String,
+    /// "PDF", "PNG"…
+    pub kind: String,
+    pub bytes: u64,
+    /// File name inside `attachments/`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+}
+
+/// What `Recorder::add_turn` keeps of an attached file.
+pub enum Kept<'a> { Text(&'a str), Jpeg(&'a [u8]) }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -69,15 +90,57 @@ pub struct Topic {
     pub detail: String,
 }
 
-/// Model-written notes, generated when a session ends. Every length that has been
-/// generated is kept, so switching back to one is instant.
+/// One heading of the notes, from the session's mode (`modes::NoteSection`), and what was written
+/// under it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct NoteBlock {
+    pub name: String,
+    pub text: String,
+    /// When the user last changed the text (Unix seconds); `None` while it is the model's.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edited_at: Option<u64>,
+}
+
+/// Model-written notes, generated when a session ends. Notes in a mode with note sections are
+/// written under them (`sections`); otherwise, and in sessions saved before sections existed,
+/// they are an overview, topics and follow-ups. Every overview length that has been generated is
+/// kept, so switching back to one is instant.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Notes {
     pub overviews: BTreeMap<SummaryLength, String>,
     pub topics: Vec<Topic>,
     pub follow_ups: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub sections: Vec<NoteBlock>,
 }
+
+impl Notes {
+    /// The last time the user edited a section.
+    pub fn edited_at(&self) -> Option<u64> { self.sections.iter().filter_map(|block| block.edited_at).max() }
+}
+
+/// A follow-up email drafted from the session. Never sent by CluelyRS; it is copied.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct EmailDraft {
+    /// Who it is for, as named in the conversation (not an address); may be empty.
+    pub to: String,
+    pub subject: String,
+    pub body: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edited_at: Option<u64>,
+}
+
+impl EmailDraft {
+    /// What Copy email puts on the clipboard.
+    pub fn clipboard_text(&self) -> String { format!("Subject: {}\n\n{}", self.subject.trim(), self.body.trim()) }
+}
+
+/// A part of the email draft the user can edit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EmailField { To, Subject, Body }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -99,6 +162,8 @@ pub struct Session {
     pub turns: Vec<Turn>,
     #[serde(default)]
     pub notes: Option<Notes>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<EmailDraft>,
 }
 
 /// What the session list needs without keeping every transcript in memory.
@@ -174,7 +239,21 @@ impl Archive {
         let dir = self.dir(&id).ok_or_else(|| std::io::Error::other("invalid session id"))?;
         fs::create_dir_all(&dir)?;
         let recorder = Recorder { dir, session: Session { id, started_at, ended_at: None, title: None, model: None, mode: None,
-            transcript: Vec::new(), turns: Vec::new(), notes: None } };
+            transcript: Vec::new(), turns: Vec::new(), notes: None, email: None }, resumed: None };
+        recorder.flush()?;
+        Ok(recorder)
+    }
+
+    /// Reopen a finished session to record more of it: what is heard and asked from now on is
+    /// appended to it, timed from where it left off. The session is marked unfinished on disk
+    /// straight away, so after a crash `recover` closes it at its last recorded moment as for
+    /// any other session; its notes and edits are kept.
+    pub fn resume(&self, id: &str, now: u64) -> std::io::Result<Recorder> {
+        let dir = self.dir(id).ok_or_else(|| std::io::Error::other("invalid session id"))?;
+        let mut session = self.load(id).ok_or_else(|| std::io::Error::other("session not found"))?;
+        let ended_at = session.ended_at.take().ok_or_else(|| std::io::Error::other("session is still recording"))?;
+        let offset_ms = (ended_at.saturating_sub(session.started_at) * 1000).max(last_ms(&session));
+        let recorder = Recorder { dir, session, resumed: Some(Resumed { offset_ms, at: now }) };
         recorder.flush()?;
         Ok(recorder)
     }
@@ -203,9 +282,15 @@ impl Archive {
         serde_json::from_slice::<Session>(&bytes).ok().filter(|session| session.id == id)
     }
 
-    pub fn screenshot_path(&self, id: &str, file: &str) -> Option<PathBuf> {
+    pub fn screenshot_path(&self, id: &str, file: &str) -> Option<PathBuf> { self.file_path(id, "screenshots", file) }
+
+    /// What was kept of a file attached to a question (`Attached::file`).
+    pub fn attachment_path(&self, id: &str, file: &str) -> Option<PathBuf> { self.file_path(id, "attachments", file) }
+
+    /// File names come from session.json, so they are checked before any filesystem use.
+    fn file_path(&self, id: &str, folder: &str, file: &str) -> Option<PathBuf> {
         let safe = !file.is_empty() && file.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-' || b == b'_') && !file.contains("..");
-        safe.then(|| self.dir(id).map(|dir| dir.join("screenshots").join(file))).flatten()
+        safe.then(|| self.dir(id).map(|dir| dir.join(folder).join(file))).flatten()
     }
 
     /// Load, change and atomically rewrite a saved session (title and notes from the model).
@@ -217,19 +302,49 @@ impl Archive {
         Ok(session)
     }
 
+    /// Replace the text of note section `index` with the user's.
+    pub fn edit_section(&self, id: &str, index: usize, text: &str, now: u64) -> std::io::Result<Session> {
+        let mut found = false;
+        let session = self.update(id, |session| {
+            if let Some(block) = session.notes.as_mut().and_then(|notes| notes.sections.get_mut(index)) {
+                block.text = text.trim_end().to_string();
+                block.edited_at = Some(now);
+                found = true;
+            }
+        })?;
+        if found { Ok(session) } else { Err(std::io::Error::other("no such note section")) }
+    }
+
+    /// Replace one part of the email draft with the user's.
+    pub fn edit_email(&self, id: &str, field: EmailField, text: &str, now: u64) -> std::io::Result<Session> {
+        self.update(id, |session| {
+            let email = session.email.get_or_insert_with(EmailDraft::default);
+            // To and Subject are one line.
+            let line = || text.split_whitespace().collect::<Vec<_>>().join(" ");
+            match field {
+                EmailField::To => email.to = line(),
+                EmailField::Subject => email.subject = line(),
+                EmailField::Body => email.body = text.trim_end().to_string(),
+            }
+            email.edited_at = Some(now);
+        })
+    }
+
     /// Write a readable Markdown copy next to the session and return its path.
     pub fn export_markdown(&self, id: &str) -> std::io::Result<PathBuf> {
         let session = self.load(id).ok_or_else(|| std::io::Error::other("session not found"))?;
         let mut out = format!("# {}\n\n", session.title.as_deref().unwrap_or("Session"));
-        if let Some(overview) = session.notes.as_ref().and_then(|notes| notes.overviews.values().last()) {
-            out.push_str(&format!("{overview}\n\n"));
+        if let Some(notes) = &session.notes {
+            out.push_str(&notes_markdown(notes));
         }
         let mut entries: Vec<(u64, String)> = session.transcript.iter().map(|line| {
             let who = if line.speaker == Speaker::You { "You" } else { "Them" };
             (line.at_ms, format!("**{who}** ({}) {}", clock(line.at_ms), line.text))
         }).chain(session.turns.iter().map(|turn| {
             let shot = turn.screenshot.as_ref().map(|file| format!("\n\n![screenshot](screenshots/{file})")).unwrap_or_default();
-            (turn.at_ms, format!("> **{}** ({}){shot}\n>\n> {}", turn.action, clock(turn.at_ms), turn.answer.replace('\n', "\n> ")))
+            let attached = if turn.attachments.is_empty() { String::new() }
+                else { format!("\n>\n> Attached: {}", turn.attachments.iter().map(|file| file.name.as_str()).collect::<Vec<_>>().join(", ")) };
+            (turn.at_ms, format!("> **{}** ({}){shot}{attached}\n>\n> {}", turn.action, clock(turn.at_ms), turn.answer.replace('\n', "\n> ")))
         })).collect();
         entries.sort_by_key(|(at, _)| *at);
         out.push_str("## Timeline\n\n");
@@ -258,8 +373,7 @@ impl Archive {
             let result = if session.transcript.is_empty() && session.turns.is_empty() {
                 fs::remove_dir_all(&dir)
             } else {
-                let last_ms = session.transcript.iter().map(|l| l.at_ms).chain(session.turns.iter().map(|t| t.at_ms)).max().unwrap_or(0);
-                session.ended_at = Some(session.started_at + last_ms / 1000);
+                session.ended_at = Some(session.started_at + last_ms(&session) / 1000);
                 serde_json::to_vec_pretty(&session).map_err(std::io::Error::other)
                     .and_then(|bytes| write_atomic(&dir.join("session.json"), &bytes))
             };
@@ -278,9 +392,43 @@ impl Archive {
     }
 }
 
+/// The latest moment recorded in a session, in milliseconds from its start.
+fn last_ms(session: &Session) -> u64 {
+    session.transcript.iter().map(|line| line.at_ms).chain(session.turns.iter().map(|turn| turn.at_ms)).max().unwrap_or(0)
+}
+
+/// The notes as Markdown: the sections under their headings, or the overview and follow-ups.
+/// Also what Copy notes puts on the clipboard.
+pub fn notes_markdown(notes: &Notes) -> String {
+    let mut out = String::new();
+    if notes.sections.is_empty() {
+        if let Some(overview) = notes.overviews.get(&SummaryLength::Standard).or_else(|| notes.overviews.values().last()) {
+            out.push_str(&format!("{}\n\n", overview.trim()));
+        }
+        if !notes.follow_ups.is_empty() {
+            out.push_str("## Follow-ups\n\n");
+            for item in &notes.follow_ups { out.push_str(&format!("- {item}\n")); }
+            out.push('\n');
+        }
+    }
+    for block in notes.sections.iter().filter(|block| !block.text.trim().is_empty()) {
+        out.push_str(&format!("## {}\n\n{}\n\n", block.name, block.text.trim()));
+    }
+    out
+}
+
+/// Where a resumed session's new moments are timed from.
+struct Resumed {
+    /// Added to every new line and turn: the session's length when it was reopened.
+    offset_ms: u64,
+    /// When it was reopened (Unix seconds).
+    at: u64,
+}
+
 pub struct Recorder {
     dir: PathBuf,
     session: Session,
+    resumed: Option<Resumed>,
 }
 
 // Transcription and the provider pipeline append through these; until they land only
@@ -289,20 +437,36 @@ pub struct Recorder {
 impl Recorder {
     pub fn session(&self) -> &Session { &self.session }
 
-    pub fn add_line(&mut self, line: Line) -> std::io::Result<()> {
+    /// `line.at_ms` counts from when this recording started; a resumed session adds its length.
+    pub fn add_line(&mut self, mut line: Line) -> std::io::Result<()> {
+        line.at_ms += self.offset_ms();
         self.session.transcript.push(line);
         self.flush()
     }
 
-    /// Store a turn; `jpeg` is written to `screenshots/` only when provided.
-    pub fn add_turn(&mut self, mut turn: Turn, jpeg: Option<&[u8]>) -> std::io::Result<()> {
+    /// Store a turn; `jpeg` is written to `screenshots/` only when provided. `files` go with
+    /// `turn.attachments` in order: what to keep of each, as an image (`Kept::Jpeg`) or text.
+    pub fn add_turn(&mut self, mut turn: Turn, jpeg: Option<&[u8]>, files: &[Option<Kept>]) -> std::io::Result<()> {
+        turn.at_ms += self.offset_ms();
+        let number = self.session.turns.len() + 1;
         turn.screenshot = None;
         if let Some(bytes) = jpeg {
             let shots = self.dir.join("screenshots");
             fs::create_dir_all(&shots)?;
-            let name = format!("{:03}.jpg", self.session.turns.len() + 1);
+            let name = format!("{number:03}.jpg");
             write_atomic(&shots.join(&name), bytes)?;
             turn.screenshot = Some(name);
+        }
+        for (index, attached) in turn.attachments.iter_mut().enumerate() {
+            attached.file = None;
+            let Some(Some(kept)) = files.get(index) else { continue };
+            let folder = self.dir.join("attachments");
+            fs::create_dir_all(&folder)?;
+            // Named by position only: nothing of the attached file's own name reaches the path.
+            let (extension, bytes) = match kept { Kept::Jpeg(bytes) => ("jpg", *bytes), Kept::Text(text) => ("txt", text.as_bytes()) };
+            let name = format!("{number:03}-{}.{extension}", index + 1);
+            write_atomic(&folder.join(&name), bytes)?;
+            attached.file = Some(name);
         }
         self.session.turns.push(turn);
         self.flush()
@@ -315,11 +479,22 @@ impl Recorder {
     /// Record the mode the session runs in; it is written with the next change.
     pub fn set_mode(&mut self, mode: &str) { self.session.mode = Some(mode.to_string()); }
 
+    /// Whether this continues a session reopened with [`Archive::resume`].
+    pub fn is_resumed(&self) -> bool { self.resumed.is_some() }
+
+    fn offset_ms(&self) -> u64 { self.resumed.as_ref().map_or(0, |resumed| resumed.offset_ms) }
+
+    /// A resumed session ends after its earlier length plus the time since it was reopened, so
+    /// the break in between doesn't count.
     pub fn finish(mut self, ended_at: u64) -> std::io::Result<Option<Session>> {
-        if self.session.transcript.is_empty() && self.session.turns.is_empty() {
+        if self.resumed.is_none() && self.session.transcript.is_empty() && self.session.turns.is_empty() {
             fs::remove_dir_all(&self.dir)?;
             return Ok(None);
         }
+        let ended_at = match &self.resumed {
+            Some(resumed) => self.session.started_at + resumed.offset_ms / 1000 + ended_at.saturating_sub(resumed.at),
+            None => ended_at,
+        };
         self.session.ended_at = Some(ended_at);
         self.flush()?;
         Ok(Some(self.session))
@@ -360,7 +535,8 @@ mod tests {
         older.add_line(Line { at_ms: 0, speaker: Speaker::Them, text: "Tell me about rate limiting.".into() }).unwrap();
         older.finish(1_100).unwrap();
         let mut newer = archive.start(2_000, "newer".into()).unwrap();
-        newer.add_turn(Turn { at_ms: 5, action: "Assist".into(), question: "".into(), answer: "Use a token bucket.".into(), screenshot: None, stopped: false }, Some(b"jpeg")).unwrap();
+        newer.add_turn(Turn { at_ms: 5, action: "Assist".into(), question: "".into(), answer: "Use a token bucket.".into(), screenshot: None, stopped: false,
+            attachments: Vec::new() }, Some(b"jpeg"), &[]).unwrap();
         newer.finish(2_060).unwrap();
 
         let list = archive.list();
@@ -369,6 +545,31 @@ mod tests {
         assert_eq!(list[1].preview, "Tell me about rate limiting.");
         let shot = archive.screenshot_path("newer", "001.jpg").unwrap();
         assert_eq!(fs::read(shot).unwrap(), b"jpeg");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A question's attachments are kept with the session: names and types always, and what the
+    /// model was given from each when the caller passes it, under names the archive picks.
+    #[test]
+    fn attachments_are_kept_with_their_turn_and_shown_in_the_export() {
+        let (archive, root) = temp();
+        let mut recorder = archive.start(3_000, "attached".into()).unwrap();
+        let attached = |name: &str, kind: &str| Attached { name: name.into(), kind: kind.into(), bytes: 10, file: Some("../../evil".into()) };
+        let turn = Turn { at_ms: 9_000, action: "Ask".into(), question: "Compare the Team tier".into(), answer: "$18 a seat.".into(), screenshot: None,
+            stopped: false, attachments: vec![attached("pricing.pdf", "PDF"), attached("Pasted image", "PNG"), attached("../notes.md", "MD")] };
+        recorder.add_turn(turn, None, &[Some(Kept::Text("Team $18")), Some(Kept::Jpeg(&[0xFF, 0xD8])), None]).unwrap();
+        recorder.finish(3_100).unwrap();
+        let saved = archive.load("attached").unwrap();
+        let files: Vec<(&str, Option<&str>)> = saved.turns[0].attachments.iter().map(|a| (a.name.as_str(), a.file.as_deref())).collect();
+        assert_eq!(files, [("pricing.pdf", Some("001-1.txt")), ("Pasted image", Some("001-2.jpg")), ("../notes.md", None)]);
+        assert_eq!(fs::read(archive.attachment_path("attached", "001-1.txt").unwrap()).unwrap(), b"Team $18");
+        assert_eq!(fs::read(archive.attachment_path("attached", "001-2.jpg").unwrap()).unwrap(), [0xFF, 0xD8]);
+        assert!(archive.attachment_path("attached", "../session.json").is_none());
+        let markdown = fs::read_to_string(archive.export_markdown("attached").unwrap()).unwrap();
+        assert!(markdown.contains("> Attached: pricing.pdf, Pasted image, ../notes.md"), "{markdown}");
+        // A turn without attachments is saved as before, without the field.
+        let json = fs::read_to_string(root.join("attached").join("session.json")).unwrap();
+        assert_eq!(json.matches("\"attachments\"").count(), 1);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -382,6 +583,116 @@ mod tests {
         assert_eq!(session.notes, None);
         let markdown = fs::read_to_string(archive.export_markdown("legacy").unwrap()).unwrap();
         assert!(markdown.contains("**Them** (00:01) Any questions?"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn sessions_from_before_note_sections_load_unchanged() {
+        let (archive, root) = temp();
+        fs::create_dir_all(root.join("v1")).unwrap();
+        let json = r#"{"id":"v1","startedAt":5,"endedAt":65,"title":"Weekly sync","model":"Claude · Sonnet",
+            "transcript":[{"atMs":1000,"speaker":"them","text":"Ship Friday?"}],"turns":[],
+            "notes":{"overviews":{"standard":"You agreed to ship Friday."},"topics":[{"startMs":0,"endMs":1000,"title":"Release","detail":"Friday"}],"followUps":["Tell QA"]}}"#;
+        fs::write(root.join("v1").join("session.json"), json).unwrap();
+        let session = archive.load("v1").unwrap();
+        let notes = session.notes.as_ref().unwrap();
+        assert!(notes.sections.is_empty() && session.email.is_none());
+        assert_eq!(notes.overviews[&SummaryLength::Standard], "You agreed to ship Friday.");
+        assert_eq!(notes_markdown(notes), "You agreed to ship Friday.
+
+## Follow-ups
+
+- Tell QA
+
+");
+        // Rewritten without the new fields, so older builds read it as before.
+        let rewritten = archive.update("v1", |_| {}).unwrap();
+        assert_eq!(rewritten, session);
+        let saved = fs::read_to_string(root.join("v1").join("session.json")).unwrap();
+        assert!(!saved.contains("sections") && !saved.contains("email") && !saved.contains("editedAt"), "{saved}");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn section_and_email_edits_are_saved_with_their_time() {
+        let (archive, root) = temp();
+        let mut recorder = archive.start(100, "edited".into()).unwrap();
+        recorder.add_line(Line { at_ms: 0, speaker: Speaker::Them, text: "Hi".into() }).unwrap();
+        recorder.finish(160).unwrap();
+        assert!(archive.edit_section("edited", 0, "Mine", 500).is_err(), "no notes yet");
+        archive.update("edited", |s| s.notes = Some(Notes { sections: vec![
+            NoteBlock { name: "Problem".into(), text: "Model".into(), edited_at: None },
+            NoteBlock { name: "My approach".into(), text: "".into(), edited_at: None }], ..Notes::default() })).unwrap();
+        archive.edit_section("edited", 1, "- Token bucket
+", 500).unwrap();
+        archive.edit_email("edited", EmailField::Subject, "  Thanks for today ", 510).unwrap();
+        archive.edit_email("edited", EmailField::Body, "Hi Priya,
+
+Thanks.
+", 520).unwrap();
+        assert!(archive.edit_section("edited", 9, "x", 530).is_err());
+
+        let session = archive.load("edited").unwrap();
+        let notes = session.notes.as_ref().unwrap();
+        assert_eq!((notes.sections[0].edited_at, notes.sections[1].text.as_str(), notes.sections[1].edited_at), (None, "- Token bucket", Some(500)));
+        assert_eq!(notes.edited_at(), Some(500));
+        let email = session.email.unwrap();
+        assert_eq!((email.subject.as_str(), email.body.as_str(), email.edited_at), ("Thanks for today", "Hi Priya,
+
+Thanks.", Some(520)));
+        assert_eq!(notes_markdown(notes), "## Problem
+
+Model
+
+## My approach
+
+- Token bucket
+
+");
+        let markdown = fs::read_to_string(archive.export_markdown("edited").unwrap()).unwrap();
+        assert!(markdown.contains("## My approach
+
+- Token bucket"), "{markdown}");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_resumed_session_continues_where_it_left_off() {
+        let (archive, root) = temp();
+        let mut first = archive.start(1_000, "resumed".into()).unwrap();
+        first.add_line(Line { at_ms: 30_000, speaker: Speaker::Them, text: "Part one".into() }).unwrap();
+        first.add_turn(Turn { at_ms: 40_000, action: "Assist".into(), question: "".into(), answer: "A".into(), screenshot: None, stopped: false, attachments: Vec::new() }, Some(b"one"), &[]).unwrap();
+        first.finish(1_060).unwrap();
+        archive.update("resumed", |s| s.notes = Some(Notes { sections: vec![NoteBlock { name: "Summary".into(), text: "Mine".into(), edited_at: Some(9) }], ..Notes::default() })).unwrap();
+
+        // Reopened an hour later: on disk it's unfinished straight away; new moments follow the first minute.
+        let mut again = archive.resume("resumed", 4_600).unwrap();
+        assert!(again.is_resumed());
+        assert_eq!(archive.load("resumed").unwrap().ended_at, None);
+        assert!(archive.resume("resumed", 4_600).is_err(), "it's recording already");
+        again.add_line(Line { at_ms: 5_000, speaker: Speaker::You, text: "Part two".into() }).unwrap();
+        again.add_turn(Turn { at_ms: 6_000, action: "Ask".into(), question: "q".into(), answer: "B".into(), screenshot: None, stopped: false, attachments: Vec::new() }, Some(b"two"), &[]).unwrap();
+        let session = again.finish(4_630).unwrap().unwrap();
+        assert_eq!(session.transcript.iter().map(|l| l.at_ms).collect::<Vec<_>>(), [30_000, 65_000]);
+        assert_eq!(session.turns[1].at_ms, 66_000);
+        assert_eq!(session.turns[1].screenshot.as_deref(), Some("002.jpg"));
+        assert_eq!(session.ended_at, Some(1_000 + 60 + 30), "the hour in between doesn't count");
+        assert_eq!(session.notes.as_ref().unwrap().sections[0].text, "Mine", "notes and edits are kept");
+        assert_eq!(fs::read(archive.screenshot_path("resumed", "001.jpg").unwrap()).unwrap(), b"one");
+
+        // A crash while resumed: recovery closes it at the last moment, keeping everything.
+        let mut crashed = archive.resume("resumed", 9_000).unwrap();
+        crashed.add_line(Line { at_ms: 10_000, speaker: Speaker::Them, text: "Part three".into() }).unwrap();
+        drop(crashed);
+        assert_eq!(archive.recover(), 1);
+        let recovered = archive.load("resumed").unwrap();
+        assert_eq!((recovered.transcript.len(), recovered.turns.len()), (3, 2));
+        assert_eq!(recovered.ended_at, Some(1_000 + 90 + 10));
+        assert!(recovered.notes.is_some());
+        // Nothing new was said: resuming and stopping keeps the session.
+        archive.resume("resumed", 9_500).unwrap().finish(9_501).unwrap();
+        assert!(archive.load("resumed").is_some());
+        assert!(archive.resume("missing", 0).is_err());
         fs::remove_dir_all(root).unwrap();
     }
 

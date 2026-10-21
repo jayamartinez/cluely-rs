@@ -326,7 +326,7 @@ mod tests {
         let bytes = std::fs::read(wav).unwrap();
         // The data chunk follows a fmt chunk whose size varies (System.Speech writes 18 bytes).
         let data = bytes.windows(4).position(|w| w == b"data").expect("no data chunk") + 8;
-        let pcm: Vec<f32> = bytes[data..].chunks_exact(2).map(|s| i16::from_le_bytes([s[0], s[1]]) as f32 / 32768.0).collect();
+        let pcm: Vec<f32> = bytes[data..].as_chunks::<2>().0.iter().map(|&pair| i16::from_le_bytes(pair) as f32 / 32768.0).collect();
         let (tx, rx) = std::sync::mpsc::channel();
         let provider = Deepgram::with_key(key);
         let mut session = provider.start_session(EventSink::new(crate::audio::Source::Them, crate::stt::Generation(1), tx)).unwrap();
