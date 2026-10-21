@@ -22,6 +22,11 @@ Builds dist/CluelyRS.app and dist/CluelyRS-<version>.dmg (+ .sha256) for Apple s
 Environment:
   CLUELYRS_SIGN_IDENTITY   codesign identity (name or SHA-1). Defaults to the first
                            "Apple Development" identity in the keychain, else ad-hoc.
+  CLUELYRS_GOOGLE_CLIENT_ID, CLUELYRS_GOOGLE_CLIENT_SECRET
+                           The Google OAuth client for Calendar sign-in, built into the
+                           app (build.rs; it also reads them from a git-ignored .env in
+                           the repository root). cargo inherits them from this script's
+                           environment; the script never prints them.
 EOF
 }
 

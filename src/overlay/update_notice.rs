@@ -76,9 +76,13 @@ impl Overlay {
         self.check_for_updates(window, cx);
     }
 
+    /// An upcoming-meeting row (`upcoming`) takes the notice's place while it shows.
     pub(super) fn update_notice_shown(&self) -> bool {
-        self.live_since.is_none() && self.updates.notice(&self.store.value.dismissed_update).is_some()
+        self.live_since.is_none() && !self.upcoming_shown() && self.updates.notice(&self.store.value.dismissed_update).is_some()
     }
+
+    /// Whether the card has a row above the text box: an upcoming meeting or an update notice.
+    pub(super) fn top_row_shown(&self) -> bool { self.upcoming_shown() || self.update_notice_shown() }
 
     /// "Update available · v0.2.0", Download (the release page) and ✕, which hides the row until a
     /// newer version is out. `None` when there's nothing to show.

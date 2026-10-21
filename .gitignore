@@ -1,2 +1,4 @@
 /target
 /dist
+# Local build settings: the Google OAuth client for Calendar sign-in (build.rs). Never committed.
+/.env

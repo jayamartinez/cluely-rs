@@ -21,6 +21,7 @@ use crate::settings::{Provider, Settings};
 use crate::{theme, ui};
 
 mod about;
+mod calendar;
 mod listening;
 mod model;
 mod sessions;
@@ -31,13 +32,14 @@ mod window_tab;
 pub(crate) use window::{FluentWindow, close, open};
 
 /// The nav pane: page, label, icon.
-const PAGES: [(Tab, &str, &str); 7] = [
+const PAGES: [(Tab, &str, &str); 8] = [
     (Tab::Model, "Model", "icons/tab-model.svg"),
     (Tab::Listening, "Listening", "icons/tab-listening.svg"),
     (Tab::Modes, "Modes", "icons/tab-modes.svg"),
     (Tab::Keys, "Shortcuts", "icons/tab-shortcuts.svg"),
     (Tab::Window, "Window", "icons/tab-window.svg"),
     (Tab::History, "Sessions", "icons/tab-sessions.svg"),
+    (Tab::Calendar, "Calendar", "icons/setup-calendar.svg"),
     (Tab::About, "About", "icons/tab-about.svg"),
 ];
 
@@ -229,6 +231,7 @@ impl Overlay {
                 Tab::Keys => this.fluent_shortcuts(),
                 Tab::Window => this.fluent_window_tab(cx),
                 Tab::History => this.fluent_sessions(cx),
+                Tab::Calendar => this.fluent_calendar(window, cx),
                 Tab::About => this.fluent_about(cx),
             };
             let content = div().id("fluent-content").relative().flex_1().min_w_0().h_full().overflow_y_scroll().track_scroll(&this.fluent.scroll)

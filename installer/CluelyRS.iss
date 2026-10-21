@@ -55,6 +55,13 @@ Source: "{#AppExe}"; DestDir: "{app}"; DestName: "CluelyRS.exe"; Flags: ignoreve
 Source: "..\LICENSE"; DestDir: "{app}"; DestName: "LICENSE.txt"; Flags: ignoreversion
 Source: "{#ThirdPartyLicenses}"; DestDir: "{app}"; DestName: "THIRD_PARTY_LICENSES.txt"; Flags: ignoreversion
 
+[Registry]
+; cluelyrs:// links ("Back to CluelyRS" after Google sign-in) open the installed CluelyRS, for this
+; user. The app registers itself the same way when nothing is (src/platform/windows.rs).
+Root: HKCU; Subkey: "Software\Classes\cluelyrs"; ValueType: string; ValueName: ""; ValueData: "URL:CluelyRS"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\cluelyrs"; ValueType: string; ValueName: "URL Protocol"; ValueData: ""
+Root: HKCU; Subkey: "Software\Classes\cluelyrs\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\CluelyRS.exe"" ""%1"""
+
 [Icons]
 Name: "{autoprograms}\CluelyRS"; Filename: "{app}\CluelyRS.exe"
 [Run]

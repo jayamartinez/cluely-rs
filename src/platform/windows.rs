@@ -10,7 +10,7 @@ use futures::channel::mpsc::{UnboundedReceiver, unbounded};
 use gpui::{Pixels, Size, Window};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HWND, LPARAM, RECT, WAIT_OBJECT_0};
-use windows::Win32::System::Threading::{CreateEventW, CreateMutexW, GetCurrentProcessId, INFINITE, SetEvent, WaitForSingleObject};
+use windows::Win32::System::Threading::{CreateEventW, CreateMutexW, GetCurrentProcessId, INFINITE, SetEvent, WaitForMultipleObjects};
 use windows::core::{BOOL, HSTRING};
 use windows::Win32::Graphics::Dwm::{
     DWMNCRP_DISABLED, DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE, DWMWA_NCRENDERING_POLICY, DWMWA_WINDOW_CORNER_PREFERENCE,
@@ -24,7 +24,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, VIRTUAL_KEY, VK_CONTROL, VK_DOWN, VK_LBUTTON, VK_LEFT, VK_MENU, VK_RIGHT, VK_SHIFT, VK_UP,
 };
 use windows::Win32::Foundation::{COLORREF, POINT};
-use super::{FADE, POP_DISTANCE};
+use super::{FADE, POP_DISTANCE, Relaunch};
+use crate::app_link::AppLink;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
     GWL_EXSTYLE, GetCursorPos, GetForegroundWindow, GetLayeredWindowAttributes, GetWindowLongPtrW, SetForegroundWindow, LWA_ALPHA, SetLayeredWindowAttributes,
@@ -101,8 +102,8 @@ pub fn set_topmost(hwnd: HWND) -> windows::core::Result<()> {
 
 /// Resize the window to `size` (its client area, in logical pixels), keeping its top-left corner and
 /// its place in the z-order. GPUI's own resize calls SetWindowPos without SWP_NOACTIVATE, which
-/// activates the overlay: the card growing for a row above the text box (the update notice) or for
-/// Live took the keyboard from the window in front. Like GPUI's, it doesn't run inside the
+/// activates the overlay: the card growing for a row above the text box (an upcoming meeting, the
+/// update notice) or for Live took the keyboard from the window in front. Like GPUI's, it doesn't run inside the
 /// current update; one worker applies the resizes in the order they were asked for.
 pub fn resize(window: &mut Window, hwnd: Option<HWND>, size: Size<Pixels>) {
     static RESIZES: std::sync::OnceLock<std::sync::mpsc::Sender<(isize, f32, f32)>> = std::sync::OnceLock::new();
@@ -365,35 +366,93 @@ fn ease_in_out(t: f32) -> f32 { if t < 0.5 { 2.0 * t * t } else { 1.0 - (-2.0 * 
 /// The single-instance names. `Local\` is the user's own sign-in session, so each user gets one CluelyRS.
 const INSTANCE_MUTEX: &str = r"Local\CluelyRS.SingleInstance";
 const SHOW_EVENT: &str = r"Local\CluelyRS.Show";
+/// Set by a launch for a `cluelyrs://calendar` link (`app_link`): the link itself is never passed on.
+const CALENDAR_EVENT: &str = r"Local\CluelyRS.OpenCalendar";
 
 /// Claim this user's only CluelyRS. A second copy's shortcuts all fail (the first owns them), so a
-/// second launch instead asks the running copy to show its overlay, and gets `None`: it should exit
-/// at once. The first gets a channel that yields once per later launch. If the names can't be
+/// second launch instead asks the running copy to show its overlay (or, launched for `link`, to
+/// show what the link asks for), and gets `None`: it should exit at once. The first gets a channel
+/// that yields once per later launch, and first of all for its own `link`. If the names can't be
 /// created, CluelyRS runs as before rather than not at all. Call before GPUI starts, and not in the
 /// mode-file extraction children, which are the same exe.
-pub fn single_instance() -> Option<UnboundedReceiver<()>> { claim(INSTANCE_MUTEX, SHOW_EVENT) }
+pub fn single_instance(link: Option<AppLink>) -> Option<UnboundedReceiver<Relaunch>> { claim(INSTANCE_MUTEX, SHOW_EVENT, CALENDAR_EVENT, link) }
 
-fn claim(mutex: &str, event: &str) -> Option<UnboundedReceiver<()>> {
+fn claim(mutex: &str, show_event: &str, calendar_event: &str, link: Option<AppLink>) -> Option<UnboundedReceiver<Relaunch>> {
     // Never closed: the claim lasts until the process exits, and Windows frees it then, even after a crash.
     let owner = unsafe { CreateMutexW(None, false, &HSTRING::from(mutex)) };
     let already_running = owner.is_ok() && unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
-    // Auto-reset, so each launch shows the overlay once. Either launch may create it first, so a
+    // Auto-reset, so each launch is acted on once. Either launch may create them first, so a
     // signal sent before the first copy starts waiting isn't lost.
-    let Ok(show) = (unsafe { CreateEventW(None, false, false, &HSTRING::from(event)) }) else { return Some(unbounded().1) };
+    let (Ok(show), Ok(calendar)) = (unsafe { CreateEventW(None, false, false, &HSTRING::from(show_event)) },
+        unsafe { CreateEventW(None, false, false, &HSTRING::from(calendar_event)) }) else { return Some(unbounded().1) };
     if already_running {
         // The running copy is in the background; let it bring its window to the front.
         let _ = unsafe { windows::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow(windows::Win32::UI::WindowsAndMessaging::ASFW_ANY) };
-        let _ = unsafe { SetEvent(show) };
+        let _ = unsafe { SetEvent(if link.is_some() { calendar } else { show }) };
         return None;
     }
     let (sender, receiver) = unbounded();
-    // HANDLE isn't Send; the event stays open for the app's lifetime.
-    let raw = show.0 as isize;
-    let _ = std::thread::Builder::new().name("cluelyrs-instance".into()).spawn(move || {
-        while unsafe { WaitForSingleObject(HANDLE(raw as *mut _), INFINITE) } == WAIT_OBJECT_0 && sender.unbounded_send(()).is_ok() {}
+    if let Some(link) = link { let _ = sender.unbounded_send(Relaunch::Link(link)); }
+    // HANDLE isn't Send; the events stay open for the app's lifetime.
+    let raw = [show.0 as isize, calendar.0 as isize];
+    let _ = std::thread::Builder::new().name("cluelyrs-instance".into()).spawn(move || loop {
+        let handles = raw.map(|raw| HANDLE(raw as *mut _));
+        let signalled = unsafe { WaitForMultipleObjects(&handles, false, INFINITE) };
+        let relaunch = match signalled.0.wrapping_sub(WAIT_OBJECT_0.0) {
+            0 => Relaunch::Show,
+            1 => Relaunch::Link(AppLink::Calendar),
+            _ => break,
+        };
+        if sender.unbounded_send(relaunch).is_err() { break; }
     });
     Some(receiver)
 }
+
+/// Bring one of CluelyRS's own windows to the front, restoring it when minimized. Nothing is typed
+/// or clicked to get there: unless CluelyRS may take the foreground (a link launch grants it),
+/// Windows only flashes its taskbar button.
+pub fn raise(hwnd: HWND) {
+    use windows::Win32::UI::WindowsAndMessaging::{IsIconic, SW_RESTORE, SetForegroundWindow};
+    // SAFETY: `hwnd` is one of this process's windows; these only change its z-order and state.
+    unsafe {
+        if IsIconic(hwnd).as_bool() { let _ = ShowWindow(hwnd, SW_RESTORE); }
+        let _ = SetForegroundWindow(hwnd);
+    }
+}
+
+/// HKCU\Software\Classes\cluelyrs: what opens `cluelyrs://` links for this user.
+const SCHEME_KEY: windows::core::PCWSTR = windows::core::w!("Software\\Classes\\cluelyrs");
+const SCHEME_COMMAND_KEY: windows::core::PCWSTR = windows::core::w!("Software\\Classes\\cluelyrs\\shell\\open\\command");
+
+/// Have `cluelyrs://` links open this executable, for this user only, unless they already open a
+/// copy of CluelyRS that is still there (the installer registers the installed one). The link is
+/// handed over as one quoted argument, which `app_link` checks before anything acts on it.
+pub fn register_url_scheme() {
+    use windows::Win32::System::Registry::{HKEY_CURRENT_USER, REG_SZ, RRF_RT_REG_SZ, RegGetValueW, RegSetKeyValueW};
+    let Ok(exe) = std::env::current_exe() else { return };
+    let mut buffer = [0u16; 1024];
+    let mut bytes = (buffer.len() * 2) as u32;
+    // SAFETY: the buffer and its byte length are passed together; the names are static and NUL-terminated.
+    let found = unsafe { RegGetValueW(HKEY_CURRENT_USER, SCHEME_COMMAND_KEY, None, RRF_RT_REG_SZ, None, Some(buffer.as_mut_ptr().cast()), Some(&mut bytes)) }.is_ok();
+    if found {
+        let command = String::from_utf16_lossy(&buffer[..(bytes as usize / 2).saturating_sub(1).min(buffer.len())]);
+        if registered_exe(&command).is_some_and(|path| Path::new(path).is_file()) { return; }
+    }
+    let set = |key: windows::core::PCWSTR, name: Option<&str>, value: &str| {
+        let value: Vec<u16> = value.encode_utf16().chain([0]).collect();
+        let name = name.map(HSTRING::from);
+        let name = name.as_ref().map_or(windows::core::PCWSTR::null(), |name| windows::core::PCWSTR(name.as_ptr()));
+        // SAFETY: `value` is NUL-terminated and its byte length is passed with it.
+        unsafe { RegSetKeyValueW(HKEY_CURRENT_USER, key, name, REG_SZ.0, Some(value.as_ptr().cast()), (value.len() * 2) as u32) }.ok()
+    };
+    let result = set(SCHEME_KEY, None, "URL:CluelyRS")
+        .and_then(|()| set(SCHEME_KEY, Some("URL Protocol"), ""))
+        .and_then(|()| set(SCHEME_COMMAND_KEY, None, &format!("\"{}\" \"%1\"", exe.display())));
+    if let Err(error) = result { eprintln!("cluelyrs:// links not registered: {error}"); }
+}
+
+/// The executable in a registered `"C:\…\CluelyRS.exe" "%1"` command.
+fn registered_exe(command: &str) -> Option<&str> { command.strip_prefix('"')?.split('"').next().filter(|path| !path.is_empty()) }
 
 /// Open a folder in File Explorer.
 pub fn open_folder(path: &Path) -> std::io::Result<()> { Command::new("explorer.exe").arg(path).spawn().map(drop) }
@@ -460,17 +519,37 @@ mod tests {
     use futures::StreamExt;
     use futures::executor::block_on;
 
-    use super::claim;
+    use super::{claim, registered_exe};
+    use crate::app_link::AppLink;
+    use crate::platform::Relaunch;
 
     /// Names of the test's own, so it never signals a CluelyRS that is really running.
     #[test]
     fn a_second_launch_is_told_to_exit_and_shows_the_first() {
         let id = std::process::id();
-        let (mutex, event) = (format!(r"Local\CluelyRS.Test.{id}.Instance"), format!(r"Local\CluelyRS.Test.{id}.Show"));
-        let mut first = claim(&mutex, &event).expect("the first launch runs");
+        let (mutex, show, calendar) = (format!(r"Local\CluelyRS.Test.{id}.Instance"), format!(r"Local\CluelyRS.Test.{id}.Show"), format!(r"Local\CluelyRS.Test.{id}.Calendar"));
+        let mut first = claim(&mutex, &show, &calendar, None).expect("the first launch runs");
         for _ in 0..2 {
-            assert!(claim(&mutex, &event).is_none(), "a later launch exits");
-            assert_eq!(block_on(first.next()), Some(()), "and the first copy hears about it");
+            assert!(claim(&mutex, &show, &calendar, None).is_none(), "a later launch exits");
+            assert_eq!(block_on(first.next()), Some(Relaunch::Show), "and the first copy hears about it");
         }
+        // A launch for a cluelyrs://calendar link asks for Settings › Calendar instead, never the overlay.
+        assert!(claim(&mutex, &show, &calendar, Some(AppLink::Calendar)).is_none());
+        assert_eq!(block_on(first.next()), Some(Relaunch::Link(AppLink::Calendar)));
+    }
+
+    #[test]
+    fn a_first_launch_for_a_link_acts_on_it_itself() {
+        let id = std::process::id();
+        let (mutex, show, calendar) = (format!(r"Local\CluelyRS.Test.{id}.LinkInstance"), format!(r"Local\CluelyRS.Test.{id}.LinkShow"), format!(r"Local\CluelyRS.Test.{id}.LinkCalendar"));
+        let mut first = claim(&mutex, &show, &calendar, Some(AppLink::Calendar)).expect("the first launch runs");
+        assert_eq!(block_on(first.next()), Some(Relaunch::Link(AppLink::Calendar)));
+    }
+
+    #[test]
+    fn the_registered_executable_is_read_from_its_command() {
+        assert_eq!(registered_exe(r#""C:\Program Files\CluelyRS\CluelyRS.exe" "%1""#), Some(r"C:\Program Files\CluelyRS\CluelyRS.exe"));
+        assert_eq!(registered_exe(r#"C:\x.exe %1"#), None);
+        assert_eq!(registered_exe(r#""" "%1""#), None);
     }
 }

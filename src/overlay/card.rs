@@ -42,8 +42,8 @@ impl Overlay {
             .border_1().border_color(theme::keycap_border());
         // Files dropped anywhere on the card are attached to the question (`attach`).
         card = self.drop_target(card, cx);
-        // An update notice (never during Live) is the card's top row.
-        let notice = self.update_notice(cx);
+        // An upcoming meeting or else an update notice (never during Live) is the card's top row.
+        let notice = self.upcoming_row(cx).or_else(|| self.update_notice(cx));
         let notice_shown = notice.is_some();
         card = card.children(notice);
         // The conversation sits above the text box, so the question is typed under the answer it follows.

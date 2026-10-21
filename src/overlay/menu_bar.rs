@@ -163,7 +163,7 @@ impl Overlay {
     fn tray_event(&mut self, event: platform::TrayEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event {
             platform::TrayEvent::Click if self.native.is_some_and(platform::is_visible) => self.handle(Action::Toggle, window, cx),
-            platform::TrayEvent::Click => self.relaunched(cx),
+            platform::TrayEvent::Click => self.relaunched(platform::Relaunch::Show, window, cx),
             platform::TrayEvent::Menu(x, y) => self.open_tray_menu((x, y), cx),
         }
     }

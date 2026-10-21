@@ -479,6 +479,12 @@ impl Recorder {
     /// Record the mode the session runs in; it is written with the next change.
     pub fn set_mode(&mut self, mode: &str) { self.session.mode = Some(mode.to_string()); }
 
+    /// Name the session (after its calendar event), written at once; the notes written later keep this title.
+    pub fn set_title(&mut self, title: &str) -> std::io::Result<()> {
+        self.session.title = Some(title.to_string());
+        self.flush()
+    }
+
     /// Whether this continues a session reopened with [`Archive::resume`].
     pub fn is_resumed(&self) -> bool { self.resumed.is_some() }
 

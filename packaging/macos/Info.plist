@@ -39,5 +39,16 @@
 	<string>© 2026 jayamartinez. MIT License.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>CluelyRS listens to your microphone during a Live session to transcribe your side of the conversation.</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>io.github.jayamartinez.cluelyrs.link</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>cluelyrs</string>
+			</array>
+		</dict>
+	</array>
 </dict>
 </plist>

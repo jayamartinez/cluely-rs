@@ -3,6 +3,7 @@
 //! control), with a second line only for a status. The settings, their handlers and what saving does
 //! are the shared ones in `settings_view`; only the drawing is here.
 
+mod calendar;
 mod listening;
 mod model;
 mod pages;
@@ -105,6 +106,7 @@ impl Overlay {
             Tab::Keys => self.mac_shortcuts_tab().into_any_element(),
             Tab::Window => self.mac_window_tab(cx).into_any_element(),
             Tab::History => self.mac_sessions_tab(state.sessions, cx).into_any_element(),
+            Tab::Calendar => self.mac_calendar_tab(cx).into_any_element(),
             Tab::About => div().into_any_element(),
         }
     }
