@@ -33,6 +33,7 @@ pub mod overlay;
 pub mod platform;
 pub mod providers;
 pub mod reasoning;
+pub mod search;
 pub mod secrets;
 pub mod sessions_window;
 pub mod settings;

@@ -947,8 +947,9 @@ impl Overlay {
                 (true, Some(jpeg), _) => Some(jpeg),
                 (true, None, Some(point)) => crate::capture::screenshot(cx.background_executor(), point).await,
             };
+            let query = conversation.query();
             let conversation = conversation.render(screenshot.is_some());
-            let request = reasoning::Request { action, question, history, conversation, screenshot: screenshot.clone(), utterance };
+            let request = reasoning::Request { action, question, history, conversation, query, screenshot: screenshot.clone(), utterance };
             let started = this.update(cx, |this, cx| {
                 if let Some(turn) = this.turns.iter_mut().find(|t| t.id == id) { turn.screenshot = screenshot; }
                 // Live ended while the screenshot was taken: nothing to answer any more.
@@ -1101,8 +1102,9 @@ impl Overlay {
                 (None, Some(point)) => crate::capture::screenshot(cx.background_executor(), point).await,
                 (None, None) => None,
             };
+            let query = conversation.query();
             let conversation = conversation.render(screenshot.is_some());
-            let request = reasoning::Request { action: action.into(), question: String::new(), history, conversation, screenshot, utterance: Some(utterance) };
+            let request = reasoning::Request { action: action.into(), question: String::new(), history, conversation, query, screenshot, utterance: Some(utterance) };
             let _ = this.update(cx, |this, cx| {
                 // Cancelled or replaced while the screenshot was taken. Otherwise the context is
                 // read now: its question may have been committed meanwhile.
