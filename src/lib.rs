@@ -4,11 +4,13 @@
 //! module is testable on its own.
 
 pub mod answer;
+pub mod app_link;
 pub mod appearance;
 pub mod archive;
 pub mod assets;
 pub mod attachments;
 pub mod audio;
+pub mod calendar;
 pub mod capture;
 pub mod chat;
 pub mod claude_cli;

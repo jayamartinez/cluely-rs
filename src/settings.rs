@@ -148,6 +148,9 @@ pub struct Settings {
     pub last_update_check: Option<u64>,
     /// The version whose notice was closed in the overlay; it shows again only for a newer one.
     pub dismissed_update: String,
+    /// Settings › Calendar: the Google account, which calendars to read, the user's own client ID
+    /// and the reminders. Never tokens or the client secret (`crate::calendar`).
+    pub calendar: crate::calendar::CalendarSettings,
     /// Windows: first-run setup was finished or skipped. A fresh install starts without it, but
     /// settings saved before setup existed read as done, so people who already use CluelyRS never see it.
     #[serde(default = "setup_done_when_missing")]
@@ -174,7 +177,7 @@ impl Default for Settings {
             mic_device: String::new(), desktop_device: String::new(),
             hide_from_capture: true, screen_on_send: true, start_live_on_launch: false, show_in_dock: false, show_menu_bar_icon: true,
             save_sessions: true, save_screenshots: true, keep_sessions: Retention::default(),
-            check_for_updates: true, last_update_check: None, dismissed_update: String::new(), setup_done: false,
+            check_for_updates: true, last_update_check: None, dismissed_update: String::new(), calendar: Default::default(), setup_done: false,
             onboarding_version: 0, onboarding_step: None, mode: None,
         }
     }

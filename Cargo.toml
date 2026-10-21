@@ -16,6 +16,8 @@ dirs = "6"
 # Reads the deflated document part of DOCX files added to a mode.
 flate2 = "1"
 futures = "0.3"
+# PKCE verifiers and OAuth state for Google sign-in (already built for gpui and tungstenite).
+getrandom = "0.3"
 global-hotkey = "0.8"
 gpui = "0.2.2"
 image = { version = "0.25", default-features = false, features = ["bmp", "jpeg", "png"] }

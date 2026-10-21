@@ -999,6 +999,7 @@ dependencies = [
  "dispatch2",
  "flate2",
  "futures",
+ "getrandom 0.3.4",
  "global-hotkey",
  "gpui",
  "image",
