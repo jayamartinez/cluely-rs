@@ -53,7 +53,7 @@ fn logo_row(path: &'static str, title: impl Into<gpui::SharedString>, status: Op
 
 /// Google's dark "Sign in with Google" button, as its branding guidelines draw it.
 fn google_button() -> gpui::Stateful<Div> {
-    div().id("google-sign-in").flex().flex_none().items_center().gap(px(10.0)).h(px(36.0)).px(px(12.0)).rounded(px(4.0)).cursor_pointer()
+    div().id("google-sign-in").flex().flex_none().items_center().gap(px(10.0)).h(px(36.0)).px(px(12.0)).rounded(px(ui_v3::RADII.control)).cursor_pointer()
         .bg(rgb(0x131314)).border_1().border_color(rgb(0x8e918f))
         .child(logo("logos/google-g.svg", 18.0))
         .child(div().text_size(px(13.0)).line_height(px(18.0)).font_weight(gpui::FontWeight::MEDIUM).text_color(rgb(0xe3e3e3)).child("Sign in with Google"))
