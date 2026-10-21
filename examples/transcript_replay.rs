@@ -134,7 +134,7 @@ fn read_wav(path: &str) -> anyhow::Result<Vec<f32>> {
                 if (format, channels, rate, bits) != (1, 1, 16000, 16) { bail!("{path} must be 16 kHz mono 16-bit PCM"); }
                 format_ok = true;
             }
-            b"data" if format_ok => return Ok(body.chunks_exact(2).map(|s| i16::from_le_bytes([s[0], s[1]]) as f32 / 32768.0).collect()),
+            b"data" if format_ok => return Ok(body.as_chunks::<2>().0.iter().map(|&pair| i16::from_le_bytes(pair) as f32 / 32768.0).collect()),
             _ => {}
         }
         at += 8 + size + (size & 1);
