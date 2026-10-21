@@ -7,6 +7,7 @@ pub mod answer;
 pub mod appearance;
 pub mod archive;
 pub mod assets;
+pub mod attachments;
 pub mod audio;
 pub mod capture;
 pub mod chat;

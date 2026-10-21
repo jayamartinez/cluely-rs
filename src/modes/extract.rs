@@ -151,6 +151,9 @@ fn run_reader(mut command: Command, timeout: Duration) -> Result<Extracted, File
     }
 }
 
+/// The text of a plain-text file (TXT, MD, CSV) as [`extract`] keeps it: decoded and tidied.
+pub fn plain_text(data: &[u8]) -> String { tidy(&decode_text(data)) }
+
 /// Plain text in UTF-8 or UTF-16 (with a byte-order mark); invalid bytes become U+FFFD.
 fn decode_text(data: &[u8]) -> String {
     let utf16 = |bytes: &[u8], little: bool| {
