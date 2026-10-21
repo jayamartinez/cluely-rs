@@ -219,7 +219,7 @@ fn open(content: Content, origin: (f32, f32), (width, height): (f32, f32), share
 impl Popup {
     fn new(content: Content, shared: Shared, window: &mut Window, cx: &mut Context<Self>) -> Self {
         if let Some(native) = platform::native_window(window) {
-            if let Err(error) = platform::set_capture_hidden(native, shared.hide_from_capture) { eprintln!("capture exclusion unavailable: {error}"); }
+            crate::capture::set_window_hidden(native, shared.hide_from_capture);
             platform::remove_frame(native);
             let _ = platform::set_topmost(native);
         }

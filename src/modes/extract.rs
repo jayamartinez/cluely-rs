@@ -1,5 +1,5 @@
 //! Text from the files a mode holds: PDF, DOCX, TXT and Markdown. Each file is read once, when
-//! it's added; only the extracted text is kept and sent.
+//! it's added; only the extracted text is kept, and sent whole or searched (see `modes::plan`).
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -8,12 +8,13 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-/// The most file bytes one mode may hold.
-pub const MAX_MODE_BYTES: u64 = 50 * 1024 * 1024;
+/// The largest file a mode may hold.
+pub const MAX_FILE_BYTES: u64 = 200 * 1024 * 1024;
 /// The most files one mode may hold.
 pub const MAX_FILES: usize = 5;
-/// Extracted text kept per file. Far above any prompt budget; it only bounds disk use.
-pub const MAX_TEXT_BYTES: usize = 1024 * 1024;
+/// Extracted text kept per file (about two million tokens). Text over a prompt budget is
+/// searched rather than sent (see `search`); this bounds disk use and the memory its index takes.
+pub const MAX_TEXT_BYTES: usize = 8 * 1024 * 1024;
 /// A DOCX's document part may not inflate beyond this (zip bombs).
 const MAX_DOCX_XML: u64 = 64 * 1024 * 1024;
 
@@ -51,7 +52,7 @@ impl std::fmt::Display for FileError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::Unsupported => "This file type isn't supported. Use PDF, DOCX, TXT or MD.",
-            Self::TooLarge => "Too large: files can add up to 50 MB per mode.",
+            Self::TooLarge => "Too large: files can be up to 200 MB each.",
             Self::LimitReached => "Limit reached: a mode holds up to 5 files.",
             Self::NoText => "No text found. Scanned PDFs need a text layer.",
             Self::Unreadable => "This file couldn't be read.",
@@ -71,7 +72,7 @@ pub struct Extracted {
     pub text: String,
 }
 
-/// Read `path` and extract its text. `room` is how many more bytes the mode may take. Blocks
+/// Read `path` and extract its text. `room` is the largest file accepted, in bytes. Blocks
 /// (a large PDF takes a while); call it off the UI thread.
 pub fn extract(path: &Path, room: u64) -> Result<Extracted, FileError> {
     let kind = FileKind::from_path(path).ok_or(FileError::Unsupported)?;
@@ -112,7 +113,7 @@ pub fn child_main() -> Option<i32> {
     let mut args = std::env::args_os().skip(1);
     if args.next()? != CHILD_FLAG { return None; }
     let path = PathBuf::from(args.next()?);
-    let room = args.next().and_then(|room| room.to_str()?.parse().ok()).unwrap_or(MAX_MODE_BYTES);
+    let room = args.next().and_then(|room| room.to_str()?.parse().ok()).unwrap_or(MAX_FILE_BYTES);
     let json = serde_json::to_vec(&extract(&path, room)).unwrap_or_default();
     let mut out = std::io::stdout().lock();
     Some(if out.write_all(&json).and_then(|_| out.flush()).is_ok() { 0 } else { 1 })
@@ -387,13 +388,13 @@ pub(crate) mod tests {
     fn files_are_checked_by_type_size_and_content() {
         let dir = tempdir("extract");
         let write = |name: &str, data: &[u8]| { let path = dir.join(name); std::fs::write(&path, data).unwrap(); path };
-        assert_eq!(extract(&write("notes.pages", b"x"), MAX_MODE_BYTES), Err(FileError::Unsupported));
-        assert_eq!(extract(&write("empty.txt", b"  \n\n "), MAX_MODE_BYTES), Err(FileError::NoText));
+        assert_eq!(extract(&write("notes.pages", b"x"), MAX_FILE_BYTES), Err(FileError::Unsupported));
+        assert_eq!(extract(&write("empty.txt", b"  \n\n "), MAX_FILE_BYTES), Err(FileError::NoText));
         assert_eq!(extract(&write("big.md", &[b'a'; 100]), 99), Err(FileError::TooLarge));
-        assert_eq!(extract(&write("broken.pdf", b"%PDF-1.4 nonsense"), MAX_MODE_BYTES), Err(FileError::Unreadable));
-        let notes = extract(&write("Notes.MD", b"# Plan\r\n\r\n\r\nShip it"), MAX_MODE_BYTES).unwrap();
+        assert_eq!(extract(&write("broken.pdf", b"%PDF-1.4 nonsense"), MAX_FILE_BYTES), Err(FileError::Unreadable));
+        let notes = extract(&write("Notes.MD", b"# Plan\r\n\r\n\r\nShip it"), MAX_FILE_BYTES).unwrap();
         assert_eq!((notes.name.as_str(), notes.kind, notes.bytes, notes.pages, notes.text.as_str()), ("Notes.MD", FileKind::Md, 19, None, "# Plan\n\nShip it"));
-        let docx = extract(&write("cv.docx", &zip(&[("word/document.xml", DOCUMENT_XML.as_bytes())], true)), MAX_MODE_BYTES).unwrap();
+        let docx = extract(&write("cv.docx", &zip(&[("word/document.xml", DOCUMENT_XML.as_bytes())], true)), MAX_FILE_BYTES).unwrap();
         assert!(docx.text.starts_with("Jane Doe\nRust & Go"));
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -403,7 +404,7 @@ pub(crate) mod tests {
         let dir = tempdir("pdf");
         let path = dir.join("resume.pdf");
         std::fs::write(&path, minimal_pdf("Senior engineer")).unwrap();
-        let pdf = extract(&path, MAX_MODE_BYTES).unwrap();
+        let pdf = extract(&path, MAX_FILE_BYTES).unwrap();
         assert_eq!((pdf.kind, pdf.pages), (FileKind::Pdf, Some(1)));
         assert!(pdf.text.contains("Senior engineer"), "{:?}", pdf.text);
         std::fs::remove_dir_all(dir).unwrap();

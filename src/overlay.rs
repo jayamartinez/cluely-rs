@@ -183,6 +183,9 @@ pub struct Overlay {
     pub(crate) cli_error: Option<(Provider, SharedString)>,
     /// The Live session being saved to History, when saving is on.
     pub(crate) recorder: Option<Recorder>,
+    /// The saved session the next Live start continues, instead of starting a new one
+    /// (`resume_session`).
+    resume_next: Option<String>,
     /// The held-key loop that is currently running, if any.
     motion: Option<Motion>,
     pub(crate) live_since: Option<Instant>,
@@ -378,7 +381,7 @@ impl Overlay {
             #[cfg(target_os = "macos")]
             assist_practiced: None,
             archive, focus: cx.focus_handle(),
-            recorder: None, shape: Rc::default(), hits: Hits::default(), composer, key_input, model_input, base_url_input,
+            recorder: None, resume_next: None, shape: Rc::default(), hits: Hits::default(), composer, key_input, model_input, base_url_input,
             #[cfg(target_os = "macos")]
             model_ui,
             key_reveal: Default::default(), opacity_drag: false,
@@ -597,19 +600,28 @@ impl Overlay {
         // its app isn't. Done after this click, as for Settings.
         #[cfg(target_os = "macos")]
         {
-            let (overlay, codex) = (cx.entity(), self.codex.clone());
+            let (overlay, codex, resume) = (cx.entity(), self.codex.clone(), self.resume_handler(cx));
             cx.defer(move |cx| platform::activate_then(cx, move |active, cx| {
                 let mut handle = overlay.read(cx).sessions_window;
-                sessions_window::open(&mut handle, root, codex, active, cx);
+                sessions_window::open(&mut handle, root, codex, resume, active, cx);
                 show_session(handle, id, cx);
                 overlay.update(cx, |overlay, _| overlay.sessions_window = handle);
             }));
         }
         #[cfg(not(target_os = "macos"))]
         {
-            sessions_window::open(&mut self.sessions_window, root, self.codex.clone(), true, cx);
+            let resume = self.resume_handler(cx);
+            sessions_window::open(&mut self.sessions_window, root, self.codex.clone(), resume, true, cx);
             show_session(self.sessions_window, id, cx);
         }
+    }
+
+    /// What the Sessions window's Resume calls: `resume_session` in the overlay's own window.
+    fn resume_handler(&self, cx: &mut Context<Self>) -> sessions_window::Resume {
+        let (overlay, own) = (cx.weak_entity(), self.own_window);
+        std::rc::Rc::new(move |id, cx| {
+            let _ = own.update(cx, |_, window, cx| overlay.update(cx, |this, cx| this.resume_session(id, window, cx)));
+        })
     }
 
     /// Close any open dropdown and hide what Settings revealed (accounts, a saved key), as when
@@ -731,7 +743,8 @@ impl Overlay {
         cx.quit();
     }
 
-    /// Open a History record when Live starts and close it when Live stops.
+    /// Open a History record when Live starts and close it when Live stops. A start after
+    /// `resume_session` reopens that saved session instead of starting a new one.
     fn record(&mut self, live: bool) {
         if let Some(recorder) = self.recorder.take() {
             match recorder.finish(archive::unix_now()) {
@@ -740,13 +753,33 @@ impl Overlay {
                 Err(error) => eprintln!("session could not be saved: {error}"),
             }
         }
+        let resume = self.resume_next.take();
         if live && self.store.value.save_sessions && let Some(archive) = &self.archive {
-            match archive.start_now() {
-                // The mode gives the session its icon in the Sessions panel.
-                Ok(mut recorder) => { recorder.set_mode(&self.modes.active().id); self.recorder = Some(recorder) }
+            let started = match &resume {
+                Some(id) => archive.resume(id, archive::unix_now()),
+                None => archive.start_now().map(|mut recorder| {
+                    // The mode gives the session its icon in the Sessions panel.
+                    recorder.set_mode(&self.modes.active().id);
+                    recorder
+                }),
+            };
+            match started {
+                Ok(recorder) => self.recorder = Some(recorder),
                 Err(error) => eprintln!("session recording unavailable: {error}"),
             }
         }
+    }
+
+    /// Continue saved session `id` Live: what is heard and asked from now on is appended to it,
+    /// in its own mode (`archive::Archive::resume`). A Live session already running ends first and
+    /// is saved as usual.
+    pub(crate) fn resume_session(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(session) = self.archive.as_ref().and_then(|archive| archive.load(&id)).filter(|session| session.ended_at.is_some()) else { return };
+        if self.live_since.is_some() { self.set_live(false, window, cx); }
+        if let Some(mode) = session.mode && self.modes.set_active(&mode) { self.apply_mode(); }
+        self.resume_next = Some(id);
+        self.show();
+        self.set_live(true, window, cx);
     }
 
     fn update_passthrough(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -811,12 +844,14 @@ impl Overlay {
         cx.notify();
     }
 
-    /// Title, overview, topics and follow-ups for a finished session, written off the UI thread.
+    /// Title, notes and the email draft for a finished session, under its mode's note sections,
+    /// written off the UI thread. A resumed session's notes are rewritten, keeping the user's edits.
     fn write_notes(&self, session: archive::Session) {
         let Some(root) = self.archive.as_ref().map(|archive| archive.root().to_path_buf()) else { return };
         let (settings, codex) = (self.store.value.clone(), self.codex.clone());
-        std::thread::spawn(move || match crate::notes::generate(&settings, &codex, &session) {
-            Ok((title, notes)) => { let _ = Archive::at(root).update(&session.id, |s| { s.title = Some(title); s.notes = Some(notes); }); }
+        let sections = self.modes.note_template(session.mode.as_deref());
+        std::thread::spawn(move || match crate::notes::generate(&settings, &codex, &session, &sections) {
+            Ok(generated) => { let _ = Archive::at(root).update(&session.id, |s| crate::notes::apply(s, generated, true)); }
             Err(error) => eprintln!("session notes unavailable: {error}"),
         });
     }
@@ -972,10 +1007,11 @@ impl Overlay {
             let screenshot = match (settings.screen_on_send, prepared, point) {
                 (false, ..) | (true, None, None) => None,
                 (true, Some(jpeg), _) => Some(jpeg),
-                (true, None, Some((x, y))) => cx.background_executor().spawn(async move { crate::capture::screen_jpeg(x, y).ok() }).await,
+                (true, None, Some(point)) => crate::capture::screenshot(cx.background_executor(), point).await,
             };
+            let query = conversation.query();
             let conversation = conversation.render(screenshot.is_some());
-            let request = reasoning::Request { action, question, history, conversation, screenshot: screenshot.clone(), attachments, utterance };
+            let request = reasoning::Request { action, question, history, conversation, query, screenshot: screenshot.clone(), attachments, utterance };
             let started = this.update(cx, |this, cx| {
                 if let Some(turn) = this.turns.iter_mut().find(|t| t.id == id) { turn.screenshot = screenshot; }
                 // Live ended while the screenshot was taken: nothing to answer any more.
@@ -1091,10 +1127,10 @@ impl Overlay {
                 Step::Prepare { .. } => {
                     // Preparation, no model requests: a screenshot now, so the answer doesn't
                     // wait for one, and a warm thread or process for a speculative answer.
-                    if self.store.value.screen_on_send && let Some((x, y)) = self.native.and_then(platform::center) {
+                    if self.store.value.screen_on_send && let Some(point) = self.native.and_then(platform::center) {
                         cx.spawn(async move |this, cx| {
                             let taken = Instant::now();
-                            let jpeg = cx.background_executor().spawn(async move { crate::capture::screen_jpeg(x, y).ok() }).await;
+                            let jpeg = crate::capture::screenshot(cx.background_executor(), point).await;
                             if let Some(jpeg) = jpeg { let _ = this.update(cx, |this, _| this.prepared_shot.store(taken, jpeg)); }
                         }).detach();
                     }
@@ -1125,11 +1161,12 @@ impl Overlay {
         cx.spawn(async move |this, cx| {
             let screenshot = match (prepared, point) {
                 (Some(jpeg), _) => Some(jpeg),
-                (None, Some((x, y))) => cx.background_executor().spawn(async move { crate::capture::screen_jpeg(x, y).ok() }).await,
+                (None, Some(point)) => crate::capture::screenshot(cx.background_executor(), point).await,
                 (None, None) => None,
             };
+            let query = conversation.query();
             let conversation = conversation.render(screenshot.is_some());
-            let request = reasoning::Request { action: action.into(), question: String::new(), history, conversation, screenshot, attachments: Arc::default(), utterance: Some(utterance) };
+            let request = reasoning::Request { action: action.into(), question: String::new(), history, conversation, query, screenshot, attachments: Arc::default(), utterance: Some(utterance) };
             let _ = this.update(cx, |this, cx| {
                 // Cancelled or replaced while the screenshot was taken. Otherwise the context is
                 // read now: its question may have been committed meanwhile.
@@ -1617,9 +1654,7 @@ pub(crate) fn capture_excluded(settings: &Settings) -> bool {
 }
 
 pub(crate) fn apply_capture_setting(native: NativeWindow, settings: &Settings) {
-    if let Err(error) = platform::set_capture_hidden(native, capture_excluded(settings)) {
-        eprintln!("capture exclusion unavailable: {error}");
-    }
+    crate::capture::set_window_hidden(native, capture_excluded(settings));
 }
 
 /// The header of an answer shown without a press: what it is, which question it answers, and
