@@ -9,9 +9,9 @@ use std::time::{Duration, Instant};
 use futures::channel::mpsc::{UnboundedReceiver, unbounded};
 use gpui::{Pixels, Size, Window};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HWND, RECT, WAIT_OBJECT_0};
-use windows::Win32::System::Threading::{CreateEventW, CreateMutexW, INFINITE, SetEvent, WaitForSingleObject};
-use windows::core::HSTRING;
+use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HWND, LPARAM, RECT, WAIT_OBJECT_0};
+use windows::Win32::System::Threading::{CreateEventW, CreateMutexW, GetCurrentProcessId, INFINITE, SetEvent, WaitForSingleObject};
+use windows::core::{BOOL, HSTRING};
 use windows::Win32::Graphics::Dwm::{
     DWMNCRP_DISABLED, DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE, DWMWA_NCRENDERING_POLICY, DWMWA_WINDOW_CORNER_PREFERENCE,
     DWMWCP_DONOTROUND, DwmSetWindowAttribute,
@@ -31,8 +31,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SetWindowLongPtrW, WS_EX_LAYERED, WS_EX_TRANSPARENT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetClientRect, GetWindowRect, HWND_TOPMOST, IsWindowVisible, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOSIZE,
-    SetWindowDisplayAffinity, SetWindowPos, ShowWindow, WDA_EXCLUDEFROMCAPTURE, WDA_NONE,
+    EnumWindows, GetClientRect, GetWindowDisplayAffinity, GetWindowRect, GetWindowThreadProcessId, HWND_TOPMOST, IsWindowVisible, SW_HIDE,
+    SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOSIZE, SetWindowDisplayAffinity, SetWindowPos, ShowWindow, WDA_EXCLUDEFROMCAPTURE, WDA_NONE,
 };
 
 /// The overlay's own top-level window.
@@ -54,6 +54,31 @@ pub fn native_window(window: &Window) -> Option<NativeWindow> {
 /// Older systems ignore the flag and show the window as a black rectangle instead.
 pub fn set_capture_hidden(hwnd: HWND, hidden: bool) -> windows::core::Result<()> {
     unsafe { SetWindowDisplayAffinity(hwnd, if hidden { WDA_EXCLUDEFROMCAPTURE } else { WDA_NONE }) }
+}
+
+/// The number `capture` tells a window apart by.
+pub fn window_key(hwnd: HWND) -> usize { hwnd.0 as usize }
+
+/// Set the capture exclusion of each of this process's top-level windows to what `decide` returns
+/// for its key and whether it is excluded now. The desktop capture `capture` takes leaves out
+/// windows excluded this way from the moment the call returns, without waiting for a frame.
+pub fn set_own_windows_capture_hidden(mut decide: impl FnMut(usize, bool) -> bool) {
+    unsafe extern "system" fn collect(hwnd: HWND, windows: LPARAM) -> BOOL {
+        let mut process = 0;
+        unsafe {
+            GetWindowThreadProcessId(hwnd, Some(&mut process));
+            if process == GetCurrentProcessId() { (*(windows.0 as *mut Vec<HWND>)).push(hwnd); }
+        }
+        true.into()
+    }
+    let mut windows = Vec::new();
+    // SAFETY: `collect` only runs during the call, while `windows` is borrowed for it.
+    let _ = unsafe { EnumWindows(Some(collect), LPARAM(&mut windows as *mut Vec<HWND> as isize)) };
+    for hwnd in windows {
+        let mut affinity = 0;
+        let hidden = unsafe { GetWindowDisplayAffinity(hwnd, &mut affinity) }.is_ok() && affinity == WDA_EXCLUDEFROMCAPTURE.0;
+        if decide(window_key(hwnd), hidden) != hidden { let _ = set_capture_hidden(hwnd, !hidden); }
+    }
 }
 
 /// DWM draws a border, rounded corners and a drop shadow around every top-level window.

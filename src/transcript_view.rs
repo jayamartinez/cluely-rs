@@ -74,7 +74,7 @@ impl Overlay {
             cx.notify();
             return;
         }
-        let (listening, mut messages) = Listening::start(provider, sources, self.store.value.devices(), self.metrics.clone());
+        let (listening, mut messages) = Listening::start(provider, sources, self.store.value.devices(), self.store.value.echo_cancellation, self.metrics.clone());
         self.listening = Some(listening);
         self.listening_status = Some(Status::Starting);
         cx.notify();
@@ -125,9 +125,11 @@ impl Overlay {
                 self.levels.push_back(me.max(them));
             }
             Message::Transcript(update) => {
+                let committed = matches!(update, Update::Committed { .. });
                 let steps = self.plan(&update);
                 self.apply_update(update);
                 self.run_steps(steps, cx);
+                if committed { self.roll_summary(); }
             }
         }
         cx.notify();
@@ -174,7 +176,7 @@ impl Overlay {
             let text = format!("{} {}", line.stable, line.unstable).trim().to_string();
             (!text.is_empty()).then_some(crate::reasoning::Now { source, text })
         }).collect();
-        crate::reasoning::Conversation { lines, now }
+        crate::reasoning::Conversation { lines, now, earlier: None }
     }
 
     /// The latest committed line from the other side, which an answer most likely addresses.

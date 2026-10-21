@@ -104,6 +104,11 @@ pub struct Settings {
     pub speculative_answers: bool,
     /// Show those answers as they are produced, without pressing anything. Needs `speculative_answers`.
     pub auto_answer: bool,
+    /// In a long Live session, condense what has left the recent window into a summary answers
+    /// carry (`reasoning::summary`): a short request to the selected model every few minutes of
+    /// conversation, once lines start leaving that window (after ten minutes or 40 lines). On by
+    /// default; no control in Settings yet.
+    pub rolling_summary: bool,
     /// Transcribe the Live session's audio on this PC. Off keeps Live to the screen and typed questions.
     pub transcribe: bool,
     pub stt_provider: SttProvider,
@@ -112,6 +117,9 @@ pub struct Settings {
     pub use_gpu: bool,
     pub listen_mic: bool,
     pub listen_desktop: bool,
+    /// Remove desktop audio that the mic picks up from the speakers, so the other side isn't
+    /// transcribed a second time as "Me". Only applies while both are captured.
+    pub echo_cancellation: bool,
     /// Device names from `audio::list_devices`; empty means the system default.
     pub mic_device: String,
     pub desktop_device: String,
@@ -160,8 +168,8 @@ impl Default for Settings {
             provider: Provider::default(), claude_model: ClaudeModel::default(), claude_model_id: String::new(), claude_models: BTreeMap::new(), codex_model: String::new(),
             codex_path: String::new(), claude_path: String::new(),
             api_provider: "anthropic".into(), api_models: BTreeMap::new(), custom_base_url: String::new(), saved_keys: BTreeMap::new(),
-            answer_style: AnswerStyle::default(), smart_mode: false, speculative_answers: false, auto_answer: false, transcribe: true, stt_provider: SttProvider::default(),
-            use_gpu: true, listen_mic: true, listen_desktop: true,
+            answer_style: AnswerStyle::default(), smart_mode: false, speculative_answers: false, auto_answer: false, rolling_summary: true, transcribe: true, stt_provider: SttProvider::default(),
+            use_gpu: true, listen_mic: true, listen_desktop: true, echo_cancellation: true,
             background_opacity: appearance::DEFAULT_OPACITY, text_size: TextSize::default(), card_width: CardWidth::default(),
             mic_device: String::new(), desktop_device: String::new(),
             hide_from_capture: true, screen_on_send: true, start_live_on_launch: false, show_in_dock: false, show_menu_bar_icon: true,
@@ -334,6 +342,8 @@ mod tests {
         assert!(!partial.speculative_answers && !partial.auto_answer, "speculative answers are opt-in");
         assert!(partial.transcribe);
         assert!(partial.use_gpu, "the GPU is on unless turned off");
+        assert!(partial.echo_cancellation, "echo cancellation is on unless turned off");
+        assert!(serde_json::to_string(&partial).unwrap().contains(r#""echoCancellation":true"#));
         assert!(partial.show_menu_bar_icon && !partial.show_in_dock, "the menu bar icon shows, the Dock icon doesn't");
         let hidden = Settings { show_menu_bar_icon: false, ..Settings::default() };
         let json = serde_json::to_string(&hidden).unwrap();

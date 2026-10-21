@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 
-use crate::audio::{AudioCapture, AudioChunk, Devices, Source};
+use crate::audio::{AudioCapture, AudioChunk, Devices, EchoCanceller, Source};
 use crate::metrics::{self, LatencyRecorder};
 use crate::settings::SttProvider;
 use crate::stt::parakeet::{ParakeetConfig, ParakeetRealtime};
@@ -125,8 +125,9 @@ impl Listening {
     /// setup and model loading happen on the pipeline thread, which reports through `Message`s.
     /// `metrics` is the session's recorder and export stem when the Live session exports
     /// (`CLUELYRS_METRICS=1`): the pipeline records into it and saves the captured audio next
-    /// to it; the owner of the recorder writes the marks when the session ends.
-    pub fn start(provider: Arc<dyn StreamingAsr>, sources: Vec<Source>, devices: Devices, metrics: Option<Metrics>) -> (Self, UnboundedReceiver<Message>) {
+    /// to it; the owner of the recorder writes the marks when the session ends. `cancel_echo`
+    /// removes desktop audio from the mic (see [`EchoCanceller`]).
+    pub fn start(provider: Arc<dyn StreamingAsr>, sources: Vec<Source>, devices: Devices, cancel_echo: bool, metrics: Option<Metrics>) -> (Self, UnboundedReceiver<Message>) {
         let (out, messages) = unbounded();
         let (commands, inbox) = channel();
         let started = Instant::now();
@@ -140,7 +141,7 @@ impl Listening {
             let opened: Vec<Source> = capture.opened.iter().map(|info| info.source).collect();
             let live = LiveTranscript::new(EndpointConfig::default(), metrics.as_ref().map(|metrics| metrics.recorder.clone()));
             let mut dump = metrics.as_ref().and_then(|metrics| AudioDump::create(&metrics.stem, &opened).ok());
-            run_watching(provider, audio, &opened, failures, live, &inbox, &out, dump.as_mut(), &|| capture.take_ended());
+            run_watching(provider, audio, &opened, failures, live, &inbox, &out, dump.as_mut(), cancel_echo, &|| capture.take_ended());
             capture.stop();
             if let Some(dump) = dump && let Err(error) = dump.finish() { eprintln!("audio export failed: {error}"); }
         }).ok();
@@ -160,10 +161,12 @@ impl Drop for Listening {
 
 /// Feed audio to the recognizer and the endpointer, turn provider events into transcript
 /// updates, and stop on command or when the audio ends. Device-free, so tests can drive it.
+/// Only `sources` are transcribed; with `cancel_echo`, desktop audio that arrives anyway still
+/// serves as the mic's echo reference.
 #[allow(clippy::too_many_arguments)]
 pub fn run(provider: Arc<dyn StreamingAsr>, audio: Receiver<AudioChunk>, sources: &[Source], failures: Vec<(Source, String)>,
-    live: LiveTranscript, commands: &Receiver<Command>, out: &UnboundedSender<Message>, dump: Option<&mut AudioDump>) {
-    run_watching(provider, audio, sources, failures, live, commands, out, dump, &Vec::new);
+    live: LiveTranscript, commands: &Receiver<Command>, out: &UnboundedSender<Message>, dump: Option<&mut AudioDump>, cancel_echo: bool) {
+    run_watching(provider, audio, sources, failures, live, commands, out, dump, cancel_echo, &Vec::new);
 }
 
 /// `run`, also reporting sources whose capture ends mid-session: `ended` returns each once, with
@@ -171,7 +174,7 @@ pub fn run(provider: Arc<dyn StreamingAsr>, audio: Receiver<AudioChunk>, sources
 #[allow(clippy::too_many_arguments)]
 fn run_watching(provider: Arc<dyn StreamingAsr>, audio: Receiver<AudioChunk>, sources: &[Source], mut failures: Vec<(Source, String)>,
     mut live: LiveTranscript, commands: &Receiver<Command>, out: &UnboundedSender<Message>, mut dump: Option<&mut AudioDump>,
-    ended: &dyn Fn() -> Vec<(Source, String)>) {
+    cancel_echo: bool, ended: &dyn Fn() -> Vec<(Source, String)>) {
     let (events, inbox) = channel();
     let mut transcriber = Transcriber::new(events);
     match transcriber.start(provider.clone(), sources) {
@@ -182,16 +185,21 @@ fn run_watching(provider: Arc<dyn StreamingAsr>, audio: Receiver<AudioChunk>, so
     let _ = out.unbounded_send(Message::Status(Status::Listening { sources: heard.clone(), failures: failures.clone() }));
     let send = |updates: Vec<Update>| updates.into_iter().all(|update| out.unbounded_send(Message::Transcript(update)).is_ok());
     let mut meter = LevelMeter::default();
+    let mut echo = (cancel_echo && sources.contains(&Source::Me)).then(EchoCanceller::new);
     loop {
         if commands.try_recv().is_ok() { break; }
         match audio.recv_timeout(POLL) {
             Ok(chunk) => {
+                // The dump keeps the mic as captured, so a replay can run the canceller again.
                 if let Some(dump) = dump.as_deref_mut() { dump.write(&chunk); }
-                let updates = live.on_audio(&chunk);
-                let levels = meter.observe(&chunk);
-                transcriber.feed(chunk);
-                if !send(updates) { break; }
-                if let Some((me, them)) = levels && out.unbounded_send(Message::Level { me, them }).is_err() { break; }
+                let chunk = match echo.as_mut() { Some(echo) => echo.process(chunk), None => Some(chunk) };
+                if let Some(chunk) = chunk.filter(|chunk| sources.contains(&chunk.source)) {
+                    let updates = live.on_audio(&chunk);
+                    let levels = meter.observe(&chunk);
+                    transcriber.feed(chunk);
+                    if !send(updates) { break; }
+                    if let Some((me, them)) = levels && out.unbounded_send(Message::Level { me, them }).is_err() { break; }
+                }
             }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
@@ -205,6 +213,8 @@ fn run_watching(provider: Arc<dyn StreamingAsr>, audio: Receiver<AudioChunk>, so
         let lost = ended();
         if !lost.is_empty() {
             heard.retain(|source| !lost.iter().any(|(gone, _)| gone == source));
+            // Without desktop audio there is nothing to cancel: the mic passes through untouched.
+            if lost.iter().any(|(gone, _)| *gone == Source::Them) { log_echo(echo.take()); }
             failures.extend(lost);
             let status = if heard.is_empty() {
                 Status::Failed(failures.iter().map(|(source, error)| format!("{} unavailable: {error}", source.label())).collect::<Vec<_>>().join(" · "))
@@ -214,15 +224,22 @@ fn run_watching(provider: Arc<dyn StreamingAsr>, audio: Receiver<AudioChunk>, so
             if out.unbounded_send(Message::Status(status)).is_err() { break; }
         }
     }
+    log_echo(echo);
     // Flush the recognizers, apply their last events, then commit anything still in progress.
     transcriber.stop();
     let updates: Vec<Update> = inbox.try_iter().flat_map(|event| live.on_event(&event)).collect();
     if send(updates) { send(live.finish()); }
 }
 
+/// What the echo canceller made of the session, for the log; nothing when it never ran.
+fn log_echo(echo: Option<EchoCanceller>) {
+    if let Some(summary) = echo.and_then(|echo| echo.summary()) { eprintln!("echo canceller: {summary}"); }
+}
+
 /// With `CLUELYRS_METRICS=1`, what each source captured is also saved beside the metrics file as
 /// 16 kHz mono 16-bit WAV (`live-<time>-me.wav`, `-them.wav`), so a session can be replayed
-/// through `examples/transcript_replay.rs` exactly as the pipeline heard it.
+/// through `examples/transcript_replay.rs` as the pipeline heard it. The mic is saved before echo
+/// cancellation; replaying it with `--reference <them.wav>` runs the canceller again.
 pub struct AudioDump {
     files: Vec<(Source, std::io::BufWriter<std::fs::File>, u32)>,
 }
@@ -303,7 +320,7 @@ mod tests {
         let (commands, inbox) = channel();
         let (out, messages) = unbounded();
         let worker = std::thread::spawn(move || {
-            run(provider, audio, &Source::ALL, Vec::new(), LiveTranscript::new(EndpointConfig::default(), None), &inbox, &out, None);
+            run(provider, audio, &Source::ALL, Vec::new(), LiveTranscript::new(EndpointConfig::default(), None), &inbox, &out, None, false);
         });
         // 0.8 s of speech on both sources, then 2 s of silence, then stop. The pauses let the
         // recognizer threads deliver their events before the silence is fed, as in real time.
@@ -329,6 +346,31 @@ mod tests {
         assert!(committed.contains(&(Source::Me, "let me think", Reason::Silence)) || committed.contains(&(Source::Me, "let me think", Reason::MaxSilence)), "{committed:?}");
         let them = messages.iter().find_map(|m| match m { Message::Transcript(Update::Committed { utterance, .. }) if utterance.source == Source::Them => Some(utterance.clone()), _ => None }).unwrap();
         assert!(them.start_ms <= 200.0 && them.end_ms >= 600.0, "{them:?}");
+    }
+
+    #[test]
+    fn desktop_audio_that_is_only_the_echo_reference_is_not_transcribed() {
+        let provider = Arc::new(ScriptedAsr::new(vec![Step::partial(Source::Me, 300.0, "let me think"), Step::partial(Source::Them, 300.0, "echo")]));
+        let (chunks, audio) = channel();
+        let (commands, inbox) = channel();
+        let (out, messages) = unbounded();
+        for i in 0..40 {
+            chunks.send(AudioChunk { source: Source::Them, start_ms: i as f64 * 20.0, samples: vec![0.1; 320] }).unwrap();
+            chunks.send(AudioChunk { source: Source::Me, start_ms: i as f64 * 20.0, samples: vec![0.2; 320] }).unwrap();
+        }
+        let worker = std::thread::spawn(move || {
+            run(provider, audio, &[Source::Me], Vec::new(), LiveTranscript::new(EndpointConfig::default(), None), &inbox, &out, None, true);
+        });
+        std::thread::sleep(Duration::from_millis(200));
+        commands.send(Command::Stop).unwrap();
+        worker.join().unwrap();
+        let messages = drain(messages);
+        let sources: Vec<Source> = messages.iter().filter_map(|m| match m {
+            Message::Transcript(Update::Provisional { source, .. }) => Some(*source),
+            Message::Transcript(Update::Committed { utterance, .. }) => Some(utterance.source),
+            _ => None }).collect();
+        assert!(sources.contains(&Source::Me) && !sources.contains(&Source::Them), "{messages:?}");
+        assert!(messages.iter().all(|m| !matches!(m, Message::Level { them, .. } if *them > 0.0)), "the reference isn't metered either");
     }
 
     #[test]
@@ -359,7 +401,7 @@ mod tests {
         let (out, messages) = unbounded();
         for i in 0..10 { chunks.send(AudioChunk { source: Source::Me, start_ms: i as f64 * 20.0, samples: vec![0.2; 320] }).unwrap(); }
         let worker = std::thread::spawn(move || {
-            run(provider, audio, &[Source::Me], Vec::new(), LiveTranscript::new(EndpointConfig::default(), None), &inbox, &out, None);
+            run(provider, audio, &[Source::Me], Vec::new(), LiveTranscript::new(EndpointConfig::default(), None), &inbox, &out, None, false);
         });
         std::thread::sleep(Duration::from_millis(200));
         commands.send(Command::Stop).unwrap();
@@ -374,7 +416,7 @@ mod tests {
         let (_chunks, audio) = channel::<AudioChunk>();
         let (_commands, inbox) = channel();
         let (out, messages) = unbounded();
-        run(provider, audio, &Source::ALL, Vec::new(), LiveTranscript::new(EndpointConfig::default(), None), &inbox, &out, None);
+        run(provider, audio, &Source::ALL, Vec::new(), LiveTranscript::new(EndpointConfig::default(), None), &inbox, &out, None, false);
         let messages = drain(messages);
         assert!(matches!(&messages[..], [Message::Status(Status::Failed(reason))] if reason.contains("isn't installed")), "{messages:?}");
         assert!(not_ready(&Availability::NeedsModel { download_bytes: 1 }).unwrap().contains("Settings"));
@@ -391,7 +433,7 @@ mod tests {
             let worker = std::thread::spawn(move || {
                 let ended = || pending.lock().unwrap().take().unwrap_or_default();
                 run_watching(Arc::new(ScriptedAsr::new(vec![])), audio, &sources, Vec::new(), LiveTranscript::new(EndpointConfig::default(), None),
-                    &inbox, &out, None, &ended);
+                    &inbox, &out, None, false, &ended);
             });
             std::thread::sleep(Duration::from_millis(100));
             commands.send(Command::Stop).unwrap();
@@ -408,7 +450,7 @@ mod tests {
     #[test]
     fn dropping_the_handle_stops_the_pipeline_without_blocking() {
         // No devices in CI-like runs is fine: the pipeline reports Failed or Listening on its own thread.
-        let (listening, mut messages) = Listening::start(Arc::new(ScriptedAsr::new(vec![])), vec![Source::Me], Devices::default(), None);
+        let (listening, mut messages) = Listening::start(Arc::new(ScriptedAsr::new(vec![])), vec![Source::Me], Devices::default(), true, None);
         let started = Instant::now();
         drop(listening);
         assert!(started.elapsed() < Duration::from_millis(50));
