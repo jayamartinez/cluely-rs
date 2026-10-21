@@ -1,6 +1,6 @@
 [package]
 name = "cluely-rs"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "A native, keyboard-driven assistant overlay for Windows and macOS built on GPUI"
 license = "MIT"
