@@ -62,9 +62,9 @@ impl EchoCanceller {
         let apm = self.apm.get_or_insert_with(new_processor);
         self.reference.extend_from_slice(samples);
         let whole = self.reference.len() / FRAME * FRAME;
-        for frame in self.reference[..whole].chunks_exact(FRAME) {
-            // Fails only on a frame of the wrong size, which chunks_exact rules out.
-            let _ = apm.process_render_f32(&[frame], &mut [&mut self.scratch]);
+        for frame in self.reference[..whole].as_chunks::<FRAME>().0 {
+            // Fails only on a frame of the wrong size, which as_chunks rules out.
+            let _ = apm.process_render_f32(&[frame.as_slice()], &mut [&mut self.scratch]);
         }
         self.reference.drain(..whole);
     }
@@ -76,9 +76,9 @@ impl EchoCanceller {
         let whole = self.near.len() / FRAME * FRAME;
         if whole == 0 { return None; }
         let mut samples: Vec<f32> = self.near.drain(..whole).collect();
-        for frame in samples.chunks_exact_mut(FRAME) {
+        for frame in samples.as_chunks_mut::<FRAME>().0 {
             self.scratch.copy_from_slice(frame);
-            if apm.process_capture_f32(&[&self.scratch], &mut [frame]).is_err() { frame.copy_from_slice(&self.scratch); }
+            if apm.process_capture_f32(&[&self.scratch], &mut [frame.as_mut_slice()]).is_err() { frame.copy_from_slice(&self.scratch); }
         }
         let start_ms = self.near_start_ms;
         self.near_start_ms += whole as f64 * 1000.0 / SAMPLE_RATE as f64;
