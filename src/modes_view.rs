@@ -27,6 +27,7 @@ use crate::{theme, ui};
 
 #[cfg(windows)]
 mod fluent;
+mod sections;
 
 /// Context edits are saved after typing pauses this long.
 const SAVE_DELAY: Duration = Duration::from_millis(600);
@@ -146,6 +147,7 @@ pub struct ModesUi {
     context: Entity<TextArea>,
     name: Entity<TextInput>,
     new_group: Entity<TextInput>,
+    sections: sections::SectionsUi,
     /// The macOS sidebar's scroll position, for its scrollbar (`mac`).
     #[cfg(target_os = "macos")]
     sidebar_scroll: gpui::ScrollHandle,
@@ -170,8 +172,9 @@ impl ModesUi {
         let selected = store.active().id.clone();
         let text = store.active().context.clone();
         context.update(cx, |area, cx| area.set_text(&text, cx));
+        let sections = sections::SectionsUi::new(window, cx);
         Self { selected, popover: None, renaming: false, notices: Vec::new(), reading: Vec::new(), indexes: Vec::new(), index_poll: None, next_id: 0, pending_save: None,
-            focus: cx.focus_handle(), context, name, new_group, #[cfg(target_os = "macos")] sidebar_scroll: gpui::ScrollHandle::new() }
+            focus: cx.focus_handle(), context, name, new_group, sections, #[cfg(target_os = "macos")] sidebar_scroll: gpui::ScrollHandle::new() }
     }
 }
 
@@ -655,6 +658,7 @@ impl Overlay {
     /// Show `id` on the right.
     pub(crate) fn select_mode(&mut self, id: &str, cx: &mut Context<Self>) {
         self.flush_context(cx);
+        self.flush_sections(cx);
         let Some(mode) = self.modes.get(id) else { return };
         let (text, placeholder_custom) = (mode.context.clone(), mode.builtin.is_none() || mode.id == modes::GENERAL);
         self.modes_ui.selected = id.to_string();
@@ -666,6 +670,7 @@ impl Overlay {
             area.set_text(&text, cx);
             area.set_placeholder(if placeholder_custom { CUSTOM_PLACEHOLDER } else { "Describe this meeting and how to answer." }, cx);
         });
+        self.load_sections(cx);
         cx.notify();
     }
 
@@ -770,6 +775,7 @@ impl Overlay {
 
     fn duplicate_mode(&mut self, cx: &mut Context<Self>) {
         self.flush_context(cx);
+        self.flush_sections(cx);
         self.modes_ui.popover = None;
         if let Some(id) = self.modes.duplicate(&self.modes_ui.selected.clone()) { self.select_mode(&id, cx); }
     }

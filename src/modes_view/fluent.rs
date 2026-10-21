@@ -125,6 +125,7 @@ impl Overlay {
             .child(cards_column(cards))
             .child(section("Context", vec![context_box.into_any_element()]))
             .child(self.fluent_files(mode, cx))
+            .child(self.fluent_note_sections(mode, window, cx))
     }
 
     /// The icon picker (the user's modes) and the name: a TextBox while renaming, else the name.
@@ -317,6 +318,54 @@ impl Overlay {
         }
     }
 
+    /// Note sections: a row per heading (drag the grip to reorder, × removes), Add section, and
+    /// Reset to built-in for an edited built-in.
+    fn fluent_note_sections(&self, mode: &Mode, window: &Window, cx: &mut Context<Self>) -> Div {
+        let rows = self.modes_ui.sections.rows;
+        let mut header = div().flex().items_center().gap(px(16.0))
+            .child(div().flex_1().text_size(px(14.0)).line_height(px(20.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child("Note sections"))
+            .child(status(format!("{rows} of {}", modes::MAX_SECTIONS)));
+        if mode.sections_edited() {
+            header = header.child(div().id("sections-reset").cursor_pointer().text_size(px(13.0)).line_height(px(16.0)).text_color(theme::accent_soft())
+                .hover(|link| link.text_color(theme::text()))
+                .on_mouse_down(MouseButton::Left, on_click(cx, None, |this, cx| this.reset_sections(cx)))
+                .child("Reset to built-in"));
+        }
+        let hint = if rows == 0 { "No sections: notes after a session in this mode are an overview, topics and follow-ups." }
+            else { "After a session in this mode, its notes are written under these headings, in this order. The description tells the model what goes there." };
+        let mut cards: Vec<AnyElement> = Vec::new();
+        for (index, (name, description)) in self.modes_ui.sections.fields[..rows].iter().enumerate() {
+            let dragged = DraggedSection { index, name: name.read(cx).text().to_string() };
+            let grip = div().id(("section-grip", index)).flex_none().size(px(24.0)).flex().items_center().justify_center().rounded(px(4.0)).cursor_grab()
+                .hover(|grip| grip.bg(theme::fluent_selected()))
+                .on_drag(dragged, |dragged, _, _, cx| cx.new(|_| dragged.clone()))
+                .child(ui::icon("icons/grip.svg", 14.0, theme::muted()));
+            let remove = div().id(("section-remove", index)).flex_none().size(px(24.0)).flex().items_center().justify_center().rounded(px(4.0)).cursor_pointer()
+                .hover(|close| close.bg(theme::fluent_selected()))
+                .on_mouse_down(MouseButton::Left, on_click(cx, None, move |this, cx| this.remove_section(index, cx)))
+                .child(ui::icon("icons/close.svg", 12.0, theme::muted()));
+            let this = cx.weak_entity();
+            cards.push(card(("section-row", index)).min_h(px(56.0)).gap(px(12.0))
+                .drag_over::<DraggedSection>(|style, _, _, _| style.border_color(theme::accent()))
+                .on_drop(move |dragged: &DraggedSection, _, cx| { this.update(cx, |this, cx| this.move_section(dragged.index, index, cx)).ok(); })
+                .child(grip)
+                .child(text_box(("section-name", index), name, window, cx).w(gpui::relative(0.3)).flex_none())
+                .child(text_box(("section-description", index), description, window, cx).flex_1().min_w_0())
+                .child(remove)
+                .into_any_element());
+        }
+        if rows < modes::MAX_SECTIONS {
+            let focus = self.modes_ui.sections.fields[rows].0.focus_handle(cx);
+            cards.push(div().id("section-add").flex().items_center().justify_center().gap(px(8.0)).h(px(48.0)).rounded(px(6.0)).cursor_pointer()
+                .border_1().border_dashed().border_color(theme::keycap_border()).text_size(px(13.0)).line_height(px(16.0)).text_color(theme::accent_soft())
+                .hover(|zone| zone.bg(theme::raised()))
+                .on_mouse_down(MouseButton::Left, on_click(cx, Some(focus), |this, cx| this.add_section(cx)))
+                .child(ui::icon("icons/plus.svg", 12.0, theme::accent_soft())).child("Add section")
+                .into_any_element());
+        }
+        div().flex().flex_col().gap(px(8.0)).child(header).child(status(hint).text_size(px(13.0)).line_height(px(18.0))).child(cards_column(cards))
+    }
+
     /// Close the ⋯ flyout, the icon picker or the delete confirmation (Esc, the window closing).
     /// Whether one was open.
     pub(crate) fn close_mode_menus(&mut self, cx: &mut Context<Self>) -> bool {
@@ -325,4 +374,17 @@ impl Overlay {
         true
     }
 
+}
+
+/// A note section row while it's dragged by its grip: the row lifted, with its name.
+#[derive(Clone)]
+struct DraggedSection { index: usize, name: String }
+
+impl gpui::Render for DraggedSection {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().flex().items_center().gap(px(12.0)).w(px(320.0)).h(px(48.0)).px(px(14.0)).rounded(px(6.0)).bg(theme::raised())
+            .border_1().border_color(theme::keycap_border()).font_family(theme::FONT).text_size(px(13.0)).text_color(theme::text())
+            .child(ui::icon("icons/grip.svg", 14.0, theme::muted()))
+            .child(div().min_w_0().truncate().child(if self.name.trim().is_empty() { "Untitled section".to_string() } else { self.name.clone() }))
+    }
 }
