@@ -22,13 +22,14 @@ gpui::actions!(settings_window, [CloseSettings]);
 enum Page { Settings(Tab), About }
 
 /// The tab bar: page, label, icon.
-const PAGES: [(Page, &str, &str); 7] = [
+const PAGES: [(Page, &str, &str); 8] = [
     (Page::Settings(Tab::Model), "Model", "icons/tab-model.svg"),
     (Page::Settings(Tab::Listening), "Listening", "icons/tab-listening.svg"),
     (Page::Settings(Tab::Modes), "Modes", "icons/tab-modes.svg"),
     (Page::Settings(Tab::Keys), "Shortcuts", "icons/tab-shortcuts.svg"),
     (Page::Settings(Tab::Window), "Window", "icons/tab-window.svg"),
     (Page::Settings(Tab::History), "Sessions", "icons/tab-sessions.svg"),
+    (Page::Settings(Tab::Calendar), "Calendar", "icons/setup-calendar.svg"),
     (Page::About, "About", "icons/tab-about.svg"),
 ];
 
