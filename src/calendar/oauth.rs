@@ -196,7 +196,7 @@ impl AuthError {
             Self::Cancelled => "Sign-in was cancelled.".into(),
             Self::Denied => "Google sign-in was declined.".into(),
             Self::MissingScope => "Calendar access wasn't allowed. Sign in again and tick it.".into(),
-            Self::NoListener => "Couldn't start sign-in on this PC.".into(),
+            Self::NoListener => if cfg!(target_os = "macos") { "Couldn't start sign-in on this Mac.".into() } else { "Couldn't start sign-in on this PC.".into() },
             Self::NotSaved => format!("Couldn't save the sign-in to {}.", crate::secrets::STORE_NAME),
             Self::Offline => "Couldn't reach Google. Check your connection.".into(),
             Self::SignInAgain => "Google signed CluelyRS out. Sign in again.".into(),

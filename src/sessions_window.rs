@@ -344,7 +344,7 @@ impl SessionsWindow {
     fn confirm_delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(id) = self.session.as_ref().map(|s| s.id.clone()) else { return };
         let answer = window.prompt(PromptLevel::Warning, "Delete this session?",
-            Some("Its transcript, answers and screenshots are removed from this PC."), &["Delete", "Cancel"], cx);
+            Some(if cfg!(target_os = "macos") { "Its transcript, answers and screenshots are removed from this Mac." } else { "Its transcript, answers and screenshots are removed from this PC." }), &["Delete", "Cancel"], cx);
         cx.spawn(async move |this, cx| {
             if answer.await == Ok(0) {
                 let _ = this.update(cx, |this, cx| {
