@@ -86,9 +86,17 @@ pub enum Target {
     Codex(ChatRequest, Arc<CodexClient>),
 }
 
+/// How much more the user's own question counts than the conversation when the mode's long
+/// files are searched.
+const QUESTION_WEIGHT: f32 = 3.0;
+
 /// Resolve the selected provider into a request, or a user-facing reason it can't run.
-/// `conversation` is the heard conversation as prompt text (`reasoning::Conversation::render`).
-pub fn build(settings: &Settings, codex: &Arc<CodexClient>, action: &str, question: &str, history: &[Exchange], conversation: &str, screenshot: Option<Vec<u8>>) -> Result<Target, String> {
+/// `conversation` is the heard conversation as prompt text (`reasoning::Conversation::render`);
+/// `query` is what of it the mode's long files are searched for, with the question
+/// (`reasoning::Conversation::query`).
+#[allow(clippy::too_many_arguments)]
+pub fn build(settings: &Settings, codex: &Arc<CodexClient>, action: &str, question: &str, history: &[Exchange], conversation: &str,
+    query: &[(String, f32)], screenshot: Option<Vec<u8>>) -> Result<Target, String> {
     let mut messages = Vec::new();
     for exchange in &recent(history) {
         let asked = if exchange.question.is_empty() { exchange.action.clone() } else { format!("{}: {}", exchange.action, exchange.question) };
@@ -98,12 +106,24 @@ pub fn build(settings: &Settings, codex: &Arc<CodexClient>, action: &str, questi
     let mut text = instruction(action).to_string();
     if let Some(length) = length(action, settings.smart_mode) { text.push_str(&format!(" {length}")); }
     text.push_str(&format!("\n\n{}", conversation.trim()));
+    let excerpts = excerpts(settings, question, query);
+    if !excerpts.is_empty() { text.push_str(&format!("\n\n{excerpts}")); }
     if !question.trim().is_empty() { text.push_str(&format!("\n\nMy question: {}", question.trim())); }
     let mut parts = vec![Part::Text(text)];
     if let Some(jpeg) = screenshot { parts.push(Part::Jpeg(jpeg)); }
     messages.push(Message { role: Role::User, parts });
     let max_tokens = if settings.smart_mode { THOROUGH_MAX_TOKENS } else { BRIEF_MAX_TOKENS };
     target(settings, codex, system(settings), messages, max_tokens)
+}
+
+/// The passages of the active mode's searched files that match the question and the latest
+/// of the conversation, for this turn (`modes::excerpts`). Runs on the answer path: a few
+/// milliseconds for megabytes of files.
+fn excerpts(settings: &Settings, question: &str, query: &[(String, f32)]) -> String {
+    let Some(mode) = settings.mode.as_deref() else { return String::new() };
+    let mut parts = vec![(question, QUESTION_WEIGHT)];
+    parts.extend(query.iter().map(|(text, weight)| (text.as_str(), *weight)));
+    modes::excerpts(mode, modes::file_budget(settings), &parts)
 }
 
 /// The newest exchanges that fit the history budget, oldest first. The newest is always kept:
@@ -205,7 +225,7 @@ mod tests {
     }
 
     fn built(action: &str, smart: bool) -> Request {
-        match build(&settings(smart), &CodexClient::new(), action, "", &[], "Them: what is a mutex", None).unwrap() {
+        match build(&settings(smart), &CodexClient::new(), action, "", &[], "Them: what is a mutex", &[], None).unwrap() {
             Target::Api(request, _) => request,
             _ => panic!("expected an API request"),
         }
@@ -234,10 +254,10 @@ mod tests {
     #[test]
     fn a_saved_key_is_read_when_the_request_runs_not_when_it_is_built() {
         let anthropic = Settings { api_provider: "anthropic".into(), api_models: [("anthropic".to_string(), "m".to_string())].into(), ..settings(false) };
-        let Err(reason) = build(&anthropic, &CodexClient::new(), "Assist", "", &[], "", None) else { panic!("no key is marked as saved") };
+        let Err(reason) = build(&anthropic, &CodexClient::new(), "Assist", "", &[], "", &[], None) else { panic!("no key is marked as saved") };
         assert!(reason.contains("Add your Anthropic API key"));
         let marked = Settings { saved_keys: [("anthropic".to_string(), "••••3f9a".to_string())].into(), ..anthropic };
-        match build(&marked, &CodexClient::new(), "Assist", "", &[], "", None).unwrap() {
+        match build(&marked, &CodexClient::new(), "Assist", "", &[], "", &[], None).unwrap() {
             Target::Api(request, preset) => {
                 assert_eq!(preset.id, "anthropic");
                 assert!(request.api_key.is_none(), "the key is read by `run`, on the worker thread");
@@ -261,7 +281,7 @@ mod tests {
         assert!(instructions.starts_with(&system(&general)), "the base rules and style come first");
         assert!(instructions.contains("\"Interview\" mode") && instructions.contains("Treat my résumé"), "the built-in's default context");
         assert!(instructions.ends_with("<file name=\"cv.md\">\nJane\n</file>"));
-        let request = match build(&interview, &CodexClient::new(), "Assist", "", &[], "", None).unwrap() { Target::Api(request, _) => request, _ => panic!("API") };
+        let request = match build(&interview, &CodexClient::new(), "Assist", "", &[], "", &[], None).unwrap() { Target::Api(request, _) => request, _ => panic!("API") };
         assert_eq!(request.system, instructions, "the mode goes in the system prompt, not the turn");
         assert!(!turn_text(&request).contains("Treat my résumé"));
         // Switching modes changes the Codex instructions too (a thread holding turns gets the new ones added; see `codex`).
@@ -313,7 +333,7 @@ mod tests {
     fn after_a_mode_switch_an_api_request_has_the_new_mode_and_every_earlier_exchange() {
         let (url, server) = fake_openai();
         let switched = interview(Settings { custom_base_url: url, ..settings(false) });
-        let Target::Api(request, _) = build(&switched, &CodexClient::new(), "Assist", "", &exchanges(12), "", None).unwrap() else { panic!("API") };
+        let Target::Api(request, _) = build(&switched, &CodexClient::new(), "Assist", "", &exchanges(12), "", &[], None).unwrap() else { panic!("API") };
         assert_eq!(providers::stream(&request, &AtomicBool::new(false), &mut |_| {}).unwrap(), "ok");
         let body = server.join().unwrap();
         let messages = body["messages"].as_array().unwrap();
@@ -332,11 +352,56 @@ mod tests {
     #[test]
     fn after_a_mode_switch_a_claude_request_has_the_new_mode_and_every_earlier_exchange() {
         let switched = interview(Settings { provider: Provider::Claude, ..settings(false) });
-        let Target::Claude(request) = build(&switched, &CodexClient::new(), "Assist", "", &exchanges(12), "", None).unwrap() else { panic!("Claude") };
+        let Target::Claude(request) = build(&switched, &CodexClient::new(), "Assist", "", &exchanges(12), "", &[], None).unwrap() else { panic!("Claude") };
         assert_eq!(request.system, system(&switched));
         assert!(request.system.contains("I'm interviewing for a backend role."));
         assert_eq!(request.messages.len(), 24 + 1);
         assert!(matches!(&request.messages[0].parts[0], Part::Text(text) if text == "Ask: question 1"));
+    }
+
+    /// A mode file far over the budget isn't sent; the passage deep inside it that answers the
+    /// question is, in this turn. A speculative answer (no question yet, the predicted one in
+    /// the conversation) gets it the same way.
+    #[test]
+    fn a_question_about_a_long_mode_file_sends_the_passage_that_answers_it() {
+        let needle = "Escalation: if the payments queue backs up past 10,000 jobs, page Priya Raman on the platform rota.";
+        let mut text = String::new();
+        for n in 0..500 {
+            text.push_str(&format!("## Section {n}\n\n"));
+            if n == 431 { text.push_str(needle); text.push_str("\n\n"); }
+            text.push_str(&format!("Section {n} covers routine reviews: teams meet every quarter, keep notes in the shared folder and ask their lead before changing the process.\n\n"));
+        }
+        let dir = std::env::temp_dir().join(format!("cluelyrs-answer-search-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut store = modes::ModeStore::at(Some(dir.clone()));
+        store.set_active("interview");
+        store.add_file("interview", modes::Extracted { name: "handbook.md".into(), kind: modes::FileKind::Md, bytes: text.len() as u64, pages: None, text: text.clone() }).unwrap();
+        let (url, server) = fake_openai();
+        let settings = Settings { mode: store.active_material(), custom_base_url: url, ..settings(false) };
+        assert!(modes::estimate_tokens(&text) > modes::file_budget(&settings), "over the custom provider's 12k budget");
+        let slot = settings.mode.as_ref().unwrap().files[0].index.clone().unwrap();
+        let started = std::time::Instant::now();
+        while slot.status() != crate::search::Status::Ready && started.elapsed() < std::time::Duration::from_secs(30) { std::thread::sleep(std::time::Duration::from_millis(5)); }
+
+        let question = "Who do we page when the payments queue backs up?";
+        let query = [("Them: we had a backlog in payments last night".to_string(), 2.0)];
+        let Target::Api(request, _) = build(&settings, &CodexClient::new(), "Ask", question, &[], "Them: we had a backlog in payments last night", &query, None).unwrap() else { panic!("API") };
+        assert_eq!(providers::stream(&request, &AtomicBool::new(false), &mut |_| {}).unwrap(), "ok");
+        let body = server.join().unwrap();
+        let messages = body["messages"].as_array().unwrap();
+        let (system, turn) = (messages[0]["content"].as_str().unwrap(), messages.last().unwrap()["content"].as_str().unwrap());
+        assert!(system.contains("too long to include whole: \"handbook.md\"") && !system.contains("Section 431 covers"), "the file isn't in the instructions");
+        assert!(turn.contains("<excerpt file=\"handbook.md\" section=\"Section 431\"") && turn.contains(needle), "the passage is in the turn: {turn}");
+        assert!(turn.len() < 12_000 * 4, "{} bytes", turn.len());
+        assert!(turn.find(needle).unwrap() < turn.find("My question:").unwrap(), "excerpts come before the question");
+
+        // A speculative answer: no question, the predicted one is the newest line heard.
+        let heard = [("who do we page when the payments queue backs up".to_string(), 2.0)];
+        let Target::Api(speculative, _) = build(&settings, &CodexClient::new(), "Assist", "", &[], "Them: who do we page when the payments queue backs up", &heard, None).unwrap() else { panic!("API") };
+        assert!(turn_text(&speculative).contains(needle));
+        assert_eq!(speculative.system, request.system, "the instructions don't change per question");
+        drop((settings, slot));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

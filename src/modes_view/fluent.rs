@@ -8,7 +8,7 @@ use gpui::{
     Stateful, Styled, Window, deferred, div, prelude::*, px, rgb,
 };
 
-use super::{DANGER, Popover, on_click, tokens_label};
+use super::{DANGER, FileState, Popover, SEARCHED_HINT, file_meta, files_summary, on_click, tokens_label};
 use crate::hotkeys::Action;
 use crate::modes::{self, FileError, Mode, extract};
 use crate::overlay::Overlay;
@@ -205,31 +205,47 @@ impl Overlay {
         card("mode-group-card").child(card_icon("icons/mode-folder.svg")).child(card_label("Group", None)).child(wrapper).into_any_element()
     }
 
-    /// Files: the budget meter, a card per file (and per file being read or refused), and the drop zone.
+    /// Files: how they reach the model (sent whole, or searched with their index's progress), a
+    /// card per file (and per file being read or refused), and the drop zone.
     fn fluent_files(&self, mode: &Mode, cx: &mut Context<Self>) -> Div {
-        let meter = modes::meter(mode, modes::file_budget(&self.store.value));
-        let over = meter.used > meter.budget;
+        let states = self.file_states(mode);
         let mut header = div().flex().items_center().gap(px(12.0))
             .child(div().flex_1().text_size(px(14.0)).line_height(px(20.0)).font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child("Files"));
-        header = if mode.files.is_empty() { header.child(status("PDF, DOCX, TXT, MD · up to 5 files")) } else {
-            let fill = (meter.used as f32 / meter.budget.max(1) as f32).min(1.0);
-            header.child(div().w(px(96.0)).h(px(4.0)).rounded(px(2.0)).bg(theme::keycap_border())
-                    .child(div().h_full().rounded(px(2.0)).w(px(96.0 * fill)).bg(theme::accent())))
-                .child(status(format!("{} of {} tokens", tokens_label(meter.used), tokens_label(meter.budget))))
-        };
-        let mut cards: Vec<AnyElement> = Vec::new();
-        if let (true, Some(cut)) = (over, meter.cut) {
-            cards.push(div().px(px(16.0)).py(px(8.0)).text_size(px(12.0)).line_height(px(16.0)).text_color(theme::body())
-                .child(format!("The end of {cut} is left out with {}. Remove a file or switch to a model with more room.", super::provider_name(&self.store.value)))
-                .into_any_element());
+        header = header.child(status(if mode.files.is_empty() { "PDF, DOCX, TXT, MD · up to 5 files".to_string() }
+            else { files_summary(&states, self.modes_ui.notices.len()) }));
+        let mut heading = div().flex().flex_col().gap(px(4.0)).child(header);
+        if !mode.files.is_empty() {
+            heading = heading.child(div().flex().items_center().gap(px(6.0)).child(ui::icon("icons/info.svg", 13.0, theme::muted())).child(status(SEARCHED_HINT)));
         }
         let close = |id: (&'static str, usize)| div().id(id).flex_none().size(px(24.0)).flex().items_center().justify_center().rounded(px(4.0)).cursor_pointer()
             .hover(|close| close.bg(theme::fluent_selected())).child(ui::icon("icons/close.svg", 12.0, theme::muted()));
-        let file_card = |id: (&'static str, usize)| card(id).min_h(px(52.0)).child(card_icon("icons/file-drop.svg"));
-        for (index, file) in mode.files.iter().enumerate() {
+        let file_card = |id: (&'static str, usize)| card(id).min_h(px(60.0)).child(card_icon("icons/file-drop.svg"));
+        // The status column, right-aligned at a fixed width so the rows line up.
+        let state_slot = || div().w(px(170.0)).flex_none().flex().items_center().justify_end();
+        let dot = |color| div().size(px(6.0)).flex_none().rounded(px(3.0)).bg(color);
+        let word = |text: &'static str, color| div().text_size(px(13.0)).line_height(px(16.0)).text_color(color).child(text);
+        let retry = |id: (&'static str, usize)| div().id(id).cursor_pointer().text_size(px(12.0)).line_height(px(16.0)).text_color(theme::accent_soft()).child("Retry");
+        let failed = |retry: Stateful<Div>| state_slot().gap(px(10.0))
+            .child(div().flex().items_center().gap(px(6.0)).child(dot(rgb(DANGER))).child(word("Failed", rgb(DANGER)))).child(retry);
+        let mut cards: Vec<AnyElement> = Vec::new();
+        for (index, (file, state)) in mode.files.iter().zip(&states).enumerate() {
             let file_id = file.id.clone();
-            cards.push(file_card(("mode-file", index)).child(card_label(file.name.clone(), None))
-                .child(status(format!("{} tokens", tokens_label(file.tokens))))
+            let (meta, slot) = match state {
+                FileState::Whole => (status(file_meta(file, state)), state_slot().child(status(state.label(file.tokens)))),
+                FileState::Indexing(progress) => (status(file_meta(file, state)), state_slot().gap(px(10.0))
+                    .child(div().text_size(px(12.0)).line_height(px(16.0)).text_color(theme::body()).child("Indexing…"))
+                    .child(div().w(px(64.0)).h(px(4.0)).flex_none().rounded(px(2.0)).bg(theme::keycap_border())
+                        .child(div().h_full().rounded(px(2.0)).w(px(64.0 * progress.clamp(0.0, 1.0))).bg(theme::accent())))
+                    .child(status(format!("{}%", (progress * 100.0) as u32)).w(px(28.0)).flex_none())),
+                FileState::Ready => (status(file_meta(file, state)), state_slot().gap(px(6.0))
+                    .child(dot(theme::ok())).child(word("Ready", theme::ok())).child(status("· searched"))),
+                FileState::Failed => {
+                    let id = file.id.clone();
+                    (status("Couldn't index this file.").text_color(rgb(DANGER)),
+                        failed(retry(("mode-file-retry", index)).on_mouse_down(MouseButton::Left, on_click(cx, None, move |this, cx| this.retry_index(&id, cx)))))
+                }
+            };
+            cards.push(file_card(("mode-file", index)).child(card_label(file.name.clone(), Some(meta.into_any_element()))).child(slot)
                 .child(close(("mode-file-remove", index)).on_mouse_down(MouseButton::Left, on_click(cx, None, move |this, cx| this.remove_file(&file_id, cx))))
                 .into_any_element());
         }
@@ -239,8 +255,12 @@ impl Overlay {
         }
         for (index, notice) in self.modes_ui.notices.iter().enumerate() {
             let id = notice.id;
-            cards.push(file_card(("mode-file-notice", index))
-                .child(card_label(notice.name.clone(), Some(div().text_size(px(12.0)).line_height(px(16.0)).text_color(rgb(DANGER)).child(notice.error.to_string()).into_any_element())))
+            let mut card = file_card(("mode-file-notice", index))
+                .child(card_label(notice.name.clone(), Some(div().text_size(px(12.0)).line_height(px(16.0)).text_color(rgb(DANGER)).child(notice.error.to_string()).into_any_element())));
+            if notice.path.is_some() {
+                card = card.child(failed(retry(("mode-file-notice-retry", index)).on_mouse_down(MouseButton::Left, on_click(cx, None, move |this, cx| this.retry_notice(id, cx)))));
+            }
+            cards.push(card
                 .child(close(("mode-file-dismiss", index)).on_mouse_down(MouseButton::Left, on_click(cx, None, move |this, cx| {
                     this.modes_ui.notices.retain(|notice| notice.id != id);
                     cx.notify();
@@ -260,10 +280,10 @@ impl Overlay {
                 })
                 .on_mouse_down(MouseButton::Left, on_click(cx, None, |this, cx| this.browse_files(cx)))
                 .child(ui::icon("icons/setup-download.svg", 18.0, theme::muted()))
-                .child(div().flex().gap(px(4.0)).child("Drop files here or").child(div().text_color(theme::accent_soft()).child("Browse…")))
+                .child(div().flex().gap(px(4.0)).child("PDF, DOCX, TXT, MD · up to 200 MB each · Drop files here or").child(div().text_color(theme::accent_soft()).child("Browse…")))
         };
         cards.push(zone.into_any_element());
-        div().flex().flex_col().gap(px(8.0)).child(header).child(cards_column(cards))
+        div().flex().flex_col().gap(px(8.0)).child(heading).child(cards_column(cards))
     }
 
     /// The ⋯ flyout (Rename, Duplicate, Reset to built-in, Delete) and the delete confirmation, over

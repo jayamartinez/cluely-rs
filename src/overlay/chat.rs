@@ -150,7 +150,7 @@ mod tests {
         turns.push(turn(13, 2, Status::Done));
         let settings = Settings { provider: Provider::ApiKey, api_provider: "custom".into(), custom_base_url: "http://127.0.0.1:9/v1".into(),
             api_models: [("custom".to_string(), "m".to_string())].into(), ..Settings::default() };
-        let Target::Api(request, _) = build(&settings, &crate::codex::CodexClient::new(), "Assist", "", &history(&turns, 2), "", None).unwrap()
+        let Target::Api(request, _) = build(&settings, &crate::codex::CodexClient::new(), "Assist", "", &history(&turns, 2), "", &[], None).unwrap()
             else { panic!("API") };
         let texts: Vec<String> = request.messages.iter().map(|m| match &m.parts[0] { Part::Text(text) => text.clone(), Part::Jpeg(_) => String::new() }).collect();
         assert_eq!(texts.len(), 3, "one earlier exchange and the new turn: {texts:?}");

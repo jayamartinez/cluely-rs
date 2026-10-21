@@ -9,6 +9,7 @@
 mod mac;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
@@ -18,9 +19,9 @@ use gpui::{
 };
 
 use crate::input::{InputEvent, TextInput};
-use crate::modes::{self, FileError, Icon, Mode, ModeStore, extract};
+use crate::modes::{self, Delivery, FileError, Icon, Mode, ModeStore, extract};
 use crate::overlay::Overlay;
-use crate::settings::{Provider, Settings};
+use crate::search;
 use crate::text_area::TextArea;
 use crate::{theme, ui};
 
@@ -30,8 +31,9 @@ mod sections;
 
 /// Context edits are saved after typing pauses this long.
 const SAVE_DELAY: Duration = Duration::from_millis(600);
+/// How often the page redraws while a file is being indexed, for its progress.
+const INDEX_POLL: Duration = Duration::from_millis(150);
 const DANGER: u32 = 0xffb4a8;
-const AMBER: u32 = 0xf2b95c;
 const SELECTED_TILE: u32 = 0x2a2d31;
 const MENU_HOVER: u32 = 0x2a2d31;
 
@@ -75,8 +77,54 @@ const CUSTOM_PLACEHOLDER: &str = "Tell CluelyRS what this meeting is and how to 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Popover { Menu, Look, ConfirmDelete }
 
-/// A file that couldn't be added, shown in the list until dismissed.
-struct Notice { id: u64, name: String, error: FileError }
+/// A file that couldn't be added, shown in the list until dismissed. `path` is where it was
+/// added from, for Retry.
+struct Notice { id: u64, name: String, error: FileError, path: Option<PathBuf> }
+
+/// How one of a mode's files reaches the model with the selected provider, as its row shows it.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum FileState {
+    /// Sent whole ("Sent whole · 14k tokens").
+    Whole,
+    /// Searched, its index being read or built: 0..=1.
+    Indexing(f32),
+    /// Searched, its index ready.
+    Ready,
+    /// Searched, but its index couldn't be built.
+    Failed,
+}
+
+impl FileState {
+    /// The status as one line of text (the macOS rows and the older layout).
+    pub(crate) fn label(&self, tokens: usize) -> String {
+        match self {
+            Self::Whole => format!("Sent whole · {} tokens", tokens_label(tokens)),
+            Self::Indexing(progress) => format!("Indexing… {}%", (progress * 100.0) as u32),
+            Self::Ready => "Ready · searched".into(),
+            Self::Failed => "Failed".into(),
+        }
+    }
+}
+
+/// "1 sent whole · 2 searched · 1 needs attention": how the files reach the model, and how
+/// many need a look (an index that failed, a file that couldn't be added).
+pub(crate) fn files_summary(states: &[FileState], notices: usize) -> String {
+    let whole = states.iter().filter(|state| **state == FileState::Whole).count();
+    let failed = states.iter().filter(|state| **state == FileState::Failed).count();
+    let searched = states.len() - whole - failed;
+    let parts: Vec<String> = [(whole, "sent whole"), (searched, "searched"), (failed + notices, "needs attention")].into_iter()
+        .filter(|(count, _)| *count > 0).map(|(count, what)| format!("{count} {what}")).collect();
+    parts.join(" · ")
+}
+
+/// The line under a file's name: "PDF · 2 pages · 180 KB", with "about 520k tokens" when it's searched.
+pub(crate) fn file_meta(file: &modes::ModeFile, state: &FileState) -> String {
+    let mut meta = vec![file.kind.tag().to_string()];
+    if let Some(pages) = file.pages { meta.push(format!("{pages} page{}", if pages == 1 { "" } else { "s" })); }
+    meta.push(bytes_label(file.bytes));
+    if *state != FileState::Whole { meta.push(format!("about {} tokens", tokens_label(file.tokens))); }
+    meta.join(" · ")
+}
 
 /// State of the Modes tab. The modes themselves live in `Overlay::modes`.
 pub struct ModesUi {
@@ -87,6 +135,11 @@ pub struct ModesUi {
     notices: Vec<Notice>,
     /// Files being read: (id, mode id, name).
     reading: Vec<(u64, String, String)>,
+    /// The selected mode's file indexes, by file id, held while it's shown so their progress can
+    /// be drawn (and so they aren't freed and built again).
+    indexes: Vec<(String, Arc<search::Slot>)>,
+    /// Redraws while any of `indexes` is still indexing.
+    index_poll: Option<Task<()>>,
     next_id: u64,
     pending_save: Option<Task<()>>,
     /// Takes the keyboard when a row is clicked, for the menu's shortcuts.
@@ -120,17 +173,18 @@ impl ModesUi {
         let text = store.active().context.clone();
         context.update(cx, |area, cx| area.set_text(&text, cx));
         let sections = sections::SectionsUi::new(window, cx);
-        Self { selected, popover: None, renaming: false, notices: Vec::new(), reading: Vec::new(), next_id: 0, pending_save: None,
+        Self { selected, popover: None, renaming: false, notices: Vec::new(), reading: Vec::new(), indexes: Vec::new(), index_poll: None, next_id: 0, pending_save: None,
             focus: cx.focus_handle(), context, name, new_group, sections, #[cfg(target_os = "macos")] sidebar_scroll: gpui::ScrollHandle::new() }
     }
 }
 
-/// "7.2k", "30k", "950".
+/// "7.2k", "30k", "950", "2.1M".
 pub fn tokens_label(tokens: usize) -> String {
     match tokens {
         0..1_000 => tokens.to_string(),
         1_000..10_000 => format!("{:.1}k", tokens as f64 / 1_000.0).replace(".0k", "k"),
-        _ => format!("{}k", (tokens as f64 / 1_000.0).round()),
+        10_000..999_500 => format!("{}k", (tokens as f64 / 1_000.0).round()),
+        _ => format!("{:.1}M", tokens as f64 / 1_000_000.0).replace(".0M", "M"),
     }
 }
 
@@ -139,17 +193,8 @@ pub fn bytes_label(bytes: u64) -> String {
     if bytes < 1024 * 1024 { format!("{} KB", bytes.div_ceil(1024).max(1)) } else { format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0)) }
 }
 
-/// "1.4" (MB, one decimal, for the "of 50 MB" counter).
-fn megabytes(bytes: u64) -> String { format!("{:.1}", bytes as f64 / (1024.0 * 1024.0)) }
-
-/// The selected model's provider as the budget note names it.
-fn provider_name(settings: &Settings) -> String {
-    match settings.provider {
-        Provider::Codex => "ChatGPT".into(),
-        Provider::Claude => "Claude".into(),
-        Provider::ApiKey => crate::providers::preset(&settings.api_provider).map(|preset| preset.label.to_string()).unwrap_or("this model".into()),
-    }
-}
+/// Under the Files heading once a mode has files.
+const SEARCHED_HINT: &str = "Large files are searched, not sent whole: each question sends only the passages that match.";
 
 /// What the empty file area invites, by kind of mode.
 fn drop_title(mode: &Mode) -> &'static str {
@@ -428,27 +473,11 @@ impl Overlay {
     fn mode_files(&self, mode: &Mode, cx: &mut Context<Self>) -> impl IntoElement {
         let reading: Vec<&(u64, String, String)> = self.modes_ui.reading.iter().filter(|(_, owner, _)| *owner == mode.id).collect();
         let empty = mode.files.is_empty() && reading.is_empty() && self.modes_ui.notices.is_empty();
-        let meter = modes::meter(mode, modes::file_budget(&self.store.value));
-        let over = meter.used > meter.budget;
-        let header_hint = if mode.files.is_empty() {
-            hint("PDF, DOCX, TXT, MD · up to 5 files, 50 MB").into_any_element()
-        } else {
-            let text = format!("≈ {} of {} tokens", tokens_label(meter.used), tokens_label(meter.budget));
-            if over { hint(text).font_weight(FontWeight::SEMIBOLD).text_color(rgb(AMBER)).into_any_element() } else { hint(text).into_any_element() }
-        };
+        let states = self.file_states(mode);
+        let header_hint = if mode.files.is_empty() { "PDF, DOCX, TXT, MD · up to 5 files, 200 MB each".to_string() } else { files_summary(&states, self.modes_ui.notices.len()) };
         let mut section = div().flex().flex_col().gap(px(8.0))
-            .child(div().flex().items_baseline().justify_between().child(label("FILES")).child(header_hint));
-        if !mode.files.is_empty() {
-            let fill = (meter.used as f32 / meter.budget.max(1) as f32).min(1.0);
-            section = section.child(div().h(px(4.0)).flex_none().rounded(px(2.0)).bg(theme::divider())
-                .child(div().h_full().rounded(px(2.0)).w(gpui::relative(fill)).bg(if over { rgb(AMBER) } else { theme::accent() })));
-        }
-        if let (true, Some(cut)) = (over, meter.cut) {
-            section = section.child(div().flex().gap(px(8.0)).px(px(10.0)).py(px(8.0)).rounded(px(8.0)).bg(rgb(0x221c10)).border_1().border_color(rgb(0x4a3a18))
-                .child(div().pt(px(1.0)).child(ui::icon("icons/warning.svg", 13.0, rgb(AMBER))))
-                .child(div().flex_1().min_w_0().text_size(px(11.5)).line_height(px(16.0)).text_color(rgb(0xe9d3a8))
-                    .child(format!("The end of {cut} is left out with {}. Remove a file or switch to a model with more room.", provider_name(&self.store.value)))));
-        }
+            .child(div().flex().items_baseline().justify_between().child(label("FILES")).child(hint(header_hint)));
+        if !mode.files.is_empty() { section = section.child(hint(SEARCHED_HINT)); }
         let mode_id = mode.id.clone();
         let drop_target = |zone: Stateful<Div>, cx: &mut Context<Self>| {
             let id = mode_id.clone();
@@ -476,15 +505,12 @@ impl Overlay {
             .child(div().text_size(px(LOOK.file_text.1)).line_height(px(15.0)).text_color(meta_color).child(meta));
         let close = |id: (&'static str, usize)| div().id(id).flex_none().cursor_pointer().p(px(2.0)).child(ui::icon("icons/close.svg", 10.0, theme::muted()));
         let mut list = div().id("files-list").flex().flex_col().rounded(px(10.0)).border_1().border_color(theme::hairline()).overflow_hidden();
-        for (index, file) in mode.files.iter().enumerate() {
-            let mut meta = Vec::new();
-            if let Some(pages) = file.pages { meta.push(format!("{pages} page{}", if pages == 1 { "" } else { "s" })); }
-            meta.push(bytes_label(file.bytes));
-            meta.push(format!("≈ {} tokens", tokens_label(file.tokens)));
+        for (index, (file, state)) in mode.files.iter().zip(&states).enumerate() {
+            let meta = format!("{} · {}", file_meta(file, state), state.label(file.tokens));
             let file_id = file.id.clone();
             list = list.child(row(("file", index))
                 .child(tile(LOOK.file_tile, 0x1b1d20).child(file_tag(file.kind)))
-                .child(text(file.name.clone(), meta.join(" · "), theme::muted()))
+                .child(text(file.name.clone(), meta, if *state == FileState::Failed { rgb(DANGER) } else { theme::muted() }))
                 .child(close(("remove-file", index)).on_mouse_down(MouseButton::Left, on_click(cx, None, move |this, cx| this.remove_file(&file_id, cx)))));
         }
         for (index, (_, _, name)) in reading.iter().enumerate() {
@@ -503,7 +529,7 @@ impl Overlay {
                 }))));
         }
         let full = mode.files.len() >= extract::MAX_FILES;
-        let counts = format!("{} of {} · {} MB of 50 MB", mode.files.len(), extract::MAX_FILES, megabytes(mode.file_bytes()));
+        let counts = format!("{} of {}", mode.files.len(), extract::MAX_FILES);
         let add = div().id("files-add").flex().items_center().gap(px(10.0)).py(px(pad_y + 1.0)).px(px(pad_x)).bg(rgb(0x121316));
         let add = if full {
             add.child(ui::icon("icons/plus.svg", 12.0, theme::placeholder()))
@@ -639,6 +665,7 @@ impl Overlay {
         self.modes_ui.popover = None;
         self.modes_ui.renaming = false;
         self.modes_ui.notices.clear();
+        self.refresh_indexes(cx);
         self.modes_ui.context.update(cx, |area, cx| {
             area.set_text(&text, cx);
             area.set_placeholder(if placeholder_custom { CUSTOM_PLACEHOLDER } else { "Describe this meeting and how to answer." }, cx);
@@ -671,7 +698,67 @@ impl Overlay {
     /// The selected mode's prompt or files changed: if it's the active one, answers use the change.
     fn mode_changed(&mut self, id: &str, cx: &mut Context<Self>) {
         if self.modes.active().id == id { self.apply_mode(); }
+        if self.modes_ui.selected == id { self.refresh_indexes(cx); }
         cx.notify();
+    }
+
+    /// How each of `mode`'s files reaches the selected provider's model (`modes::plan`), and for
+    /// those searched, where their index is.
+    pub(crate) fn file_states(&self, mode: &Mode) -> Vec<FileState> {
+        let tokens: Vec<usize> = mode.files.iter().map(|file| file.tokens).collect();
+        let shown = mode.id == self.modes_ui.selected;
+        mode.files.iter().zip(modes::plan(&tokens, modes::file_budget(&self.store.value))).map(|(file, delivery)| {
+            if delivery == Delivery::Whole { return FileState::Whole; }
+            let slot = self.modes_ui.indexes.iter().filter(|_| shown).find(|(id, _)| *id == file.id).map(|(_, slot)| slot);
+            match slot.map(|slot| slot.status()) {
+                Some(search::Status::Indexing(progress)) => FileState::Indexing(progress),
+                Some(search::Status::Ready) => FileState::Ready,
+                Some(search::Status::Failed(_)) | None => FileState::Failed,
+            }
+        }).collect()
+    }
+
+    /// Open the selected mode's file indexes (building any that aren't on disk, in the
+    /// background) and redraw while one is still indexing.
+    fn refresh_indexes(&mut self, cx: &mut Context<Self>) {
+        let selected = self.modes_ui.selected.clone();
+        let files: Vec<String> = self.modes.get(&selected).map(|mode| mode.files.iter().map(|file| file.id.clone()).collect()).unwrap_or_default();
+        self.modes_ui.indexes = files.into_iter().filter_map(|file| Some((file.clone(), self.modes.index(&selected, &file)?))).collect();
+        self.watch_indexes(cx);
+    }
+
+    fn watch_indexes(&mut self, cx: &mut Context<Self>) {
+        let indexing = |ui: &ModesUi| ui.indexes.iter().any(|(_, slot)| matches!(slot.status(), search::Status::Indexing(_)));
+        if !indexing(&self.modes_ui) || self.modes_ui.index_poll.is_some() { return; }
+        self.modes_ui.index_poll = Some(cx.spawn(async move |this, cx| loop {
+            cx.background_executor().timer(INDEX_POLL).await;
+            let more = this.update(cx, |this, cx| {
+                cx.notify();
+                let more = indexing(&this.modes_ui);
+                if !more { this.modes_ui.index_poll = None; }
+                more
+            });
+            if !matches!(more, Ok(true)) { return; }
+        }));
+    }
+
+    /// Index a file again after it failed (Retry).
+    fn retry_index(&mut self, file: &str, cx: &mut Context<Self>) {
+        let mode = self.modes_ui.selected.clone();
+        let Some(slot) = self.modes.reindex(&mode, file) else { return };
+        if let Some(entry) = self.modes_ui.indexes.iter_mut().find(|(id, _)| id == file) { entry.1 = slot; }
+        // The active mode's answers hold the old index: they take the new one.
+        if self.modes.active().id == mode { self.apply_mode(); }
+        self.watch_indexes(cx);
+        cx.notify();
+    }
+
+    /// Add a file again after it couldn't be added (Retry).
+    fn retry_notice(&mut self, notice: u64, cx: &mut Context<Self>) {
+        let Some(index) = self.modes_ui.notices.iter().position(|kept| kept.id == notice) else { return };
+        let Some(path) = self.modes_ui.notices.remove(index).path else { return };
+        let mode = self.modes_ui.selected.clone();
+        self.add_files(&mode, vec![path], cx);
     }
 
     pub(crate) fn activate_mode(&mut self, id: &str, cx: &mut Context<Self>) {
@@ -772,11 +859,12 @@ impl Overlay {
             self.modes_ui.next_id += 1;
             let ticket = self.modes_ui.next_id;
             if let Err(error) = check {
-                self.modes_ui.notices.push(Notice { id: ticket, name, error });
+                self.modes_ui.notices.push(Notice { id: ticket, name, error, path: Some(path) });
                 continue;
             }
             self.modes_ui.reading.push((ticket, id.to_string(), name.clone()));
-            let room = self.modes.bytes_left(id);
+            let room = extract::MAX_FILE_BYTES;
+            let retry = path.clone();
             let read = cx.background_executor().spawn(async move { extract::extract_isolated(&path, room) });
             let owner = id.to_string();
             cx.spawn(async move |this, cx| {
@@ -785,7 +873,7 @@ impl Overlay {
                     this.modes_ui.reading.retain(|(reading, _, _)| *reading != ticket);
                     match result.and_then(|file| this.modes.add_file(&owner, file)) {
                         Ok(_) => this.mode_changed(&owner, cx),
-                        Err(error) => this.modes_ui.notices.push(Notice { id: ticket, name, error }),
+                        Err(error) => this.modes_ui.notices.push(Notice { id: ticket, name, error, path: Some(retry) }),
                     }
                     cx.notify();
                 }).ok();
@@ -808,8 +896,22 @@ mod tests {
     fn token_and_size_labels_read_like_the_mockups() {
         assert_eq!((tokens_label(950), tokens_label(1_900), tokens_label(7_240), tokens_label(30_000), tokens_label(41_400)), ("950".into(), "1.9k".into(), "7.2k".into(), "30k".into(), "41k".into()));
         assert_eq!(tokens_label(2_000), "2k");
+        assert_eq!((tokens_label(999_499), tokens_label(2_000_064), tokens_label(2_150_000)), ("999k".into(), "2M".into(), "2.1M".into()));
         assert_eq!((bytes_label(212 * 1024), bytes_label(1_258_291), bytes_label(10)), ("212 KB".into(), "1.2 MB".into(), "1 KB".into()));
-        assert_eq!(megabytes(1_468_006), "1.4");
+    }
+
+    #[test]
+    fn file_rows_and_the_summary_say_how_each_file_reaches_the_model() {
+        let file = |kind, bytes, pages, tokens| modes::ModeFile { id: "f0123456789abcdef".into(), name: "x".into(), kind, bytes, pages, tokens };
+        let resume = file(modes::FileKind::Pdf, 180 * 1024, Some(2), 14_000);
+        let primer = file(modes::FileKind::Md, 2_202_009, None, 520_000);
+        assert_eq!((file_meta(&resume, &FileState::Whole), FileState::Whole.label(resume.tokens)), ("PDF · 2 pages · 180 KB".into(), "Sent whole · 14k tokens".into()));
+        assert_eq!(file_meta(&primer, &FileState::Ready), "MD · 2.1 MB · about 520k tokens");
+        assert_eq!((FileState::Indexing(0.624).label(0), FileState::Ready.label(0)), ("Indexing… 62%".into(), "Ready · searched".into()));
+        let states = [FileState::Whole, FileState::Ready, FileState::Indexing(0.6)];
+        assert_eq!(files_summary(&states, 1), "1 sent whole · 2 searched · 1 needs attention");
+        assert_eq!(files_summary(&[FileState::Whole, FileState::Whole], 0), "2 sent whole");
+        assert_eq!(files_summary(&[FileState::Failed], 0), "1 needs attention");
     }
 
     #[test]
@@ -826,6 +928,5 @@ mod tests {
         let custom = Mode { builtin: None, group: None, ..coding.clone() };
         assert_eq!(subtitle(&custom), "Custom · Your modes");
         assert_eq!(drop_title(&custom), "Drop a pricing sheet, brief or notes");
-        assert_eq!(provider_name(&Settings { provider: Provider::ApiKey, api_provider: "groq".into(), ..Settings::default() }), "Groq");
     }
 }

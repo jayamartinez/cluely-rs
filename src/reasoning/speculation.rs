@@ -346,7 +346,7 @@ mod tests {
         let (commands, inbox) = std::sync::mpsc::channel();
         let (out, mut messages) = futures::channel::mpsc::unbounded();
         let worker = std::thread::spawn(move || {
-            listening::run(provider, audio, &[Source::Them], Vec::new(), LiveTranscript::new(EndpointConfig::default(), None), &inbox, &out, None);
+            listening::run(provider, audio, &[Source::Them], Vec::new(), LiveTranscript::new(EndpointConfig::default(), None), &inbox, &out, None, false);
         });
         // Speech, a pause long enough to commit, more speech, a pause; the waits let the
         // scripted recognizer's events land before the quiet that follows them, as in real time.

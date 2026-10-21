@@ -980,10 +980,11 @@ impl Overlay {
             let screenshot = match (settings.screen_on_send, prepared, point) {
                 (false, ..) | (true, None, None) => None,
                 (true, Some(jpeg), _) => Some(jpeg),
-                (true, None, Some((x, y))) => cx.background_executor().spawn(async move { crate::capture::screen_jpeg(x, y).ok() }).await,
+                (true, None, Some(point)) => crate::capture::screenshot(cx.background_executor(), point).await,
             };
+            let query = conversation.query();
             let conversation = conversation.render(screenshot.is_some());
-            let request = reasoning::Request { action, question, history, conversation, screenshot: screenshot.clone(), utterance };
+            let request = reasoning::Request { action, question, history, conversation, query, screenshot: screenshot.clone(), utterance };
             let started = this.update(cx, |this, cx| {
                 if let Some(turn) = this.turns.iter_mut().find(|t| t.id == id) { turn.screenshot = screenshot; }
                 // Live ended while the screenshot was taken: nothing to answer any more.
@@ -1099,10 +1100,10 @@ impl Overlay {
                 Step::Prepare { .. } => {
                     // Preparation, no model requests: a screenshot now, so the answer doesn't
                     // wait for one, and a warm thread or process for a speculative answer.
-                    if self.store.value.screen_on_send && let Some((x, y)) = self.native.and_then(platform::center) {
+                    if self.store.value.screen_on_send && let Some(point) = self.native.and_then(platform::center) {
                         cx.spawn(async move |this, cx| {
                             let taken = Instant::now();
-                            let jpeg = cx.background_executor().spawn(async move { crate::capture::screen_jpeg(x, y).ok() }).await;
+                            let jpeg = crate::capture::screenshot(cx.background_executor(), point).await;
                             if let Some(jpeg) = jpeg { let _ = this.update(cx, |this, _| this.prepared_shot.store(taken, jpeg)); }
                         }).detach();
                     }
@@ -1133,11 +1134,12 @@ impl Overlay {
         cx.spawn(async move |this, cx| {
             let screenshot = match (prepared, point) {
                 (Some(jpeg), _) => Some(jpeg),
-                (None, Some((x, y))) => cx.background_executor().spawn(async move { crate::capture::screen_jpeg(x, y).ok() }).await,
+                (None, Some(point)) => crate::capture::screenshot(cx.background_executor(), point).await,
                 (None, None) => None,
             };
+            let query = conversation.query();
             let conversation = conversation.render(screenshot.is_some());
-            let request = reasoning::Request { action: action.into(), question: String::new(), history, conversation, screenshot, utterance: Some(utterance) };
+            let request = reasoning::Request { action: action.into(), question: String::new(), history, conversation, query, screenshot, utterance: Some(utterance) };
             let _ = this.update(cx, |this, cx| {
                 // Cancelled or replaced while the screenshot was taken. Otherwise the context is
                 // read now: its question may have been committed meanwhile.
@@ -1619,9 +1621,7 @@ pub(crate) fn capture_excluded(settings: &Settings) -> bool {
 }
 
 pub(crate) fn apply_capture_setting(native: NativeWindow, settings: &Settings) {
-    if let Err(error) = platform::set_capture_hidden(native, capture_excluded(settings)) {
-        eprintln!("capture exclusion unavailable: {error}");
-    }
+    crate::capture::set_window_hidden(native, capture_excluded(settings));
 }
 
 /// The header of an answer shown without a press: what it is, which question it answers, and
