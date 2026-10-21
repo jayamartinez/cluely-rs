@@ -10,6 +10,8 @@ use crate::audio::Source;
 pub const MAX_AGE_MS: u64 = 10 * 60_000;
 /// At most this many committed lines are sent.
 pub const MAX_LINES: usize = 40;
+/// The newest this many committed lines are what reference files are searched for.
+const QUERY_LINES: usize = 6;
 /// With a rolling summary, lines that have left the window but aren't in the summary yet (the
 /// next batch isn't due, is being written, or failed) are sent as well, up to this many of the
 /// newest of them, so nothing drops out of the context while it catches up. A little more than
@@ -108,6 +110,17 @@ impl Conversation {
         }
         out.trim_end().to_string()
     }
+
+    /// What to search reference material for (`search`), as weighted text: the newest few
+    /// committed lines, the newest counting double, and what is being said right now, which
+    /// is most likely the question.
+    pub fn query(&self) -> Vec<(String, f32)> {
+        let newest = self.lines.last().map(|line| line.at_ms).unwrap_or(0);
+        let recent: Vec<&Line> = self.lines.iter().rev().take_while(|line| newest.saturating_sub(line.at_ms) <= MAX_AGE_MS).take(QUERY_LINES).collect();
+        let mut query: Vec<(String, f32)> = recent.iter().enumerate().map(|(n, line)| (line.text.trim().to_string(), if n == 0 { 2.0 } else { 1.0 })).collect();
+        query.extend(self.now.iter().filter(|now| !now.text.trim().is_empty()).map(|now| (now.text.trim().to_string(), 2.0)));
+        query
+    }
 }
 
 #[cfg(test)]
@@ -140,6 +153,16 @@ mod tests {
         assert!(!rendered.contains("line 19\n"));
         assert!(rendered.contains("line 20\n") && rendered.contains("line 59"));
         assert_eq!(rendered.lines().count(), 1 + MAX_LINES);
+    }
+
+    #[test]
+    fn the_search_query_is_the_newest_lines_and_what_is_being_said_now() {
+        let mut lines: Vec<Line> = (0..10).map(|i| line(if i % 2 == 0 { Source::Them } else { Source::Me }, 1_000 * i, &format!("line {i} "))).collect();
+        lines.insert(0, line(Source::Them, 0, "ancient"));
+        let conversation = Conversation { lines, now: vec![Now { source: Source::Them, text: " and what about failover".into() }, Now { source: Source::Me, text: " ".into() }], earlier: None };
+        assert_eq!(conversation.query(), [("line 9".to_string(), 2.0), ("line 8".into(), 1.0), ("line 7".into(), 1.0), ("line 6".into(), 1.0),
+            ("line 5".into(), 1.0), ("line 4".into(), 1.0), ("and what about failover".into(), 2.0)]);
+        assert!(Conversation::default().query().is_empty());
     }
 
     #[test]

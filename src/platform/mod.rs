@@ -51,8 +51,21 @@ pub use self::windows_keys::{hide_shortcuts, set_shortcut_active, shortcut_key};
 mod windows_tray;
 #[cfg(windows)]
 pub use self::windows_tray::{PointerScreen, TrayEvent, TrayIcon, pointer_screen};
+#[cfg(windows)]
+mod windows_clipboard;
+#[cfg(windows)]
+pub use self::windows_clipboard::{pasted_bitmap, pasted_files};
 mod menu;
 pub use self::menu::{MenuEntry, MenuKey};
+
+/// Files copied in the file manager, for pasting as attachments. macOS: not read yet (Finder puts
+/// file URLs on the pasteboard, which GPUI doesn't read); a copied image still pastes through GPUI.
+#[cfg(not(windows))]
+pub fn pasted_files() -> Vec<std::path::PathBuf> { Vec::new() }
+
+/// A bitmap GPUI's clipboard doesn't read, as .bmp bytes. macOS: GPUI reads its image types itself.
+#[cfg(not(windows))]
+pub fn pasted_bitmap() -> Option<Vec<u8>> { None }
 
 /// Where a window's left edge goes when its width changes from `old_width` to `width`, keeping its
 /// horizontal centre where it was (a centred overlay stays centred) but within the screen's visible

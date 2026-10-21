@@ -79,7 +79,7 @@ fn main() {
     };
     let request = Request {
         action: "Assist".into(), question: String::new(), history: Vec::new(),
-        conversation: conversation.render(true), screenshot: Some(screenshot()), utterance: None,
+        query: conversation.query(), conversation: conversation.render(true), screenshot: Some(screenshot()), attachments: Default::default(), utterance: None,
     };
     let speculate = args.iter().position(|a| a == "--speculate").and_then(|i| args.get(i + 1)).map(|ms| ms.parse::<u64>().expect("--speculate <ms>"));
     let (started, mut replies, mut first, mut text) = match speculate {
@@ -174,7 +174,7 @@ fn long_meeting(session: &mut ReasoningSession, settings: &cluely_rs::settings::
 fn ask_timed(session: &mut ReasoningSession, settings: &cluely_rs::settings::Settings, lines: &[Line], label: &str) {
     let conversation = Conversation { lines: lines.to_vec(), now: Vec::new(), earlier: session.earlier(settings) }.render(true);
     let request = Request { action: "Ask".into(), question: "What budget did they mention for the pilot?".into(), history: Vec::new(),
-        conversation: conversation.clone(), screenshot: Some(screenshot()), utterance: None };
+        conversation: conversation.clone(), query: Vec::new(), screenshot: Some(screenshot()), attachments: Default::default(), utterance: None };
     let started = Instant::now();
     let (_, mut replies) = session.ask(settings, request).unwrap_or_else(|error| panic!("couldn't start: {error}"));
     let mut first = None;
@@ -208,7 +208,7 @@ fn prewarm(session: &ReasoningSession, settings: &cluely_rs::settings::Settings)
 /// One answer on the session's own thread, as a Live session would have had before.
 fn answer_first(session: &mut ReasoningSession, settings: &cluely_rs::settings::Settings, request: &Request) {
     let earlier = Request { action: request.action.clone(), question: request.question.clone(), history: Vec::new(),
-        conversation: request.conversation.clone(), screenshot: request.screenshot.clone(), utterance: None };
+        conversation: request.conversation.clone(), query: request.query.clone(), screenshot: request.screenshot.clone(), attachments: Default::default(), utterance: None };
     let started = Instant::now();
     let (_, mut replies) = session.ask(settings, earlier).unwrap_or_else(|error| panic!("couldn't start: {error}"));
     let mut first = None;

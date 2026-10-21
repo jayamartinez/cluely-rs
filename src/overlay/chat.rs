@@ -76,16 +76,21 @@ pub(super) fn action_icon(action: &str) -> Option<&'static str> {
     }
 }
 
-/// What was asked, right-aligned in an accent bubble: a quick action with its icon, or the typed question.
+/// What was asked, right-aligned in an accent bubble: a quick action with its icon, or the typed
+/// question, with the files attached to it under it (only the files when nothing was typed).
 pub(super) fn bubble(turn: &Turn) -> Div {
     let typed = !turn.question.is_empty();
     let label: SharedString = if typed { turn.question.clone().into() } else { turn.action.clone() };
     let icon = if typed { None } else { action_icon(&turn.action) };
-    div().flex().justify_end().child(div().max_w(px(420.0)).flex().items_center().gap(px(6.0)).px(px(12.0)).py(px(6.0))
+    let files = !turn.attachments.is_empty();
+    let bubble = div().max_w(px(420.0)).flex().items_center().gap(px(6.0)).px(px(12.0)).py(px(6.0))
         .rounded(px(theme::radius::BUBBLE)).border_1().border_color(theme::bubble_border()).bg(theme::bubble())
         .children(icon.map(|icon| ui::icon(icon, 13.0, theme::accent_soft())))
         .child(div().min_w_0().text_size(px(if typed { 13.0 } else { 12.0 })).line_height(px(16.0)).text_color(theme::text())
-            .when(!typed, |label| label.font_weight(FontWeight::SEMIBOLD)).child(label)))
+            .when(!typed, |label| label.font_weight(FontWeight::SEMIBOLD)).child(label));
+    div().flex().flex_col().items_end().gap(px(6.0))
+        .when(typed || !files, |asked| asked.child(bubble))
+        .when(files, |asked| asked.child(super::attach::sent(&turn.attachments)))
 }
 
 /// Above an answer that was given a screenshot.
@@ -109,7 +114,7 @@ mod tests {
 
     fn turn(id: u64, session: u64, status: Status) -> Turn {
         Turn { id, action: "Ask".into(), question: format!("question {id}"), text: format!("answer {id}"), status, at_ms: 0,
-            screenshot: None, auto: None, session }
+            screenshot: None, auto: None, session, attachments: std::sync::Arc::default(), cut: Vec::new() }
     }
 
     fn label(hour: u32, minute: u32) -> String {
@@ -150,7 +155,7 @@ mod tests {
         turns.push(turn(13, 2, Status::Done));
         let settings = Settings { provider: Provider::ApiKey, api_provider: "custom".into(), custom_base_url: "http://127.0.0.1:9/v1".into(),
             api_models: [("custom".to_string(), "m".to_string())].into(), ..Settings::default() };
-        let Target::Api(request, _) = build(&settings, &crate::codex::CodexClient::new(), "Assist", "", &history(&turns, 2), "", None).unwrap()
+        let Target::Api(request, _) = build(&settings, &crate::codex::CodexClient::new(), "Assist", "", &history(&turns, 2), "", &[], None, &[]).unwrap()
             else { panic!("API") };
         let texts: Vec<String> = request.messages.iter().map(|m| match &m.parts[0] { Part::Text(text) => text.clone(), Part::Jpeg(_) => String::new() }).collect();
         assert_eq!(texts.len(), 3, "one earlier exchange and the new turn: {texts:?}");

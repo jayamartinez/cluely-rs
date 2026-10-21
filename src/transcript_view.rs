@@ -74,7 +74,7 @@ impl Overlay {
             cx.notify();
             return;
         }
-        let (listening, mut messages) = Listening::start(provider, sources, self.store.value.devices(), self.metrics.clone());
+        let (listening, mut messages) = Listening::start(provider, sources, self.store.value.devices(), self.store.value.echo_cancellation, self.metrics.clone());
         self.listening = Some(listening);
         self.listening_status = Some(Status::Starting);
         cx.notify();
